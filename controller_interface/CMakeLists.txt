@@ -53,6 +53,14 @@ if(BUILD_TESTING)
     hardware_interface::hardware_interface
   )
 
+  ament_add_gmock(
+    test_hierarchical_controller_interface
+    test/test_hierarchical_controller_interface.cpp
+  )
+  target_link_libraries(test_hierarchical_controller_interface
+    controller_interface
+  )
+
   ament_add_gmock(test_semantic_component_interface test/test_semantic_component_interface.cpp)
   target_link_libraries(test_semantic_component_interface
     controller_interface

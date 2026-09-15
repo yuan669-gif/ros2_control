@@ -149,6 +149,30 @@ if(BUILD_TESTING)
     ros2_control_test_assets
   )
 
+  ament_add_gmock(test_hierarchy
+    test/test_hierarchy.cpp
+  )
+  target_include_directories(test_hierarchy PRIVATE include)
+  target_link_libraries(test_hierarchy controller_manager)
+
+  ament_add_gmock(test_urdf_hierarchy
+    test/test_urdf_hierarchy.cpp
+  )
+  target_include_directories(test_urdf_hierarchy PRIVATE include)
+  target_link_libraries(test_urdf_hierarchy controller_manager)
+
+  ament_add_gmock(test_hierarchical_controller_executor
+    test/test_hierarchical_controller_executor.cpp
+  )
+  target_include_directories(test_hierarchical_controller_executor PRIVATE include)
+  target_link_libraries(test_hierarchical_controller_executor controller_manager)
+
+  ament_add_gmock(test_controller_hierarchy_builder
+    test/test_controller_hierarchy_builder.cpp
+  )
+  target_include_directories(test_controller_hierarchy_builder PRIVATE include)
+  target_link_libraries(test_controller_hierarchy_builder controller_manager)
+
   add_library(test_controller_with_interfaces SHARED
     test/test_controller_with_interfaces/test_controller_with_interfaces.cpp
   )
