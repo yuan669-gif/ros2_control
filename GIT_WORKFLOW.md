@@ -1,28 +1,23 @@
-# Git workflow for the Humble prototype
+# Humble Git workflow
 
-This directory is based on the ROS 2 Humble `ros2_control` branch.
+Use the normal .git in D:/2027-1/FineMote/ros2_control.
+The old external metadata workflow and its baseline hashes were incorrect. Do not use them.
 
-Because the downloaded repository's `.git` directory is read-only in the current workspace, the
-writable Git metadata is stored outside the source tree:
-
-```text
-D:/2027-1/FineMote/.git-ros2control-humble
-```
-
-Use these commands from `D:/2027-1/FineMote`:
+- Branch: humble (tracks upstream/humble).
+- origin: https://github.com/yuan669-gif/ros2_control.git (user fork).
+- upstream: https://github.com/ros-controls/ros2_control.git (official source).
+- baseline-humble: 469f3055da3b0f097d0616c8b214072434529053.
+- v1-hierarchical-prototype: c9e6452a (experimental; not integrated into the manager).
+- Research contract: a2ff98a2.
 
 ```powershell
-$meta = 'D:/2027-1/FineMote/.git-ros2control-humble'
-$work = 'D:/2027-1/FineMote/ros2_control_humble'
-git --git-dir=$meta --work-tree=$work status
-git --git-dir=$meta --work-tree=$work log --oneline --decorate --all
-git --git-dir=$meta --work-tree=$work diff baseline-humble..master
+cd D:\2027-1\FineMote\ros2_control
+git status --short --branch
+git log --oneline --decorate -5
+git diff baseline-humble..HEAD
 ```
 
-Branches/commits:
+When publishing is requested, explicitly target origin, not official upstream.
+Do not force-push shared history as a routine update.
 
-- `baseline-humble` (`17f8df7`): unmodified upstream ROS 2 Humble source tree.
-- `master` (`9a8f041`): first hierarchical-controller prototype, followed by cleanup of temporary
-  metadata.
-
-For future changes, commit to `master` and compare against `baseline-humble` before each milestone.
+Read doc/HANDOFF_2026-09-19.md for research status and next steps.
