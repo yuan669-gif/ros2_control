@@ -48,6 +48,11 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gmock REQUIRED)
   find_package(ros2_control_test_assets REQUIRED)
 
+  add_executable(test_cycle_tree_contract test/test_cycle_tree_standalone.cpp)
+  target_compile_features(test_cycle_tree_contract PRIVATE cxx_std_17)
+  target_include_directories(test_cycle_tree_contract PRIVATE include)
+  add_test(NAME test_cycle_tree_contract COMMAND test_cycle_tree_contract)
+
   # Plugin Libraries that are built and installed for use in testing
   add_library(test_controller SHARED test/test_controller/test_controller.cpp)
   target_link_libraries(test_controller PUBLIC controller_manager)

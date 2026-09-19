@@ -2,6 +2,11 @@
 
 Scope: ROS 2 Humble, upstream baseline 469f3055da3b0f097d0616c8b214072434529053.
 
+Update 2026-09-19: see `CYCLE_TREE_EXPERIMENT.md` for the implemented standalone scalar-port
+cycle/commit experiment, local validation, VM instructions and remaining integration work.
+The user-selected direction now uses resolved interface connections to derive the execution tree;
+explicit parents are optional composition metadata and cannot override interface dependencies.
+
 ## Corrections to the initial proposal
 
 - A vector is a storage choice, not evidence of absent hierarchy. A dependency graph can be
@@ -51,7 +56,7 @@ Each reference slot has a sole parent writer and child reader, with produced cyc
 Bindings are resolved and checked outside the real-time loop. No runtime string lookup or topology
 construction is needed. Physical command ownership remains with ResourceManager.
 
-First prototype: one synchronous frequency, one root, explicit YAML parents, no cross-tree edges,
+First prototype: one synchronous frequency, one root, resolved interface connections, no cross-tree edges,
 no asynchronous callbacks accessing phase storage, no dynamic topology changes while active.
 URDF verifies joint existence and anchors; it does not infer algorithms or mandatory control order.
 
