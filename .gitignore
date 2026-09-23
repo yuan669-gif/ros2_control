@@ -1,0 +1,47 @@
+# --- ROS 2 / colcon build artefacts ---------------------------------------------------------
+# The workspace keeps build/, install/ and log/ inside the tree (≈1.1 GB), so they must never be
+# committed. `log/` also contains local diagnostic probes and is deliberately ignored wholesale.
+build/
+install/
+log/
+build_standalone/
+*.o
+*.a
+*.so
+*.so.*
+
+# --- CMake -----------------------------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+Testing/
+
+# --- editors / tooling -----------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.cache/
+.clangd/
+
+# --- Python ---------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- ROS local state ------------------------------------------------------------------------
+.ros/
+.gazebo/
+*.bag
+
+# --- third-party material kept only for local reference --------------------------------------
+# FineMote is the学长's embedded framework (source + paper). It is reference material for this
+# research, not part of the deliverable, and it is many MB of vendored code and prebuilt archives.
+# Excluded so the repository stays reviewable.
+FineMote-main/
+FineMote-main.zip
+FineMote系统内版本.pdf
+FineMote论文_文本.txt

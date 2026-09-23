@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hierarchical_control_case_study</name>
+  <version>0.1.0</version>
+  <description>Gazebo case study: single-pass vs two-pass hierarchical controller execution.</description>
+  <maintainer email="research@example.com">FineMote x ros2_control research</maintainer>
+  <license>Apache License 2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>controller_interface</depend>
+  <depend>controller_manager</depend>
+  <depend>hardware_interface</depend>
+  <depend>hierarchical_control</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>std_msgs</depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>gazebo_ros2_control</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

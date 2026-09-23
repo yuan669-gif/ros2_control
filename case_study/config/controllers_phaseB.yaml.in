@@ -1,0 +1,40 @@
+controller_manager:
+  ros__parameters:
+    update_rate: __RATE__
+    use_sim_time: true
+    two_phase_execution: __TWO_PHASE__
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    wheel_left:
+      type: case_study/WheelController
+    wheel_right:
+      type: case_study/WheelController
+    chassis:
+      type: case_study/ChassisController
+
+wheel_left:
+  ros__parameters:
+    joint: left_wheel_joint
+    wheel_radius: 0.1
+    kp: 4.0
+    ki: 0.5
+    two_phase_legacy: __LEGACY__
+
+wheel_right:
+  ros__parameters:
+    joint: right_wheel_joint
+    wheel_radius: 0.1
+    kp: 4.0
+    ki: 0.5
+    two_phase_legacy: __LEGACY__
+
+chassis:
+  ros__parameters:
+    left_wheel_controller: wheel_left
+    right_wheel_controller: wheel_right
+    wheel_radius: 0.1
+    track: 0.34
+    kx: 0.8
+    ky: 1.0
+    kth: 1.2
+    two_phase_legacy: __LEGACY__

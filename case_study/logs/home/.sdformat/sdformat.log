@@ -1,0 +1,66 @@
+Dbg [parser.cc:574] Converting a deprecated source[/home/mamingyuan/Desktop/ros2_control-humble/case_study/world/case_study.world].
+Dbg [Converter.cc:68] Version[1.6] to Version[1.7]
+  Please use the gz sdf tool to update your SDF files.
+    $ gz sdf -c [sdf_file]
+Dbg [parser.cc:574] Converting a deprecated source[/usr/share/gazebo-11/models/ground_plane/model.sdf].
+Dbg [Converter.cc:68] Version[1.5] to Version[1.7]
+  Please use the gz sdf tool to update your SDF files.
+    $ gz sdf -c [sdf_file]
+Dbg [parser.cc:574] Converting a deprecated source[/usr/share/gazebo-11/models/sun/model.sdf].
+Dbg [Converter.cc:68] Version[1.5] to Version[1.7]
+  Please use the gz sdf tool to update your SDF files.
+    $ gz sdf -c [sdf_file]
+Dbg [parser_urdf.cc:1515] extension [<plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control"><parameters>/home/mamingyuan/Desktop/ros2_control-humble/case_study/logs/run_50hz_two-pass/controllers.yaml</parameters><ros><namespace>/</namespace></ros></plugin>] not converted from URDF, probably already in SDF format.
+Dbg [parser_urdf.cc:422] Fixed Joint Reduction: extension lumping from [caster] to [base_link]
+Dbg [parser_urdf.cc:2477]   REDUCE EXTENSION: moving reference from [caster] to [base_link]
+Dbg [parser_urdf.cc:2543]   STRING REPLACE: instances of _link name [caster] with [base_link]
+Dbg [parser_urdf.cc:2551]         INITIAL STRING link [caster]-->[base_link]: [<plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control"><parameters>/home/mamingyuan/Desktop/ros2_control-humble/case_study/logs/run_50hz_two-pass/controllers.yaml</parameters><ros><namespace>/</namespace></ros></plugin>]
+Dbg [parser_urdf.cc:2543]   STRING REPLACE: instances of _link name [caster] with [base_link]
+Dbg [parser_urdf.cc:2543]   STRING REPLACE: instances of _link name [caster] with [base_link]
+Dbg [parser_urdf.cc:2543]   STRING REPLACE: instances of _link name [caster] with [base_link]
+Dbg [parser_urdf.cc:2543]   STRING REPLACE: instances of _link name [caster] with [base_link]
+Dbg [parser_urdf.cc:721] LINK NAME: [parent: base_link] from dMass
+Dbg [parser_urdf.cc:722]      MASS: [5]
+Dbg [parser_urdf.cc:723]        CG: [0, 0, 0]
+Dbg [parser_urdf.cc:725]         I: [0.05, 0, 0]
+Dbg [parser_urdf.cc:727]            [0, 0.08, 0]
+Dbg [parser_urdf.cc:729]            [0, 0, 0.1]
+Dbg [parser_urdf.cc:721] LINK NAME: [link : caster] from dMass
+Dbg [parser_urdf.cc:722]      MASS: [0.1]
+Dbg [parser_urdf.cc:723]        CG: [0, 0, 0]
+Dbg [parser_urdf.cc:725]         I: [0.0001, 0, 0]
+Dbg [parser_urdf.cc:727]            [0, 0.0001, 0]
+Dbg [parser_urdf.cc:729]            [0, 0, 0.0001]
+Dbg [parser_urdf.cc:721] LINK NAME: [link in parent link: caster] from dMass
+Dbg [parser_urdf.cc:722]      MASS: [0.1]
+Dbg [parser_urdf.cc:723]        CG: [-0.17, 0, -0.08]
+Dbg [parser_urdf.cc:725]         I: [0.00074, 0, -0.00136]
+Dbg [parser_urdf.cc:727]            [0, 0.00363, 0]
+Dbg [parser_urdf.cc:729]            [-0.00136, 0, 0.00299]
+Dbg [parser_urdf.cc:721] LINK NAME: [combined: base_link] from dMass
+Dbg [parser_urdf.cc:722]      MASS: [5.1]
+Dbg [parser_urdf.cc:723]        CG: [-0.00333333, 0, -0.00156863]
+Dbg [parser_urdf.cc:725]         I: [0.05074, 0, -0.00136]
+Dbg [parser_urdf.cc:727]            [0, 0.08363, 0]
+Dbg [parser_urdf.cc:729]            [-0.00136, 0, 0.10299]
+Dbg [parser_urdf.cc:737] LINK NAME: [base_link] from dMass
+Dbg [parser_urdf.cc:738]      MASS: [5.1]
+Dbg [parser_urdf.cc:739]        CG: [-0.00333333, 0, -0.00156863]
+Dbg [parser_urdf.cc:742]         I: [0.0507275, 0, -0.00133333]
+Dbg [parser_urdf.cc:745]            [0, 0.0835608, 0]
+Dbg [parser_urdf.cc:748]            [-0.00133333, 0, 0.102933]
+Dbg [parser_urdf.cc:948] lumping visual [] for link [caster] to parent [base_link] with name [caster]
+Dbg [parser_urdf.cc:1007] lumping collision [] for link [caster] to parent [base_link] with name [caster]
+Dbg [parser_urdf.cc:2748] [base_link] has no parent joint
+Dbg [parser_urdf.cc:2792] creating collision for link [base_link] collision []
+Dbg [parser_urdf.cc:2792] creating collision for link [base_link] collision [caster]
+Dbg [parser_urdf.cc:2837] creating visual for link [base_link] visual []
+Dbg [parser_urdf.cc:2837] creating visual for link [base_link] visual [caster]
+Dbg [parser_urdf.cc:2064] inserting extension with reference [base_link] into link.
+Dbg [parser_urdf.cc:2792] creating collision for link [left_wheel] collision []
+Dbg [parser_urdf.cc:2837] creating visual for link [left_wheel] visual []
+Dbg [parser_urdf.cc:2064] inserting extension with reference [left_wheel] into link.
+Dbg [parser_urdf.cc:2792] creating collision for link [right_wheel] collision []
+Dbg [parser_urdf.cc:2837] creating visual for link [right_wheel] visual []
+Dbg [parser_urdf.cc:2064] inserting extension with reference [right_wheel] into link.
+Dbg [parser.cc:483] Parsing from urdf.

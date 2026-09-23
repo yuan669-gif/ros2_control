@@ -1,0 +1,12 @@
+<library path="case_study_controllers">
+  <class name="case_study/WheelController"
+         type="case_study::WheelController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>Leaf wheel controller publishing non-re-derivable travel state.</description>
+  </class>
+  <class name="case_study/ChassisController"
+         type="case_study::ChassisController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>Root chassis controller consuming wheel travel and producing wheel references.</description>
+  </class>
+</library>
