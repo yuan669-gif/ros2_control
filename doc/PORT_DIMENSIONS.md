@@ -25,9 +25,10 @@
 
 ```cpp
 using wheel_ports = TypedPorts<
-  PortList<tire_target, wheel_travel>,   // 向父导出的 reference 端口
-  PortList<wheel_target>,                // 从父消费的 reference 端口
-  PortList<wheel_torque>>;               // 写入的执行器端口
+  PortList<wheel_travel>,    // 本节点自己的状态端口（父的状态阶段读它）
+  PortList<wheel_target>,    // 本节点接收的 reference 端口（父的命令阶段写它）
+  PortList<wheel_torque>,    // 写入的执行器端口
+  PortList<tire_target>>;    // （可选）本节点写进子节点的 reference 端口，仅用于父子静态检查
 
 class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { ... };
 ```
@@ -44,21 +45,31 @@ class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { .
 
 ## 1. 设计要点
 
-### 1.1 三组端口与内核语义的对应
+### 1.1 四组端口与内核语义的对应
 
 | 声明中的位置 | 含义 | 映射到内核的 |
 |---|---|---|
-| `Exported` | 本控制器**向父导出**的 reference 端口 | `staged_reference_ports()` **不**含它；它出现在 `staged_state_ports()` |
-| `Consumed` | 本控制器**从父消费**的 reference 端口 | `staged_reference_ports()` |
+| `State` | 本节点**发布**的状态端口（父的状态阶段直接读本节点的槽） | `staged_state_ports()`，**名字原样、不加后缀** |
+| `Reference` | 本节点**接收**的 reference（父的命令阶段写它） | `staged_reference_ports()` |
 | `Actuators` | 写入的硬件命令端口 | `staged_actuator_ports()` |
+| `ForChildren`（可选） | 本节点**写进子节点**的 reference | 不进内核；只给父子静态检查用 |
 
-`staged_state_ports()` 生成为每个导出/消费端口的 `"<name>/state"`。
+**内核到底用哪些信息**：`StagedExecutionGroup` 只用这三张表的 **长度** 来分配缓冲
+（`state_values_[i].assign(...size(), 0.0)` 等），**名字完全不参与**运行期逻辑——
+名字是给控制器自己的阶段做文档的。所以"长度正确"是硬性要求，"名字正确"由一个显式的
+自检函数（`verify_ports_match_interface`）负责。
 
-**为什么这样映射**：内核靠**名字**区分"拓扑 reference 边"与"内部 state 边"
-（`create_library` 的检查会分别报
-`root node ... declares reference ports but no reference source` 与
-`... declares actuator ports but no commit sink`）。测试实跑时先后触发了这两条，
-说明映射与内核期望一致。
+**2026-09-24 修正（这是一个真实缺陷，值得记录）**：更早的版本只有三组端口，并把
+`staged_state_ports()` 定义为"`Exported` 与 `Consumed` 各加 `/state` 后缀后拼接"。
+这把三件不同的事混在了一起并**多算了槽位**：一个只有 1 个自身状态、1 个接收 reference 的
+节点会拿到 **3 个** 状态槽，若它还往子节点写 reference 就更多。由于内核会给状态槽预填 NaN
+并要求"声明的端口都必须写"（评审 R3 的完整性检查），一个只写自己真实状态的控制器会**每个
+周期都以 `state_failed` 失败**；它的父节点拿到的"子状态视图"里还混着根本不是状态的槽位。
+
+**同一处修正**：`declarations_are_compatible<Parent, Child>` 原来比较"父的整个 `Exported`
+列表"与"子的 `Consumed` 列表"，于是会把一对**正确**的 wheel/tire 判为不兼容——一个假阳性，
+而 `test_typed_ports` 当时把这个假阳性写成了期望行为。现在它比较"父声明写进子节点的
+reference"与"子声明接收的 reference"（`ForChildren` vs `Reference`），量纲检查仍然生效。
 
 ### 1.2 为什么用 mixin
 
@@ -102,14 +113,15 @@ constexpr bool declarations_are_compatible() noexcept;
 |---|---|
 | 静态声明的端口、经 mixin 生成字符串 | ✅ |
 | 父子端口的**名字 + 顺序 + 量纲**一致性 | ✅ |
-| 控制器自报端口与声明不一致（绕过 mixin） | ⚠ 由 `verify_ports_match_interface` **运行期**发现，非编译期（构造控制器不是常量表达式） |
+| 控制器自报端口与声明不一致（绕过 mixin） | ✅ `verify_ports_match_interface`（三张表全查，含状态端口）、`verify_ports_match_contract`（与绑定的 `Contract` 对齐）、`topology_binding::verify_binding_ports`（沿类型链整棵树一次查完）。都是**运行期**调用，不是编译期（构造控制器不是常量表达式） |
+| **执行器端口**与 `Contract` 的一致性 | ❌ **查不了**：`Contract` 有意不含硬件执行器端口，没有可比对象。用 `verify_ports_match_interface` 才能查它 |
 | 单位（米/毫米） | ❌ 量纲相同，不检查 |
 | 输出缩放、坐标系、符号 | ❌ 语义问题 |
 | YAML / `pluginlib` 动态拓扑 | ❌ 不覆盖 |
-| **状态端口的量纲** | ❌ **未建模**——`staged_state_ports()` 同时承载"发布给父的状态"与"从子消费的状态"，内核按拓扑而非按名字区分；在类型层建模会与内核规则重复。`Contract` 里仍带状态端口供**所有权与量纲**检查用 |
+| **状态端口的量纲** | ⚠ 部分建模：`State` 现在是**独立的一组端口**（不再与 reference 混在一起），所以它的名字与量纲进入了 `Contract::produced` 并参与所有权检查；但"父读子状态"这条边本身**没有**静态成对检查——父拿到的子状态视图来自内核按 `parents` 建的拓扑，父并不声明它要读子节点的哪些状态。要静态检查这条边需要父声明子状态端口，目前**没做** |
 
-**最后一行需要明说**：本原型把**reference / actuator** 端口打通到类型层，
-**状态端口的语义区分没有**下探到类型层。
+**需要明说**：现在 `State` / `Reference` / `Actuators` 三组都打通到了类型层，
+**父子之间的状态边**（父读子状态）还没有静态成对检查，`ForChildren` 只覆盖 reference 方向。
 
 ---
 

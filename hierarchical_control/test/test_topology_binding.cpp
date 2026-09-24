@@ -110,6 +110,32 @@ StubController g_leaf{"leaf"};
 const auto g_leaf_binding = tc::make_leaf<leaf_t, leaf_contract>(&g_leaf);
 const auto g_mid_binding = tc::compose<mid_t, mid_contract>(&g_mid, g_leaf_binding);
 const auto g_root_binding = tc::compose<root_t, root_contract>(&g_root, g_mid_binding);
+
+// ---- a controller whose runtime port strings MATCH its contract ------------------------------
+// `Contract::produced` is the state this node publishes and `consumed` is the reference it
+// receives; `typed_ports::TypedPorts` maps State -> produced and Reference -> consumed the same way.
+struct c_state_n
+{
+  static constexpr auto value = st::NameOf("coherent/state");
+};
+struct c_ref_n
+{
+  static constexpr auto value = st::NameOf("coherent/ref");
+};
+using c_state = tc::Port<c_state_n, dm::Position>;
+using c_ref = tc::Port<c_ref_n, dm::LinearVelocity>;
+using coherent_contract = tc::Contract<tc::PortList<c_state>, tc::PortList<c_ref>>;
+
+class CoherentController : public StubController
+{
+public:
+  CoherentController() : StubController("coherent") {}
+  std::vector<std::string> staged_state_ports() const override {return {"coherent/state"};}
+  std::vector<std::string> staged_reference_ports() const override {return {"coherent/ref"};}
+};
+
+CoherentController g_coherent;
+const auto g_coherent_binding = tc::make_leaf<leaf_t, coherent_contract>(&g_coherent);
 }  // namespace
 
 /// The adapted Spec preserves names, parents and instances in root-first order.
@@ -228,4 +254,31 @@ TEST(TopologyBinding, a_single_node_binding_builds_a_one_member_group)
   auto group = tb::create_library_group(only);
   ASSERT_NE(nullptr, group);
   EXPECT_EQ(1u, group->size());
+}
+
+/// The binding-level port verifier ties the CHECKED topology to the RUNTIME port lists the kernel
+/// sizes its buffers from. Building a controller instance is not a constant expression, so this
+/// cannot be a compile-time check; it is a start-up call.
+///
+/// It is also where the two conventions in this repository meet, so the test states them:
+///   * `Contract::produced` = the state ports this node PUBLISHES (its parent's state stage reads
+///     them);
+///   * `Contract::consumed` = the reference ports this node RECEIVES (its parent's command stage
+///     writes them).
+/// `typed_ports::TypedPorts` uses exactly that mapping (State -> produced, Reference -> consumed).
+TEST(TopologyBinding, binding_level_port_verification)
+{
+  std::string reason;
+  EXPECT_TRUE(tb::verify_binding_ports(g_coherent_binding, &reason)) << reason;
+  EXPECT_TRUE(reason.empty());
+
+  // The minimal `StubController` used by the rest of this file reports ONE state port and no
+  // reference port whatever contract it is bound with. The verifier reports it, and the message
+  // names the node and the list that disagrees -- this is the check that keeps a hand-written port
+  // list from silently disagreeing with the topology that was checked for it.
+  EXPECT_FALSE(tb::verify_binding_ports(g_root_binding, &reason));
+  EXPECT_NE(std::string::npos, reason.find("root")) << reason;
+  // `root_contract` declares no produced ports, while the minimal stub always reports one state
+  // port: the verifier names the node and the list that disagrees.
+  EXPECT_NE(std::string::npos, reason.find("staged_state_ports")) << reason;
 }

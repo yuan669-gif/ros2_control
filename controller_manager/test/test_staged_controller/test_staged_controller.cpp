@@ -329,6 +329,8 @@ void TestStagedController::set_fail_command(bool value) {fail_command_ = value;}
 
 void TestStagedController::set_fail_handle(bool value) {fail_handle_ = value;}
 
+void TestStagedController::set_fail_update(bool value) {fail_update_ = value;}
+
 void TestStagedController::set_fail_commit(bool value) {fail_commit_ = value;}
 
 void TestStagedController::set_emit_nan(bool value) {emit_nan_ = value;}
@@ -344,6 +346,7 @@ controller_interface::return_type TestStagedController::update_phase(
   const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/) noexcept
 {
   ++update_phase_calls;
+  if (fail_update_) {return controller_interface::return_type::ERROR;}
   const double child_estimate =
     two_phase_child_ ? two_phase_child_->two_phase_estimate_ : two_phase_input_;
   // Deliberately non-re-derivable: the node's estimate depends on its own history plus the

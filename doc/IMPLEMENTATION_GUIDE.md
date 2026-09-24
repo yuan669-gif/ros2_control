@@ -421,6 +421,13 @@ if (run_two_phase) {
   或声明了不等于管理器频率的 `update_rate`，`set_two_phase_execution(true)` 返回 `ERROR`
   且**不改变**任何状态；反方向由 `set_staged_execution_group()` 镜像拒绝。
   这保证了一个控制器**每周期最多被一条路径执行一次**；
+- **故障包含**（2026-09-24）：**任一** `update_phase` 失败 ⇒ 该周期**整趟命令阶段都不跑**，
+  命令接口保持上一周期值，管理器返回 `ERROR`。理由：控制器刚否掉了自己的状态，
+  就不该用该状态算命令，其上游也不可信。**这不是**整组原子提交（命令阶段已写出的值不会回滚，
+  实测见下）；
+- **切换期间**（2026-09-24）：两趟被暂停时，成员**不会**被原生单趟循环接管，
+  因此"一个控制器只有一条执行路径"在**任何时刻**都成立（staged 成员本来就是这样）。
+  旧实现把这句跳过判断绑在"两趟正在跑"上，切换的若干周期会把成员悄悄退回融合单趟语义；
 - 控制器侧的 `update_and_write_commands()` 在两阶段模式下**什么都不做**：
   ```cpp
   if (legacy_) { update_phase(...); return handle_phase(...); }  // 单入口模式自己跑两阶段
@@ -632,7 +639,7 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | `dimensional_interfaces.hpp` | 量纲代数 | `Dimension<L,M,T,A>`、`multiply_t`、`divide_t`、`same_dimension_v` |
 | `topology_contract.hpp` | 端口所有权 + 计划 | `Port<N,D>`、`PortList<...>`、`Contract<P,C>`、`BoundNode`、`compose`、`make_leaf`、`build_spec_rows`、`require_ports_are_owned` |
 | `topology_binding.hpp` | 绑定 → 执行组 | `to_library_spec(binding)`、`create_library_group(binding, max_age)` |
-| `typed_ports.hpp` | 端口单一声明 | `TypedPorts<E,C,A>`、`TypedPortsMixin<C,P>`、`contract_of_t`、`declarations_are_compatible` |
+| `typed_ports.hpp` | 端口单一声明 | `TypedPorts<State,Reference,Actuators,ForChildren>`、`TypedPortsMixin<C,P>`、`contract_of_t`、`declarations_are_compatible`、`verify_ports_match_interface`、`verify_ports_match_contract` |
 
 **边界（务必记住）**：
 
@@ -663,8 +670,8 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | 10 | **`Spec::parents` 接到配置（YAML/参数）** | 内核支持该字段，但**没有**配置入口。注意：两趟之后该字段**不是必需的** | `staged_execution_group.hpp` |
 | 11 | ~~库宿主的显式激活期建内核~~ **已于 2026-09-24 修复** | 内核改在 `on_activate()` 建（管理器先 `assign_interfaces()` 再 `activate()`，所以借用的接口此时已就绪），`on_deactivate()` 释放以免跨激活边界复用；`update()` 不再有任何建内核分支，缺内核直接返回 `ERROR`。`test_hierarchy_comparison` 新增断言：**激活后第一个 `update()` 分配数 = 0**（旧实现在这一周期分配） | `test_composite_library/generic_composite_controller.cpp` |
 | 12 | **`members_active_` 的非 switch 状态变化** | 缓存会过期，仅记为限制 | §8.1 |
-| 13 | **阶段 B 接到执行组端口声明** | 量纲与所有权**尚未**与 `staged_*_ports()` 的字符串名打通（目前只在 `Contract` 内检查） | `PORT_DIMENSIONS.md` §3 |
-| 14 | **状态端口的语义建模** | 见 §11 边界 | 同上 |
+| 13 | ~~阶段 B 接到执行组端口声明~~ **已于 2026-09-24 打通** | `TypedPorts<State, Reference, Actuators, ForChildren>` 四组端口；mixin 从类型**生成**内核要的三张字符串表；新增 `verify_ports_match_contract` 与 `topology_binding::verify_binding_ports`（沿类型链逐节点把**运行期端口**与**已检查的 `Contract`** 对齐）。同时修掉一个真实缺陷：旧的三组端口模型把"自身状态/接收 reference/写进子节点的 reference"混在一起，状态槽**多算**（1 个真实状态得到 3 个槽），而内核会给状态槽预填 NaN 并要求全部写出——只写真实状态的控制器会**每周期 `state_failed`**；`declarations_are_compatible` 也把正确的 wheel/tire 判为不兼容 | `typed_ports.hpp`、`topology_binding.hpp`、`PORT_DIMENSIONS.md` §1.1 |
+| 14 | **父子状态边的静态建模** | **未做**：`State` 已是独立一组并参与所有权/量纲检查，但"父读子的哪些状态"这条边没有静态成对检查（父不声明子状态端口），`ForChildren` 只覆盖 reference 方向 | `PORT_DIMENSIONS.md` §3 |
 | 15 | **深链编译成本优化** | `ancestry` 按值复制，成本随深度增长（8→64 层约 2.9 倍）；可改为沿父链查询 | `COMPILE_COST.md` §3 |
 | 16 | ~~诊断携带可读节点名~~ **已于 2026-09-24 完成** | `StagedExecutionGroup::node_name(index)` 返回组内字符串（越界返回 `"<none>"`，不抛异常、不分配）；管理器失败日志现在是 `at node 2 ('tp_module') (status 4, fault 0x52)`。`StagedResult` 仍只带索引，所以 `run_ns` 保持零分配 | `staged_execution_group.hpp`、`controller_manager.cpp` |
 
@@ -694,7 +701,7 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | 3 | legacy 与 two-phase 混用时**相对顺序无保证**（已写入 API 注释） |
 | 6 | 两趟模式的**非实时重构点**（switch/load/unload）在 `two_phase_enabled_ == false` 时**直接返回**：否则那些无谓的 `dynamic_cast`/`make_shared`/`sort` 会拉长切换，改变实时循环在切换期间完成的周期数——`test_controllers_chaining_with_controller_manager` 的计数器断言会因此失败（**这是实测到的回归**，已修） |
 | 4 | `plan_.preorder` 仍被赋值但内核不再使用（兼容保留） |
-| 5 | `test_controllers_chaining_with_controller_manager` 是**既有 flaky 测试**（负载下偶发计数偏差），本次改动未触碰原生 chaining 逻辑 |
+| 5 | `test_controllers_chaining_with_controller_manager` 是**既有 flaky 测试**：它断言精确的 `internal_counter`，而计数由 `ControllerManagerFixture::startCmUpdater` 的 10 ms 睡线程 tick 次数决定（一次切换需要 2 个 tick，偶尔变成 3 个）。**实测：空闲时 0/4 运行全绿，加 2 个 CPU 忙循环后 4/4 全绿**——与调度实现无关。详见 `doc/CODE_AUDIT_SCHEDULING_METAPROGRAMMING.md` §3.1。本次改动未触碰原生 chaining 逻辑；要根治需改该 fixture 的驱动方式（会波及所有用它的上游用例） |
 
 ---
 

@@ -82,6 +82,29 @@ auto kernel = hierarchical_control::StagedExecutionGroup::create_library(spec, m
 Both hosts make "add one node" a configuration change, and both keep the run path allocation-free
 after configuration.
 
+## Declaring ports once (compile-time layer)
+
+`StagedControllerInterface` declares its ports as runtime strings. `typed_ports.hpp` lets a
+controller declare them **once, as types**, and generates those strings from the declaration, so the
+two cannot drift:
+
+```cpp
+using wheel_ports = TypedPorts<
+  PortList<wheel_travel>,    // state this node publishes (its parent's state stage reads it)
+  PortList<wheel_target>,    // reference this node receives (its parent's command stage writes it)
+  PortList<wheel_torque>,    // actuator ports this node writes
+  PortList<tire_target>>;    // (optional) reference this node writes into its children
+
+class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { ... };
+```
+
+The kernel only uses the **lengths** of those three lists (it sizes per-node buffers from them); the
+names are checked separately by `verify_ports_match_interface()` / `verify_ports_match_contract()`,
+and `topology_binding::verify_binding_ports()` walks a whole checked binding at start-up.
+`declarations_are_compatible<Parent, Child>()` compares the reference ports the parent writes into
+its child against the ones the child declares it receives -- by name, order **and physical
+dimension**. See `doc/PORT_DIMENSIONS.md` and `doc/TOPOLOGY_CONTRACT_JOIN.md`.
+
 ## Configuration-time validation
 
 `create()` / `create_library()` reject, before entering the real-time loop:
@@ -97,6 +120,12 @@ after configuration.
 - No multi-rate, asynchronous callbacks, dynamic topology changes or multi-tree support.
 - No lifecycle rollback protocol and no hardware fault action.
 - A software commit is not bus-level atomicity or simultaneous physical motion.
+- **The staged group and the manager-level two-phase path do NOT have the same guarantees.** The
+  staged group validates a whole cycle and commits all-or-nothing. The two-phase path
+  (`TwoPhaseControllerInterface`) is deliberately lighter: it has no per-cycle frames and no group
+  commit, so a failure late in its command pass leaves the earlier writes applied. Its only
+  containment rule is that a failed **state** stage suppresses the command stage for that cycle. If
+  you need atomic commit, use the staged group.
 - Not a real-time WCET proof. Measured overhead on a non-realtime VM was roughly 2x a single
   handwritten composite plugin for the same synthetic algorithm.
 - The manager host caches member activity and refreshes it only after a switch; a controller that

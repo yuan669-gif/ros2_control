@@ -503,4 +503,145 @@ TEST_F(TestTwoPhaseExecution, two_pass_costs_one_extra_traversal)
   EXPECT_GT(two_pass_us, 0.0);
 }
 
+/// A failed STATE stage suppresses the COMMAND stage for the whole cycle.
+///
+/// The two-phase contract has no cross-controller rollback (see `two_phase_mode_has_no_group_commit`),
+/// but it must not run a controller's command stage on the state that controller just rejected. The
+/// rule implemented here is the weakest honest one: if any state stage fails, no command stage runs
+/// in that cycle, so the command interfaces keep the previous cycle's values and nothing is
+/// half-computed from a rejected state.
+TEST_F(TestTwoPhaseExecution, a_failed_state_stage_suppresses_the_command_stage)
+{
+  auto root = std::make_shared<TestStagedController>();
+  auto mid = std::make_shared<TestStagedController>();
+  auto leaf = std::make_shared<TestStagedController>();
+
+  root->set_reference_interface_names({"command"});
+  root->set_command_interface_configuration(individual({std::string(kMid) + "/target"}));
+  root->set_state_interface_configuration(individual({}));
+  mid->set_reference_interface_names({"target"});
+  mid->set_command_interface_configuration(individual({std::string(kLeaf) + "/target"}));
+  mid->set_state_interface_configuration(individual({}));
+  leaf->set_reference_interface_names({"target"});
+  leaf->set_actuator_ports({"joint2/velocity"});
+  leaf->set_command_interface_configuration(individual({"joint2/velocity"}));
+  leaf->set_state_interface_configuration(individual({}));
+  root->set_two_phase_child(mid.get());
+  mid->set_two_phase_child(leaf.get());
+
+  ASSERT_NE(nullptr, cm_->add_controller(root, kRoot, kType));
+  ASSERT_NE(nullptr, cm_->add_controller(mid, kMid, kType));
+  ASSERT_NE(nullptr, cm_->add_controller(leaf, kLeaf, kType));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kMid));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+  ASSERT_TRUE(leaf->set_chained_mode(true));
+  ASSERT_TRUE(mid->set_chained_mode(true));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kMid}, {});
+  SwitchNow({kRoot}, {});
+
+  for (int cycle = 0; cycle < 3; ++cycle)
+  {
+    cm_->read(TIME, PERIOD);
+    ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+    cm_->write(TIME, PERIOD);
+  }
+
+  const int root_handle = root->handle_phase_calls;
+  const int mid_handle = mid->handle_phase_calls;
+  const int leaf_handle = leaf->handle_phase_calls;
+  const double leaf_command = leaf->command_interface_value();
+
+  // The LEAF's state stage fails. Pass 1 walks children first, so the root and mid state stages
+  // already ran; the command pass must not run at all.
+  leaf->set_fail_update(true);
+  cm_->read(TIME, PERIOD);
+  const auto failed = cm_->update(TIME, PERIOD);
+  cm_->write(TIME, PERIOD);
+
+  EXPECT_EQ(Return::ERROR, failed);
+  EXPECT_EQ(root_handle, root->handle_phase_calls) << "no command stage may run this cycle";
+  EXPECT_EQ(mid_handle, mid->handle_phase_calls) << "not even one that already had fresh state";
+  EXPECT_EQ(leaf_handle, leaf->handle_phase_calls);
+  EXPECT_DOUBLE_EQ(leaf_command, leaf->command_interface_value())
+    << "the actuator keeps the previous cycle's value";
+
+  // The containment is per cycle, not sticky: clearing the failure resumes normal operation.
+  leaf->set_fail_update(false);
+  cm_->read(TIME, PERIOD);
+  EXPECT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+  cm_->write(TIME, PERIOD);
+  EXPECT_EQ(root_handle + 1, root->handle_phase_calls);
+  EXPECT_EQ(leaf_handle + 1, leaf->handle_phase_calls);
+}
+
+/// A two-phase member is never executed by the native single-pass loop -- not even while a switch is
+/// pending and the two passes are paused.
+///
+/// Gating the native-loop skip on "the passes are running" instead would silently revert such a
+/// controller to the fused single-pass semantics for the few cycles a switch takes. The staged group
+/// already behaves this way (`owns()` is checked unconditionally), so this makes the two opt-in
+/// paths consistent and preserves the "one controller, one execution path" rule at all times.
+TEST_F(TestTwoPhaseExecution, a_member_is_never_run_by_the_native_loop_during_a_switch)
+{
+  auto first = std::make_shared<TestStagedController>();
+  auto second = std::make_shared<TestStagedController>();
+  const std::string kSecond = "tp_second";
+  // Distinct hardware ports: two controllers cannot claim the same command interface.
+  const std::vector<std::pair<std::shared_ptr<TestStagedController>, std::pair<std::string, std::string>>>
+    members{{first, {std::string(kLeaf), "joint2/velocity"}},
+            {second, {kSecond, "joint3/velocity"}}};
+  for (const auto & member : members)
+  {
+    member.first->set_reference_interface_names({"target"});
+    member.first->set_actuator_ports({member.second.second});
+    member.first->set_command_interface_configuration(individual({member.second.second}));
+    member.first->set_state_interface_configuration(individual({}));
+    member.first->set_two_phase_legacy(false);
+    ASSERT_NE(nullptr, cm_->add_controller(member.first, member.second.first, kType));
+    ASSERT_EQ(Return::OK, cm_->configure_controller(member.second.first));
+  }
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  SwitchNow({kLeaf}, {});
+
+  cm_->read(TIME, PERIOD);
+  ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+  const int legacy_before = first->legacy_update_calls;
+  const int phase_before = first->update_phase_calls;
+
+  // Activate the second member. `switch_controller` sets `do_switch`, so the two-phase passes are
+  // paused for every cycle until the switch is applied; those are exactly the cycles in which the
+  // native loop could pick the first member up if the skip were gated on `run_two_phase`.
+  int cycles_driven = 0;
+  auto future = std::async(
+    std::launch::async, &controller_manager::ControllerManager::switch_controller, cm_.get(),
+    std::vector<std::string>{kSecond}, std::vector<std::string>{}, STRICT, true,
+    rclcpp::Duration(0, 0));
+  for (int i = 0;
+       i < 400 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
+  {
+    cm_->read(TIME, PERIOD);
+    ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+    ++cycles_driven;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(5)));
+  ASSERT_EQ(Return::OK, future.get());
+
+  EXPECT_EQ(legacy_before, first->legacy_update_calls)
+    << "the native loop must never pick up a two-phase member";
+  EXPECT_LT(first->update_phase_calls, phase_before + cycles_driven)
+    << "at least one cycle must have been paused, otherwise this test proves nothing";
+
+  // Normal operation resumes afterwards, through the passes only.
+  const int phase_after_switch = first->update_phase_calls;
+  cm_->read(TIME, PERIOD);
+  ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+  EXPECT_EQ(phase_after_switch + 1, first->update_phase_calls);
+  EXPECT_EQ(legacy_before, first->legacy_update_calls);
+}
+
 }  // namespace

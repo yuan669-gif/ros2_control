@@ -2497,9 +2497,13 @@ controller_interface::return_type ControllerManager::update(
   update_loop_counter_ %= update_rate_;
 
   // Read the published membership once per cycle: one atomic load, no allocation, and the local
-  // shared_ptr keeps the vector alive for the whole cycle even if another thread retires it.
+  // shared_ptr keeps the vector alive for the whole cycle even if another thread retires it. When
+  // the feature is off the load is skipped entirely, so the default configuration does not pay for
+  // a feature it is not using.
   static const std::vector<TwoPhaseEntry> no_entries;
-  const auto two_phase_entries_holder = std::atomic_load(&two_phase_entries_);
+  const auto two_phase_entries_holder =
+    two_phase_enabled_ ? std::atomic_load(&two_phase_entries_)
+                       : std::shared_ptr<const std::vector<TwoPhaseEntry>>();
   const auto & entries = two_phase_entries_holder ? *two_phase_entries_holder : no_entries;
 
   // Opt-in staged group: explicit state (postorder) and command (preorder) phases, one group
@@ -2530,6 +2534,7 @@ controller_interface::return_type ControllerManager::update(
   // Pass 1 ("Update") walks it BACKWARD so children publish before parents consume.
   // Skipped while a switch is pending, because membership may be changing.
   const bool run_two_phase = two_phase_enabled_ && !entries.empty() && !switch_params_.do_switch;
+  bool two_phase_state_failed = false;
   if (run_two_phase)
   {
     for (std::size_t slot = rt_controller_list.size(); slot-- > 0;)
@@ -2542,9 +2547,16 @@ controller_interface::return_type ControllerManager::update(
         controller_interface::return_type::OK)
       {
         RCLCPP_ERROR(
-          get_logger(), "Two-phase update stage failed for controller '%s'.",
+          get_logger(),
+          "Two-phase update stage failed for controller '%s'; this cycle computes no commands.",
           spec.info.name.c_str());
         ret = controller_interface::return_type::ERROR;
+        // Containment, weakest form that is still honest: a controller that rejected its own state
+        // must not then have its command stage run on that state, and the parents downstream of it
+        // cannot be trusted either. The command pass is skipped for the WHOLE cycle instead of
+        // partially applied. The command interfaces keep the previous cycle's values; there is no
+        // rollback of anything a controller already wrote (see the header).
+        two_phase_state_failed = true;
       }
     }
   }
@@ -2559,7 +2571,13 @@ controller_interface::return_type ControllerManager::update(
       {
         continue;
       }
-      if (run_two_phase && two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
+      // Drive-by-one-path invariant: with two-phase execution ENABLED, a member is never executed
+      // by the native single-pass loop -- not even while a switch is pending and the passes are
+      // paused. Gating this on `run_two_phase` instead would silently switch such a controller back
+      // to the fused single-pass semantics for the few cycles a switch takes, which is exactly the
+      // scheduling behaviour the feature exists to replace (and would double-advance the state of a
+      // controller that implements both entry points).
+      if (two_phase_enabled_ && two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
       {
         continue;
       }
@@ -2594,7 +2612,14 @@ controller_interface::return_type ControllerManager::update(
   }
 
   // Pass 2 ("Handle") walks the same list FORWARD so parents publish references before children use.
-  if (run_two_phase)
+  if (run_two_phase && two_phase_state_failed)
+  {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Two-phase command stage skipped for this cycle because a state stage failed; the command "
+      "interfaces keep their previous values.");
+  }
+  else if (run_two_phase)
   {
     for (auto & spec : rt_controller_list)
     {

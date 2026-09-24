@@ -155,6 +155,12 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   void set_fail_handle(bool value);
 
+  /// Make the manager-level two-phase `update_phase()` fail, without touching the staged contract's
+  /// `update_state_stage()` or the native path. Used to check the containment rule: a failed state
+  /// stage must suppress the command stage for that cycle.
+  CONTROLLER_MANAGER_PUBLIC
+  void set_fail_update(bool value);
+
   CONTROLLER_MANAGER_PUBLIC
   void set_fail_commit(bool value);
 
@@ -235,6 +241,7 @@ private:
   bool fail_state_ = false;
   bool fail_command_ = false;
   bool fail_handle_ = false;
+  bool fail_update_ = false;
   bool fail_commit_ = false;
   bool emit_nan_ = false;
   double state_offset_ = 0.0;

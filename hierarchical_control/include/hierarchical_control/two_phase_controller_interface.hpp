@@ -27,6 +27,23 @@ namespace hierarchical_control
  * dependency that a single-pass schedule cannot.
  *
  * The mixin does not own execution order: the manager supplies it from its sorted controller list.
+ *
+ * FAILURE SEMANTICS (2026-09-24)
+ * ------------------------------
+ * There is NO cross-controller rollback: `handle_phase` writes straight into the controller's
+ * command interfaces, so a failure late in the command pass leaves the earlier writes applied.
+ * (Measured: a mid-level controller's claimed interface moved from -1.875 to -5.5625 in the same
+ * cycle in which the leaf's command stage failed. Do not read the staged group's "all-or-nothing"
+ * guarantee into this lighter path.)
+ *
+ * What IS guaranteed is the weakest rule that keeps a controller from acting on data it just
+ * rejected:
+ *
+ *   * if ANY `update_phase` fails in a cycle, NO `handle_phase` runs in that cycle -- the command
+ *     interfaces keep the previous cycle's values and the manager returns ERROR;
+ *   * while a switch is pending the passes are paused, and a member is NOT handed to the native
+ *     single-pass loop instead. It simply does not run in those cycles (the staged group behaves
+ *     the same way). This keeps "one controller, one execution path" true at all times.
  */
 class TwoPhaseControllerInterface
 {

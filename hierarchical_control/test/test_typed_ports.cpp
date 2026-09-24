@@ -56,14 +56,18 @@ using wheel_torque = tc::Port<wheel_torque_n, dm::Torque>;
 using wheel_travel = tc::Port<wheel_travel_n, dm::Position>;
 using tire_target = tc::Port<tire_target_n, dm::LinearVelocity>;
 
-// The wheel exports both a reference for its child (tire/target) and its own state (wheel/travel);
-// it consumes the reference its parent commands (wheel/target); it writes one actuator port.
+// Four separate facts, each matching what the kernel does with it:
+//   state     = the wheel's OWN state (its parent's state stage reads it out of the wheel's slots)
+//   reference = the reference the wheel RECEIVES (its parent's command stage writes it)
+//   actuators = the hardware port the wheel writes
+//   for_children = the reference the wheel writes INTO its tire (static parent/child check only)
 using wheel_ports = tp::TypedPorts<
-  tc::PortList<tire_target, wheel_travel>, tc::PortList<wheel_target>, tc::PortList<wheel_torque>>;
+  tc::PortList<wheel_travel>, tc::PortList<wheel_target>, tc::PortList<wheel_torque>,
+  tc::PortList<tire_target>>;
 
-// The tire consumes what the wheel exports.
+// The tire receives what the wheel writes into it, and publishes no state of its own.
 using tire_ports =
-  tp::TypedPorts<tc::PortList<>, tc::PortList<tire_target>, tc::PortList<>>;
+  tp::TypedPorts<tc::PortList<>, tc::PortList<tire_target>, tc::PortList<>, tc::PortList<>>;
 
 // ---- controllers ---------------------------------------------------------------------------
 
@@ -173,6 +177,44 @@ public:
   }
 };
 
+/// A controller that does NOT use the mixin: it hand-writes its port strings. That is exactly the
+/// case `verify_ports_match_interface` and `verify_ports_match_contract` exist to catch, and it
+/// cannot be expressed by deriving from the mixin because the mixin's accessors are `final`.
+class HandWrittenController : public hierarchical_control_test::MinimalController,
+                              public hierarchical_control::StagedControllerInterface
+{
+public:
+  explicit HandWrittenController(std::vector<std::string> state)
+  : MinimalController("hand_written"), state_(std::move(state))
+  {
+  }
+
+  std::vector<std::string> staged_state_ports() const override {return state_;}
+  std::vector<std::string> staged_reference_ports() const override {return {"wheel/target"};}
+  std::vector<std::string> staged_actuator_ports() const override {return {"wheel/torque"};}
+
+  Return update_state_stage(
+    const rclcpp::Time &, const rclcpp::Duration &,
+    const hierarchical_control::StagedContext &, const hierarchical_control::StagedInputView &,
+    hierarchical_control::StagedValueWriter) noexcept override
+  {
+    return Return::OK;
+  }
+
+  Return update_command_stage(
+    const rclcpp::Time &, const rclcpp::Duration &,
+    const hierarchical_control::StagedContext &, const hierarchical_control::StagedValueView &,
+    const hierarchical_control::StagedValueView &,
+    const hierarchical_control::StagedReferenceWriter &,
+    hierarchical_control::StagedValueWriter) noexcept override
+  {
+    return Return::OK;
+  }
+
+private:
+  std::vector<std::string> state_;
+};
+
 // ---- fixtures for the parent/child declaration check ----------------------------------------
 struct parent_out_n
 {
@@ -190,10 +232,13 @@ using parent_out = tc::Port<parent_out_n, dm::LinearVelocity>;
 using child_out = tc::Port<child_out_n, dm::LinearVelocity>;
 using child_out_wrong = tc::Port<child_out_wrong_n, dm::Position>;
 
-using agreeing_parent = tp::TypedPorts<tc::PortList<parent_out>, tc::PortList<>, tc::PortList<>>;
-using agreeing_child = tp::TypedPorts<tc::PortList<>, tc::PortList<child_out>, tc::PortList<>>;
+// The parent declares what it writes into its child; the child declares what it receives.
+using agreeing_parent = tp::TypedPorts<
+  tc::PortList<>, tc::PortList<>, tc::PortList<>, tc::PortList<parent_out>>;
+using agreeing_child =
+  tp::TypedPorts<tc::PortList<>, tc::PortList<child_out>, tc::PortList<>, tc::PortList<>>;
 using wrong_dimension_child =
-  tp::TypedPorts<tc::PortList<>, tc::PortList<child_out_wrong>, tc::PortList<>>;
+  tp::TypedPorts<tc::PortList<>, tc::PortList<child_out_wrong>, tc::PortList<>, tc::PortList<>>;
 
 // ---- topology ------------------------------------------------------------------------------
 struct wheel_node_n
@@ -219,10 +264,15 @@ TEST(TypedPorts, generated_strings_match_the_declaration)
 
   EXPECT_EQ((std::vector<std::string>{"wheel/target"}), controller.staged_reference_ports());
   EXPECT_EQ((std::vector<std::string>{"wheel/torque"}), controller.staged_actuator_ports());
-  // State ports are derived as "<port>/state" for exported then consumed ports.
-  EXPECT_EQ(
-    (std::vector<std::string>{"tire/target/state", "wheel/travel/state", "wheel/target/state"}),
-    controller.staged_state_ports());
+  // Exactly the declared state ports -- one, not three. The previous scheme appended "/state" to
+  // the exported AND the consumed list, which gave the kernel three state slots for a node with one
+  // real state port; since the kernel pre-fills state slots with NaN and requires all of them to be
+  // written, any controller that wrote only its real state would have failed every cycle.
+  EXPECT_EQ((std::vector<std::string>{"wheel/travel"}), controller.staged_state_ports());
+  // The counts the kernel sizes its buffers from.
+  static_assert(wheel_ports::kernel_state_slots == 1);
+  static_assert(wheel_ports::kernel_reference_slots == 1);
+  static_assert(wheel_ports::kernel_actuator_slots == 1);
 }
 
 /// The generated lists agree with the declaration; the checker is not vacuous, and it reports why
@@ -235,22 +285,78 @@ TEST(TypedPorts, interface_verification_succeeds_for_a_mixin_controller)
   EXPECT_TRUE(matches) << (reason ? reason : "");
 }
 
+/// The non-vacuous counterpart: the state list IS verified now. A controller whose state ports
+/// disagree with its declaration must be reported, with a reason that names the list.
+TEST(TypedPorts, interface_verification_rejects_a_state_port_mismatch)
+{
+  HandWrittenController controller({"not/a/state"});
+  const char * reason = nullptr;
+  const bool matches =
+    tp::verify_ports_match_interface<HandWrittenController, wheel_ports>(controller, &reason);
+  EXPECT_FALSE(matches);
+  ASSERT_NE(nullptr, reason);
+  EXPECT_NE(std::string::npos, std::string(reason).find("staged_state_ports"))
+    << "the reason must name the list that disagrees, got: " << reason;
+}
+
+/// A controller can be verified against the CONTRACT it was bound with, which is what ties the
+/// compile-time-checked topology to the runtime port lists the kernel sizes its buffers from.
+TEST(TypedPorts, a_controller_can_be_verified_against_its_contract)
+{
+  // The mixin makes a mismatch impossible, so it passes; the interesting case is a controller that
+  // hand-writes its strings.
+  WheelController mixin_controller;
+  const char * reason = nullptr;
+  EXPECT_TRUE(tp::verify_ports_match_contract<wheel_contract>(mixin_controller, &reason))
+    << (reason ? reason : "");
+
+  HandWrittenController agreeing({"wheel/travel"});
+  EXPECT_TRUE(tp::verify_ports_match_contract<wheel_contract>(agreeing, &reason))
+    << (reason ? reason : "");
+
+  // The check is not vacuous: one state port more than the contract declares would make the kernel
+  // allocate a state buffer the checked topology does not know about.
+  HandWrittenController extra({"wheel/travel", "wheel/extra"});
+  const char * extra_reason = nullptr;
+  EXPECT_FALSE(tp::verify_ports_match_contract<wheel_contract>(extra, &extra_reason));
+  ASSERT_NE(nullptr, extra_reason);
+  EXPECT_NE(std::string::npos, std::string(extra_reason).find("staged_state_ports"))
+    << "got: " << extra_reason;
+
+  // And a wrong reference count is reported against the reference list.
+  class WrongReference : public HandWrittenController
+  {
+  public:
+    WrongReference() : HandWrittenController({"wheel/travel"}) {}
+    std::vector<std::string> staged_reference_ports() const override {return {};}
+  };
+  WrongReference wrong_reference;
+  const char * reference_reason = nullptr;
+  EXPECT_FALSE(tp::verify_ports_match_contract<wheel_contract>(wrong_reference, &reference_reason));
+  ASSERT_NE(nullptr, reference_reason);
+  EXPECT_NE(std::string::npos, std::string(reference_reason).find("staged_reference_ports"))
+    << "got: " << reference_reason;
+}
+
 /// The derived contract carries the declared ports, so the topology checks see the same facts.
 TEST(TypedPorts, the_derived_contract_matches_the_declaration)
 {
-  static_assert(wheel_contract::produced_count == 2);
-  static_assert(wheel_contract::consumed_count == 1);
+  static_assert(wheel_contract::produced_count == 1, "the wheel's own state");
+  static_assert(wheel_contract::consumed_count == 1, "the reference the wheel receives");
   static_assert(tire_contract::produced_count == 0);
-  static_assert(tire_contract::consumed_count == 1);
+  static_assert(tire_contract::consumed_count == 1, "the reference the tire receives");
   SUCCEED();
 }
 
 /// A parent's exported ports must be exactly what its child consumes, in name, order and dimension.
 TEST(TypedPorts, declarations_of_a_parent_and_child_are_checked)
 {
-  // wheel exports {tire/target, wheel/travel} while tire consumes {tire/target}: these genuinely
-  // differ, so the pair must be reported as incompatible.
-  static_assert(!tp::declarations_are_compatible<wheel_ports, tire_ports>());
+  // The wheel declares that it writes `tire/target` into its child, and the tire declares that it
+  // receives `tire/target`: the pair AGREES. The previous revision compared the parent's whole
+  // exported list (which mixed its own state with the child-facing reference) against the child's
+  // reference list, so it reported this correct pair as incompatible and this test encoded that
+  // false positive as expected behaviour.
+  static_assert(tp::declarations_are_compatible<wheel_ports, tire_ports>());
 
   // A pair that does agree.
   static_assert(tp::declarations_are_compatible<agreeing_parent, agreeing_child>());
