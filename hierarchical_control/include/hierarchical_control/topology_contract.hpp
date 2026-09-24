@@ -54,6 +54,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "controller_interface/controller_interface_base.hpp"
 #include "hierarchical_control/dimensional_interfaces.hpp"
 #include "hierarchical_control/static_topology.hpp"
 
@@ -230,12 +231,17 @@ struct next_storage<void>
 };
 
 /// A topology node bound to its port contract and to its child (if any).
-template <typename Node, typename ContractT, typename Next = void>
+template <typename ControllerT, typename Node, typename ContractT, typename Next = void>
 struct BoundNode : next_storage<Next>
 {
+  using controller_type = ControllerT;
   using node_type = Node;
   using contract_type = ContractT;
   using next_type = Next;
+
+  static_assert(
+    std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
+    "topology_contract: the bound controller type must derive from ControllerInterfaceBase");
 
   static_assert(
     is_contract_v<ContractT>, "topology_contract: BoundNode needs a Contract for its ports");
@@ -243,7 +249,9 @@ struct BoundNode : next_storage<Next>
     st::is_valid_node_v<Node>,
     "topology_contract: BoundNode needs a well-formed static_topology node (most likely a cycle)");
 
-  void * instance = nullptr;
+  // Typed, NOT erased to void*: converting to a second base needs an address adjustment that a
+  // void* round trip would lose (review R5).
+  controller_interface::ControllerInterfaceBase * instance = nullptr;
 
   static constexpr std::string_view name() { return st::node_name<Node>(); }
 
@@ -251,22 +259,31 @@ struct BoundNode : next_storage<Next>
 };
 
 /// Compose a parent binding on top of an existing child binding.
-template <typename Node, typename ContractT, typename ChildBinding>
-constexpr BoundNode<Node, ContractT, ChildBinding> compose(
-  void * parent_instance, const ChildBinding & child)
+///
+/// The controller type is deduced from the argument, so the binding keeps a correctly adjusted
+/// `ControllerInterfaceBase*` and never sees a `void*`.
+template <typename Node, typename ContractT, typename ControllerT, typename ChildBinding>
+BoundNode<ControllerT, Node, ContractT, ChildBinding> compose(
+  ControllerT * parent_instance, const ChildBinding & child)
 {
-  BoundNode<Node, ContractT, ChildBinding> binding;
-  binding.instance = parent_instance;
+  static_assert(
+    std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
+    "topology_contract: compose needs a controller deriving from ControllerInterfaceBase");
+  BoundNode<ControllerT, Node, ContractT, ChildBinding> binding;
+  binding.instance = static_cast<controller_interface::ControllerInterfaceBase *>(parent_instance);
   binding.next = child;
   return binding;
 }
 
 /// Compose a leaf binding (no child).
-template <typename Node, typename ContractT>
-constexpr BoundNode<Node, ContractT, void> make_leaf(void * instance)
+template <typename Node, typename ContractT, typename ControllerT>
+BoundNode<ControllerT, Node, ContractT, void> make_leaf(ControllerT * instance)
 {
-  BoundNode<Node, ContractT, void> binding;
-  binding.instance = instance;
+  static_assert(
+    std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
+    "topology_contract: make_leaf needs a controller deriving from ControllerInterfaceBase");
+  BoundNode<ControllerT, Node, ContractT, void> binding;
+  binding.instance = static_cast<controller_interface::ControllerInterfaceBase *>(instance);
   return binding;
 }
 
@@ -345,7 +362,8 @@ constexpr void require_ports_are_owned()
 struct SpecRows
 {
   std::vector<std::string> names;
-  std::vector<void *> instances;
+  /// Typed base pointers, never void*: see the pointer-safety note in topology_binding.hpp.
+  std::vector<controller_interface::ControllerInterfaceBase *> instances;
   std::vector<std::string> parents;
 };
 

@@ -27,6 +27,7 @@
 #include <string_view>
 
 #include "hierarchical_control/topology_contract.hpp"
+#include "test_controller_stub.hpp"
 
 namespace tc = hierarchical_control::topology_contract;
 namespace st = hierarchical_control::static_topology;
@@ -78,13 +79,15 @@ using wheel_contract =
 // tire: consumes tire/target
 using tire_contract = tc::Contract<tc::PortList<>, tc::PortList<tire_target>>;
 
-int chassis_instance = 1;
-int wheel_instance = 2;
-int tire_instance = 3;
+// Real controller objects: the binding stores a TYPED ControllerInterfaceBase*, so a placeholder
+// integer no longer compiles (that is the intended tightening, see review R5).
+hierarchical_control_test::MinimalController chassis_instance{"chassis"};
+hierarchical_control_test::MinimalController wheel_instance{"wheel"};
+hierarchical_control_test::MinimalController tire_instance{"tire"};
 
-constexpr auto leaf = tc::make_leaf<tire, tire_contract>(&tire_instance);
-constexpr auto mid = tc::compose<wheel, wheel_contract>(&wheel_instance, leaf);
-constexpr auto root = tc::compose<chassis, chassis_contract>(&chassis_instance, mid);
+const auto leaf = tc::make_leaf<tire, tire_contract>(&tire_instance);
+const auto mid = tc::compose<wheel, wheel_contract>(&wheel_instance, leaf);
+const auto root = tc::compose<chassis, chassis_contract>(&chassis_instance, mid);
 }  // namespace
 
 /// The ownership invariant holds for a well-formed topology, and is checked at compile time.
@@ -121,9 +124,12 @@ TEST(TopologyContract, spec_rows_match_the_compile_time_topology)
   EXPECT_EQ("wheel", rows.parents[2]);
 
   // Instances are carried through unchanged, so the kernel gets the caller's controllers.
-  EXPECT_EQ(static_cast<void *>(&chassis_instance), rows.instances[0]);
-  EXPECT_EQ(static_cast<void *>(&wheel_instance), rows.instances[1]);
-  EXPECT_EQ(static_cast<void *>(&tire_instance), rows.instances[2]);
+  EXPECT_EQ(static_cast<controller_interface::ControllerInterfaceBase *>(&chassis_instance),
+            rows.instances[0]);
+  EXPECT_EQ(static_cast<controller_interface::ControllerInterfaceBase *>(&wheel_instance),
+            rows.instances[1]);
+  EXPECT_EQ(static_cast<controller_interface::ControllerInterfaceBase *>(&tire_instance),
+            rows.instances[2]);
 }
 
 /// The derived rows satisfy the same invariants the kernel enforces, so a binding cannot produce a
@@ -180,7 +186,7 @@ TEST(TopologyContract, well_formedness_checker_rejects_malformed_rows)
 /// A leaf-only topology is a legal degenerate case: one root, no children.
 TEST(TopologyContract, a_single_node_topology_is_legal)
 {
-  constexpr auto only = tc::make_leaf<chassis, chassis_contract>(&chassis_instance);
+  const auto only = tc::make_leaf<chassis, chassis_contract>(&chassis_instance);
   static_assert(tc::binding_depth<decltype(only)>() == 1);
   const auto rows = tc::build_spec_rows(only);
   ASSERT_EQ(1u, rows.names.size());

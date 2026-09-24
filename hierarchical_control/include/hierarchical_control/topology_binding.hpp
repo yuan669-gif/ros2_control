@@ -9,9 +9,24 @@
 //   dimensional_interfaces.hpp -- physical dimensions on interfaces
 //   topology_contract.hpp      -- one binding drives both the checks and the runtime Spec rows
 //
-// What was still missing is the last hop: `SpecRows` carries `void*` instances, while
-// StagedExecutionGroup::create_library wants `StagedControllerInterface*`. This header performs
-// that adaptation and nothing else.
+// What was still missing is the last hop: the binding carries controller instances while
+// StagedExecutionGroup::create_library wants a typed StagedControllerInterface*. This header
+// performs that adaptation.
+//
+// POINTER SAFETY (review R5)
+// --------------------------
+// An earlier revision exposed instance pointers as `void*` and recovered them with
+// `static_cast<StagedControllerInterface*>(raw)`. That is wrong as soon as a controller inherits
+// BOTH ControllerInterfaceBase and StagedControllerInterface: converting the object pointer to the
+// SECOND base requires an address adjustment, and a void* round trip loses it (measured: the
+// recovered pointer differed from the correctly adjusted one).
+//
+// The fix keeps the typed pointer on the path. The binding stores a `ControllerInterfaceBase*`
+// together with a typed accessor that performs `dynamic_cast<StagedControllerInterface*>` on it --
+// a conversion the runtime can perform correctly because the object is intact. No `void*` is
+// involved anywhere in the public entry points, so no unrelated pointer can enter them either.
+// bind_controller additionally rejects a controller type that is not derived from
+// ControllerInterfaceBase at compile time.
 //
 // It deliberately lives in its own header. `topology_contract.hpp` stays free of
 // `controller_interface` and rclcpp so it can be included in a lightweight translation unit; the
@@ -19,11 +34,10 @@
 //
 // WHAT IS CHECKED WHERE (no check is duplicated)
 // ----------------------------------------------
-//   * compile time : acyclicity (Node types), ownership and port dimensions (binding),
-//                    and that a binding whose own rows say "two roots" is rejected --
-//                    a single binding is a single chain and cannot have two.
-//   * here         : non-null instances; well-formed rows (length, unique names, one root,
-//                    parents exist, no self-parent) with a diagnostic that names the problem.
+//   * compile time : acyclicity (Node types), ownership and port dimensions (binding), and the
+//                    base-class relationship between the controller type and ControllerInterfaceBase.
+//   * here         : row lengths before indexing; non-null instances; well-formed rows (unique
+//                    names, one root, parents exist, no self-parent) with a named reason.
 //   * in the kernel: unknown parents, exactly one root, no cycle, no unreachable node, and the
 //                    controller interface contract (sinks/sources).
 //
@@ -39,8 +53,10 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
+#include "controller_interface/controller_interface_base.hpp"
 #include "hierarchical_control/staged_controller_interface.hpp"
 #include "hierarchical_control/staged_execution_group.hpp"
 #include "hierarchical_control/topology_contract.hpp"
@@ -62,16 +78,18 @@ inline std::size_t root_count(const tc::SpecRows & rows)
   return roots;
 }
 
-/// Convert a binding's rows into the kernel's Spec.
-///
-/// Throws std::invalid_argument when the binding is empty, contains a null instance, or its rows
-/// are not well formed. A single binding is a single chain, so more than one root in its rows is a
-/// contradiction in the binding itself and is rejected here rather than left to the kernel.
-inline StagedExecutionGroup::Spec to_library_spec(const tc::SpecRows & rows)
+/// Validate a row set and report a named reason. LENGTHS ARE CHECKED BEFORE ANY INDEXING, so a
+/// malformed `SpecRows` cannot cause an out-of-bounds read (review R5).
+inline void require_rows_are_usable(const tc::SpecRows & rows)
 {
   if (rows.names.empty())
   {
     throw std::invalid_argument("topology_binding: cannot build a group from an empty binding");
+  }
+  if (rows.instances.size() != rows.names.size() || rows.parents.size() != rows.names.size())
+  {
+    throw std::invalid_argument(
+      "topology_binding: names, instances and parents must have equal length");
   }
   for (std::size_t i = 0; i < rows.instances.size(); ++i)
   {
@@ -93,14 +111,37 @@ inline StagedExecutionGroup::Spec to_library_spec(const tc::SpecRows & rows)
       "topology_binding: a single binding must describe exactly one chain, so exactly one root is "
       "expected");
   }
+}
+
+/// Recover a `StagedControllerInterface*` from a bound instance pointer. The stored pointer is a
+/// `ControllerInterfaceBase*` for an intact object, so the downcast is well defined and performs
+/// any address adjustment the object layout requires.
+inline StagedControllerInterface * as_staged(controller_interface::ControllerInterfaceBase * base)
+{
+  if (base == nullptr) {return nullptr;}
+  return dynamic_cast<StagedControllerInterface *>(base);
+}
+
+/// Convert a binding's rows into the kernel's Spec.
+///
+/// Throws std::invalid_argument when the rows are unusable; see `require_rows_are_usable`.
+inline StagedExecutionGroup::Spec to_library_spec(const tc::SpecRows & rows)
+{
+  require_rows_are_usable(rows);
 
   StagedExecutionGroup::Spec spec;
   spec.names = rows.names;
   spec.parents = rows.parents;
   spec.instances.reserve(rows.instances.size());
-  for (void * raw : rows.instances)
+  for (auto * base : rows.instances)
   {
-    spec.instances.push_back(static_cast<StagedControllerInterface *>(raw));
+    auto * staged = as_staged(base);
+    if (staged == nullptr)
+    {
+      throw std::invalid_argument(
+        "topology_binding: a bound controller does not implement StagedControllerInterface");
+    }
+    spec.instances.push_back(staged);
   }
   return spec;
 }

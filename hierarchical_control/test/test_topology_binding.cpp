@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "hierarchical_control/topology_binding.hpp"
+#include "test_controller_stub.hpp"
 
 namespace tc = hierarchical_control::topology_contract;
 namespace tb = hierarchical_control::topology_binding;
@@ -32,11 +33,13 @@ using Return = controller_interface::return_type;
 namespace
 {
 /// A minimal staged controller: no ports, one state-stage call per cycle.
-class StubController : public hierarchical_control::StagedControllerInterface
+class StubController : public hierarchical_control_test::MinimalController,
+                       public hierarchical_control::StagedControllerInterface
 {
 public:
-  explicit StubController(std::string name) : name_(std::move(name)) {}
+  explicit StubController(std::string name) : MinimalController(std::move(name)) {}
 
+public:
   std::vector<std::string> staged_state_ports() const override { return {"value"}; }
 
   Return update_state_stage(
@@ -65,8 +68,6 @@ public:
   int state_calls = 0;
   int command_calls = 0;
 
-private:
-  std::string name_;
 };
 
 // A three-level topology.
@@ -194,21 +195,21 @@ TEST(TopologyBinding, malformed_plans_are_rejected_with_a_reason)
   {  // two roots
     tc::SpecRows rows;
     rows.names = {"a", "b"};
-    rows.instances = {static_cast<void *>(&g_root), static_cast<void *>(&g_mid)};
+    rows.instances = {static_cast<controller_interface::ControllerInterfaceBase *>(&g_root), static_cast<controller_interface::ControllerInterfaceBase *>(&g_mid)};
     rows.parents = {"", ""};
     EXPECT_THROW(tb::to_library_spec(rows), std::invalid_argument);
   }
   {  // duplicate names
     tc::SpecRows rows;
     rows.names = {"a", "a"};
-    rows.instances = {static_cast<void *>(&g_root), static_cast<void *>(&g_mid)};
+    rows.instances = {static_cast<controller_interface::ControllerInterfaceBase *>(&g_root), static_cast<controller_interface::ControllerInterfaceBase *>(&g_mid)};
     rows.parents = {"", "a"};
     EXPECT_THROW(tb::to_library_spec(rows), std::invalid_argument);
   }
   {  // self-parent
     tc::SpecRows rows;
     rows.names = {"a", "b"};
-    rows.instances = {static_cast<void *>(&g_root), static_cast<void *>(&g_mid)};
+    rows.instances = {static_cast<controller_interface::ControllerInterfaceBase *>(&g_root), static_cast<controller_interface::ControllerInterfaceBase *>(&g_mid)};
     rows.parents = {"", "b"};
     EXPECT_THROW(tb::to_library_spec(rows), std::invalid_argument);
   }

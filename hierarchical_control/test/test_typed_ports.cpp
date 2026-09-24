@@ -13,6 +13,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -20,6 +22,7 @@
 
 #include "hierarchical_control/topology_binding.hpp"
 #include "hierarchical_control/typed_ports.hpp"
+#include "test_controller_stub.hpp"
 
 namespace tp = hierarchical_control::typed_ports;
 namespace tc = hierarchical_control::topology_contract;
@@ -92,16 +95,21 @@ public:
   }
 };
 
-class WheelController : public tp::TypedPortsMixin<WheelController, wheel_ports>
+class WheelController : public hierarchical_control_test::MinimalController,
+                        public tp::TypedPortsMixin<WheelController, wheel_ports>
 {
 public:
+  WheelController() : MinimalController("wheel") {}
+
   Return update_state_stage(
     const rclcpp::Time &, const rclcpp::Duration &,
     const hierarchical_control::StagedContext &, const hierarchical_control::StagedInputView &,
     hierarchical_control::StagedValueWriter state) noexcept override
   {
     ++state_calls;
-    if (state.size() > 0) {state[0] = 1.0;}
+    // A controller must write EVERY declared state port; the kernel verifies completeness, so an
+    // unwritten port fails the cycle (review R3).
+    for (std::size_t i = 0; i < state.size(); ++i) {state[i] = 1.0;}
     return Return::OK;
   }
 
@@ -109,10 +117,17 @@ public:
     const rclcpp::Time &, const rclcpp::Duration &,
     const hierarchical_control::StagedContext &, const hierarchical_control::StagedValueView &,
     const hierarchical_control::StagedValueView &,
-    const hierarchical_control::StagedReferenceWriter &,
-    hierarchical_control::StagedValueWriter) noexcept override
+    const hierarchical_control::StagedReferenceWriter & children,
+    hierarchical_control::StagedValueWriter actuators) noexcept override
   {
     ++command_calls;
+    // A controller must WRITE every port it declares: the kernel now verifies completeness, so a
+    // declared-but-unwritten port fails the cycle instead of silently reusing the last value.
+    for (std::size_t c = 0; c < children.size(); ++c)
+    {
+      for (std::size_t p = 0; p < children[c].size(); ++p) {children[c][p] = 1.0;}
+    }
+    for (std::size_t i = 0; i < actuators.size(); ++i) {actuators[i] = 0.5;}
     return Return::OK;
   }
 
@@ -132,15 +147,18 @@ public:
   FixedReference reference;
 };
 
-class TireController : public tp::TypedPortsMixin<TireController, tire_ports>
+class TireController : public hierarchical_control_test::MinimalController,
+                       public tp::TypedPortsMixin<TireController, tire_ports>
 {
 public:
+  TireController() : MinimalController("tire") {}
+
   Return update_state_stage(
     const rclcpp::Time &, const rclcpp::Duration &,
     const hierarchical_control::StagedContext &, const hierarchical_control::StagedInputView &,
     hierarchical_control::StagedValueWriter state) noexcept override
   {
-    if (state.size() > 0) {state[0] = 2.0;}
+    for (std::size_t i = 0; i < state.size(); ++i) {state[i] = 2.0;}
     return Return::OK;
   }
 

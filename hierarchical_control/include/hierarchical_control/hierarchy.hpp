@@ -32,6 +32,108 @@ struct ControllerHierarchyPlan
   std::vector<std::size_t> postorder;
 };
 
+/// Derive each node's parent from the reference interfaces it claims.
+///
+/// ros2_control names interfaces "<owner>/<local>", so an entry in `claimed_interfaces[i]` whose
+/// owner is another node means node `i` is the CHILD of that owner: node `i` consumes a reference
+/// the owner produces. Entries whose owner is not a node of this group are ordinary hardware
+/// command interfaces and are ignored.
+///
+/// A node may claim SEVERAL ports of the same owner (a 2-D or 3-D reference is ordinary in
+/// control). That is one writer per port, not a conflict. A conflict is one PORT with two
+/// different writers, so uniqueness is checked per (owner, port) pair rather than per node.
+///
+/// Returns a vector parallel to `names`, with an empty string for a root. Throws
+/// std::invalid_argument when a single port is claimed by two different writers, or when a node
+/// claims a reference interface that would make it its own parent.
+inline std::vector<std::string> derive_parents_from_claimed_interfaces(
+  const std::vector<std::string> & names,
+  const std::vector<std::vector<std::string>> & claimed_interfaces)
+{
+  if (names.size() != claimed_interfaces.size())
+  {
+    throw std::invalid_argument(
+      "derive_parents_from_claimed_interfaces: names and claimed interfaces must be parallel");
+  }
+
+  std::unordered_map<std::string, std::size_t> index;
+  index.reserve(names.size());
+  for (std::size_t i = 0; i < names.size(); ++i)
+  {
+    if (names[i].empty())
+    {
+      throw std::invalid_argument("controller hierarchy node name must not be empty");
+    }
+    if (!index.emplace(names[i], i).second)
+    {
+      throw std::invalid_argument("duplicate controller hierarchy node: " + names[i]);
+    }
+  }
+
+  std::vector<std::string> parents(names.size());
+  // One entry per fully qualified port name, across ALL consumers, so that the same port claimed
+  // by two different consumers is detected as two writers.
+  std::unordered_map<std::string, std::string> port_writers;
+  port_writers.reserve(names.size());
+
+  for (std::size_t consumer = 0; consumer < names.size(); ++consumer)
+  {
+    // Ports this consumer claims more than once would be its own duplicate, not a conflict.
+    std::unordered_map<std::string, bool> seen_in_consumer;
+
+    for (const auto & interface : claimed_interfaces[consumer])
+    {
+      if (!seen_in_consumer.emplace(interface, true).second)
+      {
+        throw std::invalid_argument(
+          "controller '" + names[consumer] + "' claims reference interface '" + interface +
+          "' more than once");
+      }
+      const auto split = interface.find_first_of('/');
+      if (split == std::string::npos) {continue;}
+      const auto owner = interface.substr(0, split);
+      if (owner == names[consumer])
+      {
+        // Own hardware command interface, not a reference into this group.
+        continue;
+      }
+      const auto owner_it = index.find(owner);
+      if (owner_it == index.end())
+      {
+        // Ordinary hardware command interface owned by a controller outside this group.
+        continue;
+      }
+      if (owner_it->second == consumer)
+      {
+        throw std::invalid_argument(
+          "controller hierarchy node cannot consume its own reference: " + names[consumer]);
+      }
+
+      // Uniqueness is per PORT. The same owner writing several ports of one child is fine.
+      const auto inserted = port_writers.emplace(interface, owner);
+      if (!inserted.second && inserted.first->second != owner)
+      {
+        throw std::invalid_argument(
+          "reference interface '" + interface + "' has multiple writers: '" +
+          inserted.first->second + "' and '" + owner + "'");
+      }
+
+      const std::string & parent = owner;
+      if (parents[consumer].empty())
+      {
+        parents[consumer] = parent;
+      }
+      else if (parents[consumer] != parent)
+      {
+        throw std::invalid_argument(
+          "controller '" + names[consumer] + "' consumes references from both '" +
+          parents[consumer] + "' and '" + parent + "'; a node may have only one parent");
+      }
+    }
+  }
+  return parents;
+}
+
 /// Build and validate a controller tree in O(V + E).
 /**
  * The planner is deliberately independent of URDF and ROS types. A URDF adapter can turn

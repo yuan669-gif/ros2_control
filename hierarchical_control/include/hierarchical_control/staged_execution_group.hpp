@@ -144,28 +144,12 @@ public:
       controllers.push_back(member.controller);
     }
 
-    // Derive command edges from claimed interfaces; the prefix owner is the reference consumer.
-    spec.parents.assign(spec.names.size(), std::string());
-    for (std::size_t producer = 0; producer < members.size(); ++producer)
-    {
-      for (const auto & interface : members[producer].command_interfaces)
-      {
-        const auto split = interface.find_first_of('/');
-        if (split == std::string::npos) {continue;}
-        const auto prefix = interface.substr(0, split);
-        if (prefix == spec.names[producer]) {continue;}  // own hardware command interface
-        const auto consumer_it = index.find(prefix);
-        if (consumer_it == index.end()) {continue;}  // ordinary hardware command interface
-        const auto consumer = consumer_it->second;
-        if (!spec.parents[consumer].empty())
-        {
-          throw std::invalid_argument(
-            "reference interface '" + interface + "' has multiple writers: '" +
-            spec.parents[consumer] + "' and '" + spec.names[producer] + "'");
-        }
-        spec.parents[consumer] = spec.names[producer];
-      }
-    }
+    // Derive command edges from claimed interfaces. Kept as a pure function so the rule
+    // ("one writer per PORT, not per node") is testable on its own; see hierarchy.hpp.
+    std::vector<std::vector<std::string>> claimed;
+    claimed.reserve(members.size());
+    for (const auto & member : members) {claimed.push_back(member.command_interfaces);}
+    spec.parents = derive_parents_from_claimed_interfaces(spec.names, claimed);
 
     auto group = std::shared_ptr<StagedExecutionGroup>(
       new StagedExecutionGroup(spec, max_age_ns, true));
@@ -236,6 +220,14 @@ public:
 
     const std::uint64_t cycle = ++cycle_;
     const StagedContext context{cycle, now_ns, period_ns};
+
+    // Write-completeness sentinel (review R3). Clearing the FRAMES is not enough: the value
+    // buffers are reused across cycles, so a controller that returns OK without writing one of its
+    // declared ports would leave the PREVIOUS cycle's value in place, and stamping the frame with
+    // the current cycle would present stale data as fresh. Pre-filling with NaN makes every
+    // unwritten element fail the finiteness checks that already guard each stage, so "produced
+    // nothing" is reported instead of silently accepted.
+    constexpr double kUnwritten = std::numeric_limits<double>::quiet_NaN();
     for (auto & frame : state_frames_) {frame = StagedFrame{};}
     for (auto & frame : reference_frames_) {frame = StagedFrame{};}
     for (auto & frame : actuator_frames_) {frame = StagedFrame{};}
@@ -268,6 +260,7 @@ public:
       frame = StagedFrame{};
       frame.cycle = cycle;
       frame.sample_ns = leaf ? now_ns : oldest;
+      std::fill(state_values_[node].begin(), state_values_[node].end(), kUnwritten);
       StagedValueWriter output(
         state_values_[node].data(), state_values_[node].size(), &frame);
       const auto ret = staged_[node]->update_state_stage(
@@ -303,6 +296,7 @@ public:
       frame.cycle = cycle;
       frame.sample_ns = now_ns;
       auto & values = reference_values_[root];
+      std::fill(values.begin(), values.end(), kUnwritten);
       if (!values.empty())
       {
         if (sources_[root] == nullptr ||
@@ -338,6 +332,10 @@ public:
       for (std::size_t slot = 0; slot < children.size(); ++slot)
       {
         const auto child = children[slot];
+        // Sentinel first, so a parent that writes only some of a child's reference ports is
+        // detected by the completeness check below (review R3).
+        std::fill(
+          reference_values_[child].begin(), reference_values_[child].end(), kUnwritten);
         child_writers_[node][slot] = StagedValueWriter(
           reference_values_[child].data(), reference_values_[child].size(),
           &reference_frames_[child]);
@@ -347,6 +345,7 @@ public:
       frame = StagedFrame{};
       frame.cycle = cycle;
       frame.sample_ns = now_ns;
+      std::fill(actuator_scratch_[node].begin(), actuator_scratch_[node].end(), kUnwritten);
       StagedValueWriter actuator(
         actuator_scratch_[node].data(), actuator_scratch_[node].size(), &frame);
 
@@ -369,6 +368,8 @@ public:
         auto & child_frame = reference_frames_[child];
         child_frame.cycle = cycle;
         child_frame.sample_ns = now_ns;
+        // Completeness: every declared reference port of the child must have been written by this
+        // parent this cycle. An untouched element still holds the NaN sentinel and fails here.
         if (!all_finite(reference_values_[child]))
         {
           child_frame.valid = false;
@@ -384,11 +385,25 @@ public:
     }
 
     // ---------------------------------------------------------------------------- commit
-    // All stages and all value checks succeeded; only now is real hardware written. A commit
-    // failure in the middle is a hardware fault domain and is reported, not rolled back.
-    for (std::size_t slot = 0; slot < leaves_.size(); ++slot)
+    // Two-phase commit over the leaves.
+    //
+    // Phase 1 calls every sink, recording which succeeded. A sink is the controller's adapter to
+    // the real command handles, so `sink->commit()` is where a process-global side effect can
+    // happen; that cannot be rolled back, and we do not pretend otherwise (see the note below).
+    //
+    // Phase 2 mirrors into the group's own committed view ONLY IF every sink succeeded. Before
+    // this split, a success on an early leaf updated `actuator_committed_` and `committed_` even
+    // when a later leaf failed, leaving the group's internal state describing a cycle that never
+    // committed (review R4). With the split, the internal view always matches the last fully
+    // committed cycle.
+    //
+    // CONTRACT NOTE: "all-or-nothing" holds for the group's own buffers and for anything the group
+    // controls. It does NOT hold for side effects a sink's commit() already performed on
+    // process-global state; those are the hardware fault domain and are reported, not undone.
+    std::vector<std::size_t> committed_leaves;
+    committed_leaves.reserve(leaves_.size());
+    for (const auto leaf : leaves_)
     {
-      const auto leaf = leaves_[slot];
       auto & scratch = actuator_scratch_[leaf];
       if (scratch.empty()) {continue;}
       if (sinks_[leaf] == nullptr)
@@ -399,6 +414,12 @@ public:
       {
         return {StagedStatus::command_failed, cycle, leaf, actuator_frames_[leaf].fault_code};
       }
+      committed_leaves.push_back(leaf);
+    }
+
+    for (const auto leaf : committed_leaves)
+    {
+      const auto & scratch = actuator_scratch_[leaf];
       std::copy(scratch.begin(), scratch.end(), actuator_committed_[leaf].begin());
       const auto destination =
         committed_.begin() + static_cast<std::ptrdiff_t>(actuator_offset_[leaf]);

@@ -8,6 +8,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cstdio>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -99,7 +101,7 @@ public:
       {
         for (std::size_t p = 0; p < children[c].size(); ++p) {sum += children[c][p];}
       }
-      if (state.size() > 0) {state[0] = factor_ * sum;}
+      for (std::size_t p = 0; p < state.size(); ++p) {state[p] = factor_ * sum;}
       if (overwrite_sample_ns >= 0) {state.set_source_sample_ns(overwrite_sample_ns);}
     }
     return controller_interface::return_type::OK;

@@ -172,7 +172,9 @@ constexpr bool same_names(
 /// `StagedControllerInterface`, and this mixin must be its MOST-DERIVED base so the `final`
 /// overrides take effect.
 template <typename ControllerT, typename Ports, typename Base = StagedControllerInterface>
-class TypedPortsMixin : public Base
+// `virtual` so that a controller which also derives from another ControllerInterfaceBase
+// implementation (a test stub, or a real plugin base) sees ONE base subobject.
+class TypedPortsMixin : public virtual Base
 {
 public:
   std::vector<std::string> staged_reference_ports() const final
