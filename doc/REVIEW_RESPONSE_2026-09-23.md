@@ -21,7 +21,7 @@
 | R3 | 漏写输出被重新标记为新鲜 | **已修** | `staged_execution_group.hpp` NaN 哨兵 + 5 处写入点；`test_contract_regression.cpp` 3 用例 |
 | R4 | sink 中途失败仍部分提交 | **已修**（含我引入并修掉的一次分配回归） | 两遍重遍历同一 `leaves_`，不新增存储；`run()==0` 分配/100 次调用；`test_contract_regression.cpp` 1 用例 |
 | R5 | `void*` 擦除破坏多继承指针 | **已修** | `BoundNode` 存类型化 `ControllerInterfaceBase*`；`test_contract_regression.cpp` 偏移用例；`TypedPortsMixin` 虚继承修菱形 |
-| R6 | 多端口被误判为多个写者 | **已修**（含一次方向性返工，见 §R6） | `derive_parents_from_claimed_interfaces()`：写者按 **PORT** 唯一、父唯一性按**子节点**判定；8 用例；既有 `test_staged_execution_group` / `test_hierarchy_comparison` 回归通过 |
+| R6 | 多端口被误判为多个写者 | **已修**（含一次方向性返工，见 §R6） | `derive_parents_from_claimed_interfaces()`：写者按 **PORT** 唯一、父唯一性按**子节点**判定；7 个 r6_* 用例；既有 `test_staged_execution_group` / `test_hierarchy_comparison` 回归通过 |
 | R7 | 两条执行路径的保证不可混用 | **已修** | 见 §R7：入口处**整体拒绝** + 频率校验 + 反方向镜像校验；6 个新用例 |
 | R8 | 非实时配置与实时执行缺发布协议 | **已修**（主项 + 分配探针） | 见 §R8：成员集**原子发布**、实时路径**零重建**、`staged_group_` 原子读写；新增切换后分配探针；TSan **未跑** |
 | R9 | Gazebo 周期陈旧量不是直接测量 | **已修** | 控制器打周期号 + `measure_tracking.py` 改为周期差、缺数据即失败、ms 标注为"按配置周期换算"；脚本**未在 Gazebo 上重跑** |
@@ -163,7 +163,7 @@ for (const auto leaf : leaves_) { ...mirror into committed view... } // 仅在�
 `test_hierarchy_comparison`（5 个用例）开始失败——层次被整体倒置，
 状态阶段变成了"父先于子"、命令阶段变成"子先于父"，数据依赖读不到值、组提交被校验拒绝。
 
-修复：反转函数中的赋值方向，并重写 r6_* 用例为**内核契约的方向**（8 个用例，含
+修复：反转函数中的赋值方向，并重写 r6_* 用例为**内核契约的方向**（7 个用例，含
 "一个父带两个子"合法、"一个子有两个父"拒绝、"一个端口两个写者"拒绝）；
 此前那 10 个失败的既有用例全部恢复通过。
 
