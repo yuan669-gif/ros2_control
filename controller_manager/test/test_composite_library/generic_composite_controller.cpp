@@ -233,12 +233,22 @@ CallbackReturn GenericCompositeController::on_configure(
 CallbackReturn GenericCompositeController::on_activate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  // Build the kernel HERE, while the manager is still on a non-real-time activation path:
+  // `ControllerManager::activate_controllers()` calls `assign_interfaces()` immediately before
+  // `get_node()->activate()`, so the loaned interfaces are already indexed. Building lazily inside
+  // `update()` instead would put a one-time allocation on the control path
+  // (IMPLEMENTATION_GUIDE section 12, item 11).
+  if (!build_kernel()) {return CallbackReturn::FAILURE;}
   return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn GenericCompositeController::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  // Release the kernel so a re-activation rebuilds it: the interface loans may differ across an
+  // activation boundary, so a cached kernel must never be reused.
+  kernel_.reset();
+  nodes_.clear();
   return CallbackReturn::SUCCESS;
 }
 
@@ -307,7 +317,8 @@ controller_interface::return_type GenericCompositeController::update(
   const rclcpp::Time & time, const rclcpp::Duration & period)
 {
   ++update_calls;
-  if (!kernel_ && !build_kernel()) {return controller_interface::return_type::ERROR;}
+  // The kernel is built in on_activate(). Never build it here: the control loop must not allocate.
+  if (!kernel_) {return controller_interface::return_type::ERROR;}
   const auto result = kernel_->run(time, period);
   return result.status == hierarchical_control::StagedStatus::committed
            ? controller_interface::return_type::OK

@@ -165,6 +165,19 @@ public:
 
   std::size_t size() const noexcept {return names_.size();}
   const std::vector<std::string> & member_names() const noexcept {return names_;}
+
+  /// Readable name of a node index, for diagnostics.
+  /**
+   * `StagedResult::failed_node` is an index, which is not something an operator can act on.
+   * Returning the group's own string keeps `run_ns` allocation-free (no name is copied into the
+   * result) while the log message can still name the node. Out-of-range indices - including
+   * `no_node`, which is what a successful result carries - return a literal instead of throwing.
+   */
+  const std::string & node_name(std::size_t index) const noexcept
+  {
+    static const std::string unknown = "<none>";
+    return index < names_.size() ? names_[index] : unknown;
+  }
   std::int64_t max_age_ns() const noexcept {return max_age_ns_;}
   std::uint64_t committed_cycle() const noexcept {return committed_cycle_;}
   const std::vector<double> & committed_actuators() const noexcept {return committed_;}

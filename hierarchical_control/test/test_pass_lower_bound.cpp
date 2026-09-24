@@ -48,6 +48,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -281,4 +282,224 @@ TEST(PassLowerBound, exhaustive_over_all_small_digraphs)
       }
     }
   }
+}
+
+/// ---------------------------------------------------------------------------------------------
+/// The STAGE-VERTEX model (review R1).
+///
+/// The edge-cover model above is an approximation: "every edge is satisfied in SOME pass" does not
+/// say the values a controller reads belong to one logical cycle, and it silently permits a
+/// controller's stateful update to run twice per cycle. The model that matches the implemented
+/// kernel gives each controller one vertex per PHASE:
+///
+///     S_v : the state stage of controller v   (update_state_stage / update_phase)
+///     C_v : the command stage of controller v (update_command_stage / handle_phase)
+///
+/// and the same-cycle requirements become edges between those vertices:
+///
+///     state edge (child c, parent p)     : S_c -> S_p    (p reads c's derived state)
+///     reference edge (parent p, child c) : C_p -> C_c    (c reads the reference p wrote)
+///     phase barrier, every v             : S_v -> C_v    (a controller commands after its state)
+///
+/// The canonical scheduler runs every S in postorder, then every C over the SAME order reversed.
+/// These tests check that it satisfies every edge of the stage graph on bidirectional cascades of
+/// any depth, that no single-phase order does, and that a cycle WITHIN one phase cannot be fixed by
+/// adding phases at all - only by re-executing a stage, which double-advances that controller.
+namespace stage_model
+{
+
+using Edge = std::pair<int, int>;
+
+int s_vertex(int v) {return v;}
+int c_vertex(int n, int v) {return n + v;}
+
+/// State edges are given as (child, parent); reference edges as (parent, child).
+struct Topology
+{
+  int n = 0;
+  std::vector<Edge> state_edges;
+  std::vector<Edge> reference_edges;
+};
+
+std::vector<Edge> stage_edges(const Topology & topology)
+{
+  std::vector<Edge> edges;
+  for (int v = 0; v < topology.n; ++v)
+  {
+    edges.emplace_back(s_vertex(v), c_vertex(topology.n, v));
+  }
+  for (const auto & edge : topology.state_edges)
+  {
+    edges.emplace_back(s_vertex(edge.first), s_vertex(edge.second));
+  }
+  for (const auto & edge : topology.reference_edges)
+  {
+    edges.emplace_back(c_vertex(topology.n, edge.first), c_vertex(topology.n, edge.second));
+  }
+  return edges;
+}
+
+/// Does `order` (a sequence of stage vertices) satisfy every requirement edge?
+/**
+ * An edge `u -> v` is satisfied when SOME occurrence of `u` precedes SOME occurrence of `v`: the
+ * consumer reads a value the producer already wrote. With exactly one stage per vertex this is just
+ * the order of the two vertices. With repetitions it lets a reader pick an earlier write, which is
+ * precisely how a re-executed stage would satisfy a within-phase cycle.
+ */
+bool schedule_satisfies(const std::vector<Edge> & edges, const std::vector<int> & order)
+{
+  for (const auto & edge : edges)
+  {
+    bool satisfied = false;
+    for (std::size_t i = 0; i < order.size() && !satisfied; ++i)
+    {
+      if (order[i] != edge.first) {continue;}
+      for (std::size_t j = i + 1; j < order.size(); ++j)
+      {
+        if (order[j] == edge.second)
+        {
+          satisfied = true;
+          break;
+        }
+      }
+    }
+    if (!satisfied) {return false;}
+  }
+  return true;
+}
+
+/// Children-first order of a tree given `parent[v]` (root = -1).
+std::vector<int> postorder(const std::vector<int> & parent)
+{
+  const int n = static_cast<int>(parent.size());
+  std::vector<std::vector<int>> children(static_cast<std::size_t>(n));
+  int root = -1;
+  for (int v = 0; v < n; ++v)
+  {
+    if (parent[static_cast<std::size_t>(v)] < 0) {root = v;}
+    else {children[static_cast<std::size_t>(parent[static_cast<std::size_t>(v)])].push_back(v);}
+  }
+  std::vector<int> order;
+  order.reserve(static_cast<std::size_t>(n));
+  std::function<void(int)> visit = [&](int v)
+  {
+    for (const int child : children[static_cast<std::size_t>(v)]) {visit(child);}
+    order.push_back(v);
+  };
+  visit(root);
+  return order;
+}
+
+/// postorder of the state stages, then the SAME order reversed for the command stages.
+std::vector<int> canonical_schedule(const std::vector<int> & parent)
+{
+  const int n = static_cast<int>(parent.size());
+  const auto order = postorder(parent);
+  std::vector<int> schedule;
+  schedule.reserve(static_cast<std::size_t>(2 * n));
+  for (const int v : order) {schedule.push_back(s_vertex(v));}
+  for (auto it = order.rbegin(); it != order.rend(); ++it) {schedule.push_back(c_vertex(n, *it));}
+  return schedule;
+}
+
+/// Every edge of a fully bidirectional tree.
+Topology bidirectional_tree(const std::vector<int> & parent)
+{
+  Topology topology;
+  topology.n = static_cast<int>(parent.size());
+  for (int v = 0; v < topology.n; ++v)
+  {
+    const int p = parent[static_cast<std::size_t>(v)];
+    if (p < 0) {continue;}
+    topology.state_edges.emplace_back(v, p);      // child -> parent
+    topology.reference_edges.emplace_back(p, v);  // parent -> child
+  }
+  return topology;
+}
+
+}  // namespace stage_model
+
+/// The canonical two phases satisfy every stage-graph edge, for cascades of any depth and for a
+/// branching tree. This is the corrected sufficiency statement: it is a claim about a DAG of stage
+/// vertices, not about the merged same-cycle graph `G`.
+TEST(PassLowerBound, canonical_two_phase_satisfies_the_stage_graph)
+{
+  using namespace stage_model;
+  for (int depth = 1; depth <= 6; ++depth)
+  {
+    std::vector<int> chain(static_cast<std::size_t>(depth + 1));
+    chain[0] = -1;
+    for (int v = 1; v <= depth; ++v) {chain[static_cast<std::size_t>(v)] = v - 1;}
+    const auto topology = bidirectional_tree(chain);
+    EXPECT_TRUE(schedule_satisfies(stage_edges(topology), canonical_schedule(chain)))
+      << "depth " << depth;
+  }
+
+  // root(0) -> {1, 2}; 1 -> {3, 4}. Branching must not break the reuse of one postorder.
+  std::vector<int> tree{-1, 0, 0, 1, 1};
+  const auto topology = bidirectional_tree(tree);
+  EXPECT_TRUE(schedule_satisfies(stage_edges(topology), canonical_schedule(tree)));
+}
+
+/// A bidirectional pair has no single-phase schedule: the two requirements become opposite edges
+/// between the same pair of controllers, and a total order cannot satisfy both. This is Theorem 1
+/// re-derived in the stage model, by exhaustive enumeration rather than by argument.
+TEST(PassLowerBound, no_single_phase_schedule_for_a_bidirectional_pair)
+{
+  using namespace stage_model;
+  const int n = 2;
+  // One entry point per controller: both requirement directions fall on the same two vertices.
+  const std::vector<Edge> merged{{0, 1}, {1, 0}};
+  std::vector<int> order{0, 1};
+  int satisfiable = 0;
+  do
+  {
+    if (schedule_satisfies(merged, order)) {++satisfiable;}
+  } while (std::next_permutation(order.begin(), order.end()));
+  EXPECT_EQ(0, satisfiable) << "no total order over the controllers satisfies both directions";
+
+  // Dropping one direction makes it satisfiable again, so the enumeration above is not vacuous.
+  const std::vector<Edge> one_way{{0, 1}};
+  order = {0, 1};
+  int one_way_ok = 0;
+  do
+  {
+    if (schedule_satisfies(one_way, order)) {++one_way_ok;}
+  } while (std::next_permutation(order.begin(), order.end()));
+  EXPECT_EQ(1, one_way_ok);
+}
+
+/// A requirement cycle WITHIN one phase type (here: three controllers that each need another's
+/// derived state in the same cycle) cannot be satisfied by any number of phases. Adding phases only
+/// helps if a stage may run more than once per cycle, and that re-executes the controller's stateful
+/// update - the "repeated fusion" failure mode the review pointed at.
+TEST(PassLowerBound, within_phase_cycle_needs_a_delay_not_more_phases)
+{
+  using namespace stage_model;
+  // S_a -> S_b -> S_c -> S_a. A schedule is a linear sequence, so it can satisfy an acyclic set of
+  // edges only; this set is not acyclic.
+  const std::vector<Edge> cycle{{0, 1}, {1, 2}, {2, 0}};
+
+  std::vector<int> order{0, 1, 2};
+  int satisfiable = 0;
+  do
+  {
+    if (schedule_satisfies(cycle, order)) {++satisfiable;}
+  } while (std::next_permutation(order.begin(), order.end()));
+  EXPECT_EQ(0, satisfiable)
+    << "with exactly one state stage per controller, a within-phase cycle has no schedule";
+
+  // It becomes satisfiable only by running one controller's state stage TWICE in the same cycle,
+  // i.e. by advancing that controller's state twice per control period.
+  const std::vector<int> repeated{0, 1, 2, 0};
+  EXPECT_TRUE(schedule_satisfies(cycle, repeated));
+  const auto occurrences = static_cast<int>(std::count(repeated.begin(), repeated.end(), 0));
+  EXPECT_EQ(2, occurrences)
+    << "the only schedules that satisfy a within-phase cycle re-execute a stage";
+
+  // A delay (reading the previous cycle's value) breaks the cycle without any re-execution: the
+  // edge S_a -> S_c is dropped, and the remaining set is acyclic.
+  const std::vector<Edge> with_delay{{0, 1}, {1, 2}};
+  EXPECT_TRUE(schedule_satisfies(with_delay, std::vector<int>{0, 1, 2}));
+  EXPECT_TRUE(is_acyclic(3, with_delay));
 }

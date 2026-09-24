@@ -137,15 +137,53 @@ bash case_study/scripts/phase_b.sh 50 false 10
 bash case_study/scripts/phase_b.sh 50 true 10
 ```
 
-预期输出形如：
+预期输出形如（**2026-09-24 重新测量，度量已修正，见第 6.1 节**）：
 
 ```text
-[case-study] mode=single-pass rate=   50 Hz  samples=  353  travel_lag_left=1 travel_lag_right=1
-[case-study] mode=two-pass    rate=   50 Hz  samples=  384  travel_lag_left=0 travel_lag_right=0
+[case-study] mode=single-pass rate=   50 Hz  samples=  581  chassis_cycles=  954  ...
+[case-study] lag_left  = 1 cycles (min 1, max 1, n=581)  = 20.0 ms at the CONFIGURED 50 Hz period
+[case-study]   raw counter difference for comparison: median -369 cycles (min -369, max -369) -- NOT the lag; it contains the activation offset
+[case-study] lag_right = 1 cycles (min 1, max 1, n=581)  = 20.0 ms at the CONFIGURED 50 Hz period
+[case-study] mode=two-pass    rate=   50 Hz  samples=  707  chassis_cycles=  902  ...
+[case-study] lag_left  = 0 cycles (min 0, max 0, n=707)  = 0.0 ms at the CONFIGURED 50 Hz period
+[case-study] lag_right = 0 cycles (min 0, max 0, n=707)  = 0.0 ms at the CONFIGURED 50 Hz period
 ```
 
 脚本会自己启动 `gzserver`（无头、渲染关闭）、`robot_state_publisher`、生成 URDF/YAML、
 spawn 模型与 4 个控制器、测量并清理；日志在 `case_study/logs/run_<rate>hz_<mode>/`。
+本机 `gzserver` 约每 3 次启动就有 1 次在启动或关闭时崩溃（`free(): invalid pointer` /
+`corrupted size vs. prev_size`），所以脚本必须**整轮重试**；上表来自
+`case_study/scripts/retry_phase_b.sh`（每个模式最多 4 次尝试，两趟模式实际用了 2 次）。
+
+### 6.1 度量修正（2026-09-24，评审 R9 的后续）
+
+第一版"周期号"度量是**错的**，必须记录在这里以免再次被引用。它把滞后定义为
+`chassis_cycle − wheel_cycle`，即两个**互相独立的**计数器之差。每个计数器都从**自己的控制器
+被激活**时开始计数，于是这个差值里包含了两个控制器激活时刻的固定偏移。实测：
+
+| | 单趟 | 两趟 |
+|---|---|---|
+| 原始计数器差值 | −369 / −172 cycles | −420 / −230 cycles |
+| **同一次运行内该差值的变化范围** | **min = max（完全恒定）** | **min = max（完全恒定）** |
+
+"完全恒定"说明这个数根本不反映任何周期性调度行为——它只是激活偏移，而且每次运行都不同
+（同一配置两次运行得到 −289/−118 与 −369/−172）。表里的 −369 ms 之类数字**没有任何意义**。
+
+正确的做法是利用**所有控制器共享的时钟**：`ControllerManager::update(time, period)` 在同一个
+周期里给每个控制器传**同一个 `time`**，所以
+
+```text
+lag_ns = (本控制器本周期看到的 time) − (产出它所读值的那个周期看到的 time)
+```
+
+是一个**共享纪元**下的差值，恰好等于周期的整数倍，不含激活偏移、不需要时钟对齐、也混不进
+DDS 排队。控制器现在把 `lag_*_ns` 与 `lag_*_cycles` 一起发布（诊断字段 16–19），脚本会
+**校验 `lag_ns == lag_cycles × period_ns`**，不满足就直接让实验失败；出现负滞后也直接失败。
+本次两个模式都通过了该校验（581 与 707 个样本，无一个例外），这是对"共享时钟"这一前提的
+直接验证。原始的计数器差值仍会打印出来，但标注为"不是滞后"。
+
+**修正后的结论与修正前一致**（单趟 1 周期、两趟 0 周期），但现在这个结论有了正确的证据链：
+滞后是在生产者/消费者的**周期时间戳**上直接测出的，而不是两个计数器相减。
 
 ---
 

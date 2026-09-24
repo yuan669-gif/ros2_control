@@ -14,7 +14,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <future>
 #include <memory>
 #include <string>
@@ -345,6 +347,160 @@ TEST_F(TestTwoPhaseExecution, two_pass_keeps_both_directions_same_cycle)
   EXPECT_EQ(0, result.root) << "root must see the mid's same-cycle estimate";
   EXPECT_GT(result.update_phase_calls, 0);
   EXPECT_EQ(result.update_phase_calls, result.handle_phase_calls);
+}
+
+/// The two-phase path has NO group commit, and this test pins that down instead of leaving it as a
+/// footnote. `handle_phase()` writes straight into the controller's command interfaces, the command
+/// pass runs parents first, and the manager keeps no buffer, so a failure late in the pass leaves
+/// the earlier writes applied. The staged group's "all-or-nothing" guarantee (`failure_never_
+/// partially_commits` in `test_staged_execution_group.cpp`) does NOT carry over to this path.
+TEST_F(TestTwoPhaseExecution, two_phase_mode_has_no_group_commit)
+{
+  auto root = std::make_shared<TestStagedController>();
+  auto mid = std::make_shared<TestStagedController>();
+  auto leaf = std::make_shared<TestStagedController>();
+
+  root->set_reference_interface_names({"command"});
+  root->set_command_interface_configuration(individual({std::string(kMid) + "/target"}));
+  root->set_state_interface_configuration(individual({}));
+  mid->set_reference_interface_names({"target"});
+  mid->set_command_interface_configuration(individual({std::string(kLeaf) + "/target"}));
+  mid->set_state_interface_configuration(individual({}));
+  leaf->set_reference_interface_names({"target"});
+  leaf->set_actuator_ports({"joint2/velocity"});
+  leaf->set_command_interface_configuration(individual({"joint2/velocity"}));
+  leaf->set_state_interface_configuration(individual({}));
+  // The two-phase estimate path is an explicit child link, not a reference interface.
+  root->set_two_phase_child(mid.get());
+  mid->set_two_phase_child(leaf.get());
+
+  ASSERT_NE(nullptr, cm_->add_controller(root, kRoot, kType));
+  ASSERT_NE(nullptr, cm_->add_controller(mid, kMid, kType));
+  ASSERT_NE(nullptr, cm_->add_controller(leaf, kLeaf, kType));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kMid));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+  ASSERT_TRUE(leaf->set_chained_mode(true));
+  ASSERT_TRUE(mid->set_chained_mode(true));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kMid}, {});
+  SwitchNow({kRoot}, {});
+
+  // Drive a few clean cycles so every level has a non-zero command to overwrite.
+  root->set_two_phase_input(0.0);
+  for (int i = 0; i < 5; ++i)
+  {
+    cm_->read(TIME, PERIOD);
+    ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+    cm_->write(TIME, PERIOD);
+  }
+  leaf->set_two_phase_input(5.0);   // the leaf's estimate, hence mid's command, changes
+  cm_->read(TIME, PERIOD);
+  ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+  cm_->write(TIME, PERIOD);
+
+  const double mid_written = mid->command_interface_value();
+  const int mid_handle_calls = mid->handle_phase_calls;
+
+  // Now the LEAF fails its command stage. The command pass is parents-first, so `mid` has already
+  // written the leaf's reference by the time the leaf fails.
+  leaf->set_fail_handle(true);
+  leaf->set_two_phase_input(9.0);
+  cm_->read(TIME, PERIOD);
+  const auto failed = cm_->update(TIME, PERIOD);
+  cm_->write(TIME, PERIOD);
+
+  EXPECT_EQ(Return::ERROR, failed) << "the manager must report the failed command stage";
+  EXPECT_EQ(mid_handle_calls + 1, mid->handle_phase_calls) << "mid ran before the leaf failed";
+
+  std::cout << "[two-phase] cycle with a failing leaf command stage: mid's claimed interface went "
+            << mid_written << " -> " << mid->command_interface_value() << "\n";
+  EXPECT_NE(mid_written, mid->command_interface_value())
+    << "mid's write survives the leaf's failure: the two-phase path commits partially";
+  EXPECT_EQ(1, leaf->handle_phase_calls - (mid_handle_calls + 1))
+    << "the leaf is still called after failing, so the pass is not aborted cleanly either";
+
+  // The contrast is the point: the same topology under the staged group does commit atomically,
+  // which is asserted in test_staged_execution_group.failure_never_partially_commits.
+}
+
+/// Cost of the second traversal, measured on the same three-controller cascade in both modes.
+/// This asserts nothing about the numbers: the machine is a non-real-time VM and the review asked
+/// for the measurement to exist, not for a particular outcome.
+TEST_F(TestTwoPhaseExecution, two_pass_costs_one_extra_traversal)
+{
+  // ONE setup, measured in both modes by flipping `two_phase_execution` and the per-controller
+  // `two_phase_legacy` switch. Both modes then execute the same three controllers over the same
+  // hardware interfaces, so the comparison is apples to apples: single-pass calls the native
+  // `update()` on each controller (which runs its two halves), two-pass has the manager drive the
+  // two passes itself.
+  auto root = std::make_shared<TestStagedController>();
+  auto mid = std::make_shared<TestStagedController>();
+  auto leaf = std::make_shared<TestStagedController>();
+  root->set_reference_interface_names({"command"});
+  root->set_command_interface_configuration(individual({std::string(kMid) + "/target"}));
+  root->set_state_interface_configuration(individual({}));
+  mid->set_reference_interface_names({"target"});
+  mid->set_command_interface_configuration(individual({std::string(kLeaf) + "/target"}));
+  mid->set_state_interface_configuration(individual({}));
+  leaf->set_reference_interface_names({"target"});
+  leaf->set_actuator_ports({"joint2/velocity"});
+  leaf->set_command_interface_configuration(individual({"joint2/velocity"}));
+  leaf->set_state_interface_configuration(individual({}));
+  root->set_two_phase_child(mid.get());
+  mid->set_two_phase_child(leaf.get());
+
+  ASSERT_NE(nullptr, cm_->add_controller(root, kRoot, kType));
+  ASSERT_NE(nullptr, cm_->add_controller(mid, kMid, kType));
+  ASSERT_NE(nullptr, cm_->add_controller(leaf, kLeaf, kType));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kMid));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+  ASSERT_TRUE(leaf->set_chained_mode(true));
+  ASSERT_TRUE(mid->set_chained_mode(true));
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kMid}, {});
+  SwitchNow({kRoot}, {});
+
+  const auto measure = [this](bool two_phase)
+  {
+    std::vector<double> samples;
+    samples.reserve(200);
+    for (int i = 0; i < 200; ++i)
+    {
+      const auto start = std::chrono::steady_clock::now();
+      cm_->read(TIME, PERIOD);
+      cm_->update(TIME, PERIOD);
+      cm_->write(TIME, PERIOD);
+      samples.push_back(
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
+    }
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
+  };
+
+  // Single-pass: every controller runs its own native update(), i.e. its two halves in sequence.
+  for (auto * controller : {root.get(), mid.get(), leaf.get()})
+  {
+    controller->set_two_phase_legacy(true);
+  }
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(false));
+  const double single_pass_us = measure(false);
+
+  // Two-pass: the manager drives the state stage backwards and the command stage forwards.
+  for (auto * controller : {root.get(), mid.get(), leaf.get()})
+  {
+    controller->set_two_phase_legacy(false);
+  }
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  const double two_pass_us = measure(true);
+  std::cout << "[two-phase] median read+update+write over 200 cycles: single-pass "
+            << single_pass_us << " us, two-pass " << two_pass_us << " us (ratio "
+            << (two_pass_us / single_pass_us) << ")\n";
+  EXPECT_GT(single_pass_us, 0.0);
+  EXPECT_GT(two_pass_us, 0.0);
 }
 
 }  // namespace

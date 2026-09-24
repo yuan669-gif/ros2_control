@@ -76,6 +76,21 @@ private:
   std::uint64_t used_right_cycle_ = 0;
   double used_right_ = 0.0;
 
+  /// Scheduling lag of the state edge, measured on the shared manager clock.
+  /**
+   * `sample_ns_` is the manager time of THIS cycle; `used_*_sample_ns_` is the manager time of the
+   * cycle that produced the travel value we just consumed. Both come from the same manager cycle
+   * clock, so the difference is an exact multiple of the control period, and the activation-time
+   * offset that makes two independent cycle counters incomparable cancels out.
+   */
+  std::int64_t sample_ns_ = 0;
+  std::int64_t used_left_sample_ns_ = 0;
+  std::int64_t used_right_sample_ns_ = 0;
+  std::int64_t lag_left_ns_ = 0;
+  std::int64_t lag_right_ns_ = 0;
+  std::int64_t lag_left_cycles_ = 0;
+  std::int64_t lag_right_cycles_ = 0;
+
   double x_ = 0.0, y_ = 0.0, th_ = 0.0;
   double ref_x_ = 0.0, ref_y_ = 0.0, ref_th_ = 0.0;
   double t_ = 0.0;

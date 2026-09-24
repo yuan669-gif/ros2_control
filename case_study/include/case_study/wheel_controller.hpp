@@ -52,6 +52,7 @@ public:
 
   double travel() const override {return travel_;}
   std::uint64_t cycle() const override {return cycle_;}
+  std::int64_t sample_ns() const override {return sample_ns_;}
 
 protected:
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
@@ -67,6 +68,8 @@ private:
   bool legacy_ = true;
   double travel_ = 0.0;
   std::uint64_t cycle_ = 0;  ///< increments once per update_phase, i.e. once per control cycle
+  /// Manager time of the cycle that produced `travel_`; the shared epoch for the lag measurement.
+  std::int64_t sample_ns_ = 0;
   double velocity_ = 0.0;
   double filtered_velocity_ = 0.0;  // estimator state: NOT re-derivable by the parent
   double integral_ = 0.0;

@@ -45,7 +45,8 @@ struct CompositeNodeSpec
  * Unlike the manager-integrated path this controller:
  *  - is a plain `ControllerInterface` (not chainable), so it claims only hardware interfaces;
  *  - does not use native reference interfaces and needs no `ControllerManager` change;
- *  - builds the kernel lazily on the first `update()` (one-time, non-real-time allocation).
+ *  - builds the kernel in `on_activate()` (non-real-time), so the control loop never allocates;
+ *  - resets it in `on_deactivate()`, so an activation boundary can never reuse stale loans.
  */
 class GenericCompositeController : public controller_interface::ControllerInterface
 {

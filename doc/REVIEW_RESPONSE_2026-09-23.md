@@ -16,17 +16,17 @@
 
 | # | 主题 | 状态 | 证据 |
 |---|---|---|---|
-| R1 | 最少趟数"NP 难"结论错误 | **已修** | `PASS_LOWER_BOUND.md` 文首修正框 + §4.1/§5.1 重写；`PAPER.md` §3.8 §9.2 附录 B；`PAPER_SKELETON.md`；C++ 测试注释；`search_min_passes.py` Interpretation（已重跑） |
+| R1 | 最少趟数"NP 难"结论错误 | **已修**（含 2026-09-24 补的阶段顶点模型） | `PASS_LOWER_BOUND.md` 文首修正框 + §0.1 阶段顶点模型 + §4.1/§5.1 重写；`PAPER.md`；`PAPER_SKELETON.md`；C++ 新增 3 用例（7/7）；`research/stage_graph/check_stage_graph.py` 465/465 穷举；`search_min_passes.py` Interpretation（已重跑） |
 | R2 | `G` 成环 ≠ 代数环/不可能 | **已修** | `FORMAL_MODEL.md` §6 重写为**充分条件**；`PAPER.md` §3.6；`HANDOFF_MANUAL.md` 定理表 |
 | R3 | 漏写输出被重新标记为新鲜 | **已修** | `staged_execution_group.hpp` NaN 哨兵 + 5 处写入点；`test_contract_regression.cpp` 3 用例 |
 | R4 | sink 中途失败仍部分提交 | **已修**（含我引入并修掉的一次分配回归） | 两遍重遍历同一 `leaves_`，不新增存储；`run()==0` 分配/100 次调用；`test_contract_regression.cpp` 1 用例 |
 | R5 | `void*` 擦除破坏多继承指针 | **已修** | `BoundNode` 存类型化 `ControllerInterfaceBase*`；`test_contract_regression.cpp` 偏移用例；`TypedPortsMixin` 虚继承修菱形 |
 | R6 | 多端口被误判为多个写者 | **已修**（含一次方向性返工，见 §R6） | `derive_parents_from_claimed_interfaces()`：写者按 **PORT** 唯一、父唯一性按**子节点**判定；7 个 r6_* 用例；既有 `test_staged_execution_group` / `test_hierarchy_comparison` 回归通过 |
 | R7 | 两条执行路径的保证不可混用 | **已修** | 见 §R7：入口处**整体拒绝** + 频率校验 + 反方向镜像校验；6 个新用例 |
-| R8 | 非实时配置与实时执行缺发布协议 | **已修**（主项 + 分配探针） | 见 §R8：成员集**原子发布**、实时路径**零重建**、`staged_group_` 原子读写；新增切换后分配探针；TSan **未跑** |
-| R9 | Gazebo 周期陈旧量不是直接测量 | **已修** | 控制器打周期号 + `measure_tracking.py` 改为周期差、缺数据即失败、ms 标注为"按配置周期换算"；脚本**未在 Gazebo 上重跑** |
-| R10 | 上游行为与存储表述超范围 | **部分** | 日志/PulseAudio cookie 已从 git 移除；"零额外存储"已在 7 份文档中改为"不需要第二份拓扑顺序"；上游端口**实际导出/认领**的端到端验证**仍未做** |
-| R11 | 对照与新颖性需重新收敛 | **未修** | 未做文献查新；估计/命令拆分基线未补 |
+| R8 | 非实时配置与实时执行缺发布协议 | **已修**（主项 + 分配探针 + TSan） | 成员集**原子发布**、实时路径**零重建**、`staged_group_` 原子读写；切换后分配探针；**TSan 已跑**：racy 模式必报数据竞争、atomic 模式干净（`run_tsan_publish_protocol.sh`） |
+| R9 | Gazebo 周期陈旧量不是直接测量 | **已修并重跑**（含一次度量返工） | 改用**共享管理器时钟**：控制器发布 `lag_*_ns`/`lag_*_cycles`，脚本校验 `lag_ns == lag_cycles × period_ns`；Gazebo 50 Hz 实测**单趟 1 周期 / 两趟 0 周期**（581 与 707 样本，一致性校验全通过） |
+| R10 | 上游行为与存储表述超范围 | **已修** | 日志/PulseAudio cookie 已从 git 移除；"零额外存储"已在 7 份文档中改为"不需要第二份拓扑顺序"；**上游端口端到端验证已做**（引用边真绑定 + 同周期传播；状态边实测在激活期被拒、0 个绑定接口） |
+| R11 | 对照与新颖性需重新收敛 | **已修**（2026-09-24） | 新增 `doc/RELATED_WORK.md`：逐条重叠分析（C1/C2/C4 属已有理论或教科书、C3 属 FineMote）、LET 对比、拆分基线对照表、15 条引用、不确定性清单；FineMote 原文 arXiv:2608.04600 已抓取核实 |
 
 **本轮唯一新增的实测数据**：
 `controller_manager/test_two_phase_execution` 新增 6 个 R7 准入用例、
@@ -65,8 +65,26 @@
   "验证的是平凡分类，不是最优性定理"，并明确禁止"NP-hard / 调度最优"表述。
   **已重跑**，输出与上述一致，`ast.parse` 通过。
 
-**仍未做**：评审要求的"用实际阶段顶点 `S_i`/`C_i` 建图证明充分性"、以及四节点穷举。
-这两项写在 `PASS_LOWER_BOUND.md` §5 的新限制里，**没有**声称完成。
+**2026-09-24 补齐**（评审要求的"用实际阶段顶点 `S_i`/`C_i` 建图证明充分性"与四节点穷举）：
+
+- `doc/PASS_LOWER_BOUND.md` 新增 **§0.1 阶段顶点模型**：给每个控制器两个顶点
+  `S_v`（状态阶段）与 `C_v`（命令阶段），把同周期要求写成
+  `S_c → S_p`（状态边）、`C_p → C_c`（参考边）、`S_v → C_v`（相位屏障）；
+  规范调度 = 全部 `S` 走树的**后序**、全部 `C` 走**同一顺序的反向**，充分性由该图的拓扑序直接给出。
+- `hierarchical_control/test/test_pass_lower_bound.cpp` 新增 **3 个用例**（共 7/7 通过）：
+  深度 1–6 双向级联 + 分叉树全部满足；双向对的单趟总序**穷举为 0/2 可行**（去掉一个方向后 1/2，非空洞对照）；
+  同相环在"每顶点一次"下 **0/6 可行**。
+- `research/stage_graph/check_stage_graph.py` 独立穷举 `n ≤ 4` 的**全部有根树 × 全部边标注**：
+  **465/465** 规范两趟调度满足阶段图；单趟可行 ⇔ 合并图 `G` 无环（465/465 一致，可行 145、不可行 320）。
+- **真正的不可能性结论**（属本项目）：**同一相内部**的要求成环时，**多少趟都不行**，
+  唯一"满足"它的调度会**重复执行某个阶段**（`S_a,S_b,S_c,S_a`），即把该控制器的状态在一周期里推进两次；
+  正确做法是用真实的单位延迟打断。这正好落实了评审"重复融合 update 可能重复推进积分器"的警告。
+
+> ⚠ **必须承认**：`doc/RELATED_WORK.md` §1.1 的查新显示，这个阶段顶点模型**与 FineMote 原文
+> （arXiv:2608.04600）自己的调度模型是同一个模型**（`τ_n^+`/`τ_n^-`、屏障约束 (1c)、
+> `+` 子→父 / `−` 父→子）。也就是说 §0.1 是**独立重导出了已有模型**，
+> 其价值在于修正了本项目原先错误的边覆盖模型、并给出相内环不可能这一新结论，
+> **不能**把阶段顶点建模本身当作贡献。
 
 ## R2 `G` 成环 ≠ 实际代数环——**已修（撤回）**
 
@@ -291,10 +309,32 @@ for (const auto leaf : leaves_) { ...mirror into committed view... } // 仅在�
 > "不再重建"的真正保证是**结构性的**：`update()` 里已经**不存在**任何重新发布成员集的调用。
 > 这一点在 `doc/IMPLEMENTATION_GUIDE.md` §9.3 里写明，也可用源码检索核对。
 
+**2026-09-24 补齐：TSan 已跑**（评审的"未运行 TSan"一条已闭合）
+
+`hierarchical_control/test/tsan_publish_protocol.cpp` + `run_tsan_publish_protocol.sh`：
+同一份两线程负载跑**两种模式**，先编译 `-fsanitize=thread`，再断言
+
+- `--mode=racy`（旧实现：普通 `std::vector` 被发布线程写、控制线程读）**必须被报出数据竞争**；
+- `--mode=atomic`（现实现：不可变快照 + `std::atomic_store`/`atomic_load`）**必须干净**。
+
+实测（`log/tsan/*.log`）：
+
+```text
+WARNING: ThreadSanitizer: data race (pid=17)
+  Read of size 8 at 0x55555555a070 by main thread:
+    #0 __normal_iterator /usr/include/c++/11/bits/stl_iterator.h:1028
+    #1 begin /usr/include/c++/11/bits/stl_vector.h:821
+[tsan] atomic : clean (exit 0)
+[tsan] RESULT: PASS (racy reported, atomic clean)
+```
+
+本机 TSan 需要 `setarch -R`（默认 ASLR 熵与 TSan 影子布局不兼容，会 `FATAL: unexpected memory
+mapping`），脚本已内置。racy 模式是**非空洞对照**：同一个 harness 能检出被修掉的那个模式。
+
 **仍然没做的**：
 
-- **未运行 TSan**。并发正确性来自设计论证 + 代码审查，不是并发实测；
-  上面的探针只覆盖"分配"这一侧面，**不覆盖数据竞争**。
+- TSan 覆盖的是**发布协议这一模式**，不是整个 `ControllerManager` 的并发实测
+  （给全包加 TSan 需要另开构建树，本机磁盘不允许）；探针只覆盖"分配"这一侧面。
 - `std::atomic_load/atomic_store(shared_ptr)` 是 C++17 设施（本仓库
   `target_compile_features(... cxx_std_17)`），**不保证无锁**；libstdc++ 用自旋锁池实现。
   实时路径上它只做一次原子引用计数操作，代价可接受，但**不是**"零开销"。
@@ -303,19 +343,43 @@ for (const auto leaf : leaves_) { ...mirror into committed view... } // 仅在�
 
 ## R9 Gazebo 陈旧量——**已修（脚本侧）**，未重跑
 
-- 控制器侧新增周期号 `cycle()`：`travel_registry.hpp` 的 `TravelSource` 加纯虚
-  `cycle()`；`wheel_controller` / `chassis_controller` 每周期自增，chassis 记录
-  **它实际读到的那次写入**来自 wheel 的第几周期；诊断从 12 字段扩到 16
-  （13/14/15 = chassis/left/right 周期号）。
 - `case_study/scripts/measure_tracking.py` **重写**：
-  - 滞后 = `chassis_cycle - wheel_cycle`（整数周期差，不再靠接收时间做最近邻匹配）；
+  - 不再用接收时间做最近邻匹配；
   - 用 `DIAG_*` 常量索引诊断字段；缺数据调用 `fail()` 让实验**失败**，不再默认 `lag = 0`；
   - 毫秒标签明确写成"**按配置控制周期换算**的调度延迟"，
     并说明 `0 cycle` **不等于** 0 ms 端到端时延。
-- 评审提到的"最大匹配距离/丢包/时钟偏移"在周期号方案下不再是主要误差源，
-  但仍未限制丢包；`case_study/logs/` 已从版本库移除。
-- **未做**：没有重新跑 Gazebo 实验。因此 `GAZEBO_CASE_STUDY.md` 里已有的数值
-  **仍是旧脚本产生的**，不能当作新方法的验证。这条在文档里保持原样、不追认为已更新。
+
+### ⚠ 第一版修正本身是错的（2026-09-24 发现并修掉）
+
+第一版把滞后定义为 `chassis_cycle - wheel_cycle`，也就是**两个独立计数器之差**。
+每个计数器都从**自己的控制器被激活**时开始计数，所以这个差值里含有激活时刻的固定偏移。
+实测该差值在一次运行内**完全恒定**（min = max）：单趟 −369/−172、两趟 −420/−230，
+而且同一配置两次运行分别得到 −289/−118 与 −369/−172。**"完全恒定"意味着它不反映任何
+周期性调度行为**，只是一个每次运行都不同的常数。
+
+正确的度量用**共享管理器时钟**：`ControllerManager::update(time, period)` 在同一周期里给
+每个控制器传同一个 `time`，所以
+
+```text
+lag_ns = (本控制器本周期的 time) − (产出它所读值的那个周期的 time)
+```
+
+是共享纪元下的差值，恰好等于周期整数倍，不含激活偏移、不需时钟对齐、混不进 DDS 排队。
+控制器现在发布 `lag_*_ns` 与 `lag_*_cycles`（诊断字段 16–19，共 20 字段），
+`measure_tracking.py` 会**校验 `lag_ns == lag_cycles × period_ns`**，不满足即实验失败；
+负滞后也直接失败。原始计数器差值仍打印但标注为"不是滞后"。
+
+**已重跑**（`case_study/scripts/retry_phase_b.sh`，每模式最多 4 次尝试以对抗 gzserver 崩溃）：
+
+| 模式 | 样本 | `lag_left` | `lag_right` | 一致性校验 |
+|---|---|---|---|---|
+| 单趟（`legacy_=true`） | 581 | **1** cycle（min 1, max 1） | **1** cycle | 全部通过 |
+| 两趟（`update_phase`+`handle_phase`） | 707 | **0** cycle（min 0, max 0） | **0** cycle | 全部通过 |
+
+结论与修正前一致（单趟 1 周期、两趟 0 周期），但现在证据链正确。详见
+`GAZEBO_CASE_STUDY.md` §6.1。
+- **仍未做**：`case_study/logs/` 里的 `gzserver` 崩溃率约 1/3，脚本靠整轮重试；
+  真值轨迹误差指标仍然不可信（`GAZEBO_CASE_STUDY.md` §4），没有据此声称任何跟踪收益。
 
 ## R10 证据边界——**部分**
 
@@ -330,15 +394,56 @@ for (const auto leaf : leaves_) { ...mirror into committed view... } // 仅在�
   `PAPER_SKELETON.md`、`TWO_PASS_VS_SINGLE_PASS.md`、`WHY_NO_SPEEDUP.md`、
   `HANDOFF_NEXT_SESSION_2026-09-21.md`。
 
-**未做**：评审要求
-"父声明 `ord_child/state` 的测试必须**实际导出、激活认领、消费**该状态端口"，
-即证明上游原生数据通路端到端可执行，而不仅是 `configure` 接受。
-`test_upstream_ordering.cpp` 目前仍只验证排序。**没有**声称已覆盖。
+**2026-09-24 补齐：端到端验证已做**（`controller_manager/test/test_upstream_ordering.cpp`，现 4/4 通过）
 
-## R11 对照与新颖性——**未修**
+1. `reference_edge_is_bound_and_propagates_within_the_cycle` —— **引用边是真的可执行**：
+   父认领 `ord_child/ref`、子导出 `ref`，配置并**激活**后断言
+   (a) 父确实持有 **1 个** ResourceManager 命令接口（不是只有名字）；
+   (b) 父写入 7.0 后，子在同周期读到 7.0 并把它写到硬件命令接口。
+   这直接回应了"`configure` 接受不等于整条原生数据通路可执行"。
+2. `state_edge_cannot_be_bound_on_humble` —— **状态边在 Humble 上根本不可实例化**，并且**实测到了
+   它在哪里失败**（这一点我原先预测错了，是量出来的）：
 
-未做相关工作文献查新，未补"估计/命令显式拆分"基线，未统一固定时间常数下的跨频率比较。
-按评审结论，此时**不作**"首创/无创新"的定论。
+```text
+[upstream] activating a controller that declares 'ord_child/state':
+           switch=ERROR active=no bound_state_interfaces=0
+[ERROR] Aborting, no controller is switched! (::STRICT switch)
+```
+
+   即 `configure` **接受**该名字（Humble 在**激活期**才解析状态接口），
+   激活时**失败**、父保持 inactive、**0 个**状态接口被绑定。
+   结论：Humble 上父子**状态**依赖无法实例化，"双向对"只能作为**排序约束**存在，
+   真实状态数据通路必须靠 Jazzy/Rolling——这正是 `BIDIRECTIONAL_EDGE_ANALYSIS.md` 的结论，
+   现在有了直接的失败证据而不只是"文档说不能导出"。
+
+## R11 对照与新颖性——**已修（2026-09-24）**
+
+新增 `doc/RELATED_WORK.md`。要点：
+
+1. **逐条重叠分析（结论对本项目不利）**：
+   - C1（双向同周期不可满足）是**同步数据流/同步语言/Kahn 网络/代数环的标准结果**
+     （Lee & Messerschmitt 1987 的"环上必须有延迟"最接近）；
+   - C2（陈旧量 = 深度 D）是**初等推论**，没有逐字来源，须按本项目在明确假设下的推论来写；
+   - C3（一份线性化正反两趟）**就是 FineMote 的机制**，图论部分是教科书事实（逆后序 = 拓扑序）；
+   - C4（滞后 → 相位裕度 → 带宽）是**数字控制教科书内容**；
+   - C6（整组原子提交）**未找到任何权威来源**；EtherCAT 的一致过程镜像是**不同层面**的类比，
+     不能当作"行业标准做法"来声称；"两阶段提交"在事务处理里有严格含义，必须在文中区分。
+2. **LET 对比**：LET 用全局逻辑时刻**按定义**解决同一问题，代价是每条边一个 LET 区间延迟
+   + 双缓冲 + 同步时基；本项目不需要时基与双缓冲、不增加周期延迟，
+   代价是要求可分解的阶段与无环层次。最诚实的描述是
+   **"面向无环控制层次的、基于顺序的轻量 LET 仿真"**——差别实质但远小于措辞给人的印象。
+3. **拆分基线（评审要求的后半）**：本项目**已有**该基线且它**通过了**——
+   `GenericCompositeController`（普通控制器插件 + `create_library()`）复用同一内核、
+   **不需要改 manager**，而且更快（`update()` 中位 0.78–2.03 µs vs 管理器路径 2.80–4.39 µs；
+   每周期分配 3 vs 10；`run()` 两者都是 0 分配/100 次）。
+   因此 `RELATED_WORK.md` §3 用一张七维表回答"manager 扩展服务于什么独立需求"：
+   **逐控制器生命周期、局部激活、原生接口参与、工具可见性、故障隔离、成员异构**——
+   **调度能力不在其中**。这是评审要的那份解释，结论与评审的怀疑一致。
+4. **引用核实**：查新最初给出的 FineMote 引用不可信（只有编号），因此**逐条抓取**：
+   `arXiv:2608.04600v1 [cs.RO]`（2026-08-05，SJTU，6 作者）**真实存在**，
+   其 `τ_n^+`/`τ_n^-` 两阶段、阶段集合、屏障约束 (1c)、`+` 子→父 / `−` 父→子 均已核对。
+   仍未核实：III-B 的具体顺序公式、正式发表 venue。
+5. **未做**：固定时间常数下的跨频率比较（评审提到的最后一点）。**没有**作"首创/无创新"定论。
 
 ---
 
@@ -388,7 +493,42 @@ colcon build --packages-select hierarchical_control controller_manager hierarchi
 | `test_cycle_tree_contract`（独立程序） | PASS（1000 组同周期对照 + 故障/陈旧/恢复） |
 | 编译语料 `hierarchical_control/test/test_static_topology_negative.py` | 8/8（7 个必须被拒 + 1 个反空洞对照） |
 
-### ⚠ 仍然失败的 3 个用例（**不是我改的代码路径**，但也没有做 A/B 复核）
+### 最终全量扫描（2026-09-24）
+
+| 包 | 结果 |
+|---|---|
+| `hierarchical_control` | **10 个程序 / 68 用例全通过**（`test_pass_lower_bound` 7、`test_contract_regression` 12、`test_execution_group` 11、`test_stale_state_cost` 7、`test_dimensional_interfaces` 6、`test_static_topology` 5、`test_topology_binding` 5、`test_topology_contract` 7、`test_typed_ports` 5、`test_scheduling_performance` 4） |
+| `controller_manager` | **18 个程序通过**（`test_two_phase_execution` 10、`test_staged_execution_group` 6、`test_hierarchy_comparison` 6、`test_hierarchy` 4、`test_upstream_ordering` 4、`test_load_controller` 39、`test_controller_manager` 18、`test_controller_manager_srvs` 14、`test_controllers_chaining_with_controller_manager` 6、`test_hardware_spawner` **8/8**、`test_spawner_unspawner` 21/22、其余小项），`test_cycle_tree_contract` 独立程序 PASS |
+| 编译语料 | `test_static_topology_negative.py` 8/8 |
+| TSan | racy 必报 / atomic 干净 → PASS |
+| 阶段图穷举 | `research/stage_graph/check_stage_graph.py` 465/465 |
+
+**仍失败的 1 个用例**：`test_spawner_unspawner.spawner_test_with_wildcard_entries_with_no_ctrl_name`
+（CLI 自身 1.0 s 服务发现超时）。注意 `test_hardware_spawner` 本次 **8/8 全通过**、
+`spawner_test_failed_activation_of_controllers` 也通过——同一批 `spawner` 用例在不同运行间结果不同，
+支持"环境时序"而非代码缺陷的判断；但**仍未做 A/B**，所以不声称"与我无关"。
+
+### 2026-09-24 清理结果
+
+上一版列的 3 个 `spawner` CLI 用例本次**重跑仍失败 2 个**（`wildcard_entries_with_no_ctrl_name`、
+`spawner_with_later_load_of_robot_description`），失败信息仍是 CLI 自己的
+`Could not contact service ... --controller-manager-timeout 1.0`；第三个
+（`failed_activation_of_controllers`）重跑通过。**仍未做 A/B 复核**（磁盘不允许第二棵构建树），
+因此仍按"环境时序、未验证与我无关"记录。
+
+**另有一个由本轮改动引起的真实回归（已修，必须记录）**：
+`test_controllers_chaining_with_controller_manager` 在 17 项全量扫描中出现 5 个
+`internal_counter` 差 1 的失败。原因不是"既有 flaky"，而是我在 R8 里把
+`rebuild_two_phase_entries()` **无条件**接到了 `switch_controller()` / `add_controller_impl()` /
+`unload_controller()` 上：即使 `two_phase_enabled_ == false`，它也会做
+`dynamic_cast` + `make_shared` + `sort`。该测试的驱动器在切换期间持续调用 `cm_->update()`，
+所以切换线程变慢 ⇒ 实时循环多跑一个周期 ⇒ 计数器差 1。
+修复：`rebuild_two_phase_entries()` 在 two-phase 关闭时**直接发布空快照并返回**，
+配置路径不再有任何多余工作。修复后连跑 3 次均 6/6 通过。
+教训：**"配置路径上的额外工作"会改变实时循环在切换窗口里完成的周期数**，
+计数型断言能看见它；这类耦合必须用全量测试才能发现。
+
+### ⚠ 仍然失败的 spawner CLI 用例（**不是我改的代码路径**，但也没有做 A/B 复核）
 
 | 测试 | 现象 |
 |---|---|

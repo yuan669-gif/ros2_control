@@ -2248,6 +2248,18 @@ const std::vector<ControllerManager::TwoPhaseEntry> & ControllerManager::two_pha
 void ControllerManager::rebuild_two_phase_entries(
   const std::vector<ControllerSpec> & controllers)
 {
+  if (!two_phase_enabled_)
+  {
+    // Nothing consumes the entry set, so do not allocate, cast or sort on the configuration path.
+    // This matters: `switch_controller()`, `add_controller_impl()` and `unload_controller()` call
+    // this while the real-time loop is running, and doing needless work there lengthens the switch
+    // enough to change how many cycles the loop completes (which controller-update-count tests
+    // observe). Publishing a null snapshot makes `update()` use its static empty vector.
+    std::atomic_store(&two_phase_entries_, std::shared_ptr<const std::vector<TwoPhaseEntry>>());
+    two_phase_rejected_ = 0;
+    return;
+  }
+
   // Build the new membership off to the side and publish it with one atomic store, so a reader in
   // `update()` either sees the whole old set or the whole new one and is never blocked.
   auto entries = std::make_shared<std::vector<TwoPhaseEntry>>();
@@ -2505,8 +2517,9 @@ controller_interface::return_type ControllerManager::update(
       default:
         RCLCPP_ERROR(
           get_logger(),
-          "Staged execution group failed in cycle %llu at node %zu (status %d, fault 0x%x).",
+          "Staged execution group failed in cycle %llu at node %zu ('%s') (status %d, fault 0x%x).",
           static_cast<unsigned long long>(staged_result.cycle), staged_result.failed_node,
+          staged->node_name(staged_result.failed_node).c_str(),
           static_cast<int>(staged_result.status), staged_result.fault_code);
         ret = controller_interface::return_type::ERROR;
         break;

@@ -114,7 +114,7 @@ controller_interface::return_type ChassisController::update_reference_from_subsc
 }
 
 controller_interface::return_type ChassisController::update_phase(
-  const rclcpp::Time &, const rclcpp::Duration & period) noexcept
+  const rclcpp::Time & time, const rclcpp::Duration & period) noexcept
 {
   const double dt = period.seconds();
   ++cycle_;
@@ -123,9 +123,24 @@ controller_interface::return_type ChassisController::update_phase(
   // ---- state edge: consume the wheels' cumulative travel --------------------------------
   const double left_travel = left_->travel();
   const double right_travel = right_->travel();
-  // Lag is the difference of CYCLE NUMBERS, not of timestamps: the wheel stamps the cycle in
-  // which it produced this value, and comparing it with our own cycle counts exact scheduling
-  // lag without any clock alignment (review R9).
+  // Lag is measured on the SHARED MANAGER CLOCK, not by differencing two independent cycle
+  // counters. Every controller in one ControllerManager::update() cycle gets the same `time`, so
+  // `our time - the time of the cycle that produced the value we read` is exactly the scheduling
+  // lag in manager periods. Differencing per-controller counters instead mixes in the
+  // activation-time offset and produced a constant, meaningless -289 cycles in one run (review R9).
+  sample_ns_ = time.nanoseconds();
+  used_left_sample_ns_ = left_->sample_ns();
+  used_right_sample_ns_ = right_->sample_ns();
+  lag_left_ns_ = sample_ns_ - used_left_sample_ns_;
+  lag_right_ns_ = sample_ns_ - used_right_sample_ns_;
+  const auto period_ns = period.nanoseconds();
+  if (period_ns > 0)
+  {
+    lag_left_cycles_ = lag_left_ns_ / period_ns;
+    lag_right_cycles_ = lag_right_ns_ / period_ns;
+  }
+  // Kept for continuity: the raw per-controller counters, which are NOT comparable across
+  // controllers because each starts when its own controller starts.
   used_left_cycle_ = left_->cycle();
   used_right_cycle_ = right_->cycle();
   used_left_ = left_travel;
@@ -176,7 +191,11 @@ controller_interface::return_type ChassisController::handle_phase(
     x_, y_, th_, ref_x_, ref_y_, ref_th_, ex, ey, eth, used_left_, used_right_, v, w,
     static_cast<double>(cycle_),
     static_cast<double>(used_left_cycle_),
-    static_cast<double>(used_right_cycle_)};
+    static_cast<double>(used_right_cycle_),
+    static_cast<double>(lag_left_ns_),
+    static_cast<double>(lag_right_ns_),
+    static_cast<double>(lag_left_cycles_),
+    static_cast<double>(lag_right_cycles_)};
   diagnostics_publisher_->publish(msg);
   return controller_interface::return_type::OK;
 }

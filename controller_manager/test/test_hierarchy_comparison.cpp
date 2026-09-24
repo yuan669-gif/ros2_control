@@ -830,8 +830,8 @@ Group SetupLibraryForkN(
 }
 
 /// Gate B: the generic composite library host produces the same output as the manager-integrated
-/// staged group for 2-leaf and 3-leaf forks, and its update path is allocation-free after the
-/// one-time lazy build.
+/// staged group for 2-leaf and 3-leaf forks, and its control path is allocation-free from the very
+/// first cycle (the kernel is built during activation, not lazily inside `update()`).
 TEST_F(HierarchyFairComparison, library_host_matches_staged_group)
 {
   for (const auto & leaves : {TwoLeafFork(), ThreeLeafFork()})
@@ -841,6 +841,19 @@ TEST_F(HierarchyFairComparison, library_host_matches_staged_group)
 
     auto staged_group = SetupStagedForkN(executor_, "cmp_lib_staged_cm", leaves);
     auto library_group = SetupLibraryForkN(executor_, "cmp_lib_library_cm", leaves);
+
+    // The FIRST update after activation must already be allocation-free. Before the kernel was
+    // built in `on_activate()`, this cycle was where the lazy build ran, with its `reserve`,
+    // `make_shared` and node construction on the control path.
+    g_allocation_count.store(0, std::memory_order_relaxed);
+    g_count_allocations.store(true, std::memory_order_relaxed);
+    ASSERT_EQ(Return::OK, library_group.generic->update(kTime, kPeriod));
+    g_count_allocations.store(false, std::memory_order_relaxed);
+    const auto first_cycle_allocations = g_allocation_count.load(std::memory_order_relaxed);
+    std::cout << "[comparison] generic composite first post-activation update allocations="
+              << first_cycle_allocations << " (leaves=" << leaves.size() << ")\n";
+    EXPECT_EQ(0u, first_cycle_allocations)
+      << "the kernel must be built during activation, so the first control cycle cannot allocate";
 
     for (int cycle = 1; cycle <= 6; ++cycle)
     {
@@ -862,7 +875,7 @@ TEST_F(HierarchyFairComparison, library_host_matches_staged_group)
     }
     EXPECT_GE(library_group.generic->build_allocations, 1);
 
-    // The lazy build happened on the first update; the steady-state update path must not allocate.
+    // The steady-state update path must not allocate either.
     g_allocation_count.store(0, std::memory_order_relaxed);
     g_count_allocations.store(true, std::memory_order_relaxed);
     for (int i = 0; i < 100; ++i)

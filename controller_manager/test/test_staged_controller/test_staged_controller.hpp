@@ -149,6 +149,12 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   void set_fail_command(bool value);
 
+  /// Make the manager-level two-phase `handle_phase()` fail, without touching the staged contract's
+  /// `update_command_stage()` or the native path. Used to measure what the two-phase path does when
+  /// a command stage fails halfway through the command pass.
+  CONTROLLER_MANAGER_PUBLIC
+  void set_fail_handle(bool value);
+
   CONTROLLER_MANAGER_PUBLIC
   void set_fail_commit(bool value);
 
@@ -180,6 +186,10 @@ public:
   /// Number of real (ResourceManager-owned) command interfaces bound to this controller.
   CONTROLLER_MANAGER_PUBLIC
   std::size_t command_interface_count() const;
+
+  /// Number of real (ResourceManager-owned) state interfaces bound to this controller.
+  CONTROLLER_MANAGER_PUBLIC
+  std::size_t state_interface_count() const;
 
   /// Value currently stored in the first real command interface (hardware-side buffer).
   CONTROLLER_MANAGER_PUBLIC
@@ -224,6 +234,7 @@ private:
   double external_reference_ = 0.0;
   bool fail_state_ = false;
   bool fail_command_ = false;
+  bool fail_handle_ = false;
   bool fail_commit_ = false;
   bool emit_nan_ = false;
   double state_offset_ = 0.0;

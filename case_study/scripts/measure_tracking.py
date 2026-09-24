@@ -9,17 +9,28 @@ offsets, packet loss and the difference between simulation and wall clocks, and 
 report a spurious lag of 0 when the wheels produced no data at all (every error came out inf and
 `errors.index(min(errors))` returned 0). See doc/REVIEW_HUMBLE_WORK_2026-09-23.md R9.
 
-The controllers now stamp cycle numbers, so the lag is an exact integer difference:
+The lag is measured on the SHARED MANAGER CLOCK:
 
-    lag = chassis_cycle - wheel_cycle_of_the_value_the_chassis_read
+    lag_ns = (manager time of the consumer's cycle) - (manager time of the cycle that produced
+                                                       the value the consumer read)
 
-Each controller increments its own counter once per control cycle, so this is a scheduling lag by
-construction and needs no clock alignment. Missing data is a FAILURE, not a zero.
+Every controller in one `ControllerManager::update()` cycle receives the same `time`, so this
+difference is an exact multiple of the control period and is the scheduling lag itself: no clock
+alignment, no DDS queueing, no subscriber-side interpolation.
+
+Subtracting two per-controller CYCLE COUNTERS instead is wrong and was measured to be wrong: each
+counter starts when its own controller starts, so the difference is dominated by the activation-time
+offset. One run reported a perfectly constant -289 cycles for every sample, which is the offset
+between the two controllers' activation instants, not a lag. The raw counters are still published
+(fields 13-15) for auditing, but the lag comes from fields 16-19.
+
+This script also cross-checks that `lag_ns` is consistent with `lag_cycles * period_ns`.
 
 Subscribes to:
   /chassis/diagnostics   [x, y, th, ref_x, ref_y, ref_th, ex, ey, eth,
                           used_left, used_right, v, w,
-                          chassis_cycle, wheel_left_cycle, wheel_right_cycle]
+                          chassis_cycle, wheel_left_cycle, wheel_right_cycle,
+                          lag_left_ns, lag_right_ns, lag_left_cycles, lag_right_cycles]
   /wheel_left/travel     cumulative wheel travel [m]
   /wheel_right/travel    cumulative wheel travel [m]
   /model_states          Gazebo ground-truth model pose
@@ -50,7 +61,11 @@ DIAG_W = 12
 DIAG_CYCLE = 13
 DIAG_LEFT_CYCLE = 14
 DIAG_RIGHT_CYCLE = 15
-DIAG_MIN_LEN = 16
+DIAG_LAG_LEFT_NS = 16
+DIAG_LAG_RIGHT_NS = 17
+DIAG_LAG_LEFT_CYCLES = 18
+DIAG_LAG_RIGHT_CYCLES = 19
+DIAG_MIN_LEN = 20
 
 
 def yaw_from_quaternion(q):
@@ -144,20 +159,48 @@ def main():
             "fields (stale controller build?)"
         )
 
-    # --- state-edge lag, from cycle numbers -------------------------------------------------
+    # --- state-edge lag, on the shared manager clock ----------------------------------------
+    period_ns = int(round(1e9 / rate))
     lag = {"left": [], "right": []}
+    counter_lag = {"left": [], "right": []}
+    inconsistent = 0
+    negative = 0
     for _, values in node.chassis:
-        chassis_cycle = int(values[DIAG_CYCLE])
-        for side, key in (("left", DIAG_LEFT_CYCLE), ("right", DIAG_RIGHT_CYCLE)):
-            wheel_cycle = int(values[key])
-            if wheel_cycle > 0:
-                lag[side].append(chassis_cycle - wheel_cycle)
+        for side, ns_key, cycles_key, counter_key in (
+            ("left", DIAG_LAG_LEFT_NS, DIAG_LAG_LEFT_CYCLES, DIAG_LEFT_CYCLE),
+            ("right", DIAG_LAG_RIGHT_NS, DIAG_LAG_RIGHT_CYCLES, DIAG_RIGHT_CYCLE),
+        ):
+            lag_ns = int(values[ns_key])
+            lag_cycles = int(values[cycles_key])
+            lag[side].append(lag_cycles)
+            counter_lag[side].append(int(values[DIAG_CYCLE]) - int(values[counter_key]))
+            if abs(lag_ns - lag_cycles * period_ns) > period_ns // 2:
+                inconsistent += 1
+            if lag_cycles < 0:
+                negative += 1
 
     for side in ("left", "right"):
         if not lag[side]:
             node.destroy_node()
             rclpy.shutdown()
-            return fail(f"no usable cycle stamps for wheel_{side}")
+            return fail(f"no usable lag samples for wheel_{side}")
+
+    # The manager clock gives an exact multiple of the period on every cycle. A mismatch means the
+    # controllers did not all see the same manager time, i.e. the metric itself is invalid.
+    if inconsistent:
+        node.destroy_node()
+        rclpy.shutdown()
+        return fail(
+            f"{inconsistent} samples where lag_ns is not lag_cycles * period_ns; the shared-clock "
+            "assumption is broken and no lag may be reported"
+        )
+    if negative:
+        node.destroy_node()
+        rclpy.shutdown()
+        return fail(
+            f"{negative} samples with a negative lag: the consumer read a value stamped LATER than "
+            "its own cycle, which the scheduling model forbids"
+        )
 
     summary = {}
     for side in ("left", "right"):
@@ -194,13 +237,20 @@ def main():
     )
     for side in ("left", "right"):
         median, lo, hi, n = summary[side]
+        counters = counter_lag[side]
         print(
             f"[case-study] lag_{side:5s} = {median} cycles (min {lo}, max {hi}, n={n})  "
             f"= {median * period * 1000:.1f} ms at the CONFIGURED {rate:.0f} Hz period"
         )
+        print(
+            f"[case-study]   raw counter difference for comparison: median "
+            f"{int(statistics.median(counters))} cycles (min {min(counters)}, max {max(counters)}) "
+            "-- NOT the lag; it contains the activation offset"
+        )
     print(
-        "[case-study] NOTE: the cycle figure is an exact integer scheduling lag. The millisecond "
-        "figure is DERIVED from the configured control period, not measured on a wall clock."
+        "[case-study] NOTE: the cycle figure is the exact scheduling lag on the shared manager "
+        "clock. The millisecond figure is DERIVED from the configured control period, not measured "
+        "on a wall clock."
     )
     if truth_seen:
         print(

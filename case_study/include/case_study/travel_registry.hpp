@@ -30,8 +30,21 @@ public:
    * Lag is measured by comparing cycle NUMBERS, not wall-clock timestamps. Timestamp-based nearest
    * neighbour alignment on the subscriber side mixes in DDS queueing, topic offsets and the
    * simulation clock, so it cannot distinguish a scheduling lag from transport jitter.
+   *
+   * This counter starts when the producing controller starts, so it is NOT comparable with another
+   * controller's counter: the difference of two such counters is dominated by the activation-time
+   * offset (a measured run showed a constant -289 / -118 cycles). Use `sample_ns()` for lag.
    */
   virtual std::uint64_t cycle() const = 0;
+
+  /// Manager time of the cycle in which this source last updated its travel, in nanoseconds.
+  /**
+   * Every controller in one `ControllerManager::update()` cycle receives the SAME `time`, so this
+   * timestamp is a shared epoch across all controllers: `consumer_ns - producer_ns` is an exact
+   * multiple of the control period and equals the scheduling lag directly, with no clock
+   * alignment, no activation offset and no DDS timing mixed in.
+   */
+  virtual std::int64_t sample_ns() const = 0;
 };
 
 class TravelRegistry

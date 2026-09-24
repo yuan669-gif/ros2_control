@@ -88,10 +88,13 @@ controller_interface::return_type WheelController::update_reference_from_subscri
 }
 
 controller_interface::return_type WheelController::update_phase(
-  const rclcpp::Time &, const rclcpp::Duration & period) noexcept
+  const rclcpp::Time & time, const rclcpp::Duration & period) noexcept
 {
   const double dt = period.seconds();
   ++cycle_;
+  // Stamp the value with the manager time of THIS cycle: every controller in one manager cycle
+  // gets the same `time`, so a consumer can subtract it to get the lag in manager periods.
+  sample_ns_ = time.nanoseconds();
   velocity_ = state_interfaces_.size() > 1 ? state_interfaces_[1].get_value() : 0.0;
   // A slip/estimator filter at the leaf: its state depends on this controller's own history, so a
   // parent cannot reconstruct `travel_` from the instantaneous joint position (position * radius).

@@ -327,6 +327,8 @@ void TestStagedController::set_fail_state(bool value) {fail_state_ = value;}
 
 void TestStagedController::set_fail_command(bool value) {fail_command_ = value;}
 
+void TestStagedController::set_fail_handle(bool value) {fail_handle_ = value;}
+
 void TestStagedController::set_fail_commit(bool value) {fail_commit_ = value;}
 
 void TestStagedController::set_emit_nan(bool value) {emit_nan_ = value;}
@@ -354,6 +356,7 @@ controller_interface::return_type TestStagedController::handle_phase(
   const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/) noexcept
 {
   ++handle_phase_calls;
+  if (fail_handle_) {return controller_interface::return_type::ERROR;}
   const double reference =
     reference_interfaces_.empty() ? external_reference_ : reference_interfaces_[0];
   two_phase_command_ = reference - two_phase_estimate_;
@@ -392,6 +395,11 @@ double TestStagedController::committed_value() const
 std::size_t TestStagedController::command_interface_count() const
 {
   return command_interfaces_.size();
+}
+
+std::size_t TestStagedController::state_interface_count() const
+{
+  return state_interfaces_.size();
 }
 
 double TestStagedController::command_interface_value() const

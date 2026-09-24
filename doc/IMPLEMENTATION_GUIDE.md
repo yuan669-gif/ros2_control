@@ -654,19 +654,19 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | 1 | **多频 / 异步回调** | 模型与实现均未支持；`run_ns` 假定单频同步 | `FORMAL_MODEL.md` §8 威胁 3 |
 | 2 | **动态拓扑** | 计划在配置期固定；运行期不能增删成员 | `hierarchy.hpp` |
 | 3 | **生命周期回滚顺序** | 部分失败的成员回滚未实现 | — |
-| 4 | **两趟模式的故障一致性验证** | "整组提交不部分提交"**只有 staged group 有证据**；两趟模式**没有**该保证，也**未验证** | `test_two_phase_execution.cpp` 未覆盖 |
-| 5 | **实测两趟的额外开销** | 多一次列表遍历 + 每控制器一次虚调用，**未与单趟对比** | — |
-| 6 | **多执行组** | 同时只支持一个 `staged_group_` | `controller_manager.cpp` |
+| 4 | ~~两趟模式的故障一致性验证~~ **已于 2026-09-24 完成（结论是"没有该保证"）** | 新增 `two_phase_mode_has_no_group_commit`：命令趟父先子后、`handle_phase` 直写 command handle、管理器无缓冲，所以后段失败时**前段写入已经生效**。实测 `mid` 的已认领接口在 leaf 命令阶段失败的那一周期从 `-1.875` 变成 `-5.5625`。**两趟模式不得声称"整组提交不部分提交"**；该保证只有 staged group 有（`test_staged_execution_group.failure_never_partially_commits`） | `test_two_phase_execution.cpp` |
+| 5 | ~~实测两趟的额外开销~~ **已于 2026-09-24 完成** | 同一套三控制器级联、同一管理器，翻转 `two_phase_execution` 与 `two_phase_legacy` 后各测 200 个周期（`read+update+write` 中位数）：**单趟 5.377 µs / 两趟 8.794 µs，比值 1.64×**。两趟更慢，唯一收益是消掉那一周期滞后 | `test_two_phase_execution.two_pass_costs_one_extra_traversal` |
+| 6 | **多执行组** | 同时只支持一个 `staged_group_`（评审也建议暂不扩展，见 `REVIEW_HUMBLE_WORK_2026-09-23.md` §4.4） | `controller_manager.cpp` |
 | 7 | **URDF 参与拓扑校验** | URDF 只用于 `ResourceManager` 提供资源 | — |
 | 8 | **真实硬件故障动作** | 只有 mock hardware 验证；真实总线的故障语义未定义 | — |
 | 9 | **硬实时 WCET / deadline miss** | **只测了分配次数与中位耗时**，非实时虚机 | `HIERARCHY_FAIR_COMPARISON.md` §5 |
 | 10 | **`Spec::parents` 接到配置（YAML/参数）** | 内核支持该字段，但**没有**配置入口。注意：两趟之后该字段**不是必需的** | `staged_execution_group.hpp` |
-| 11 | **库宿主的显式激活期建内核** | 现为第一次 `update()` 惰性建内核（一次性分配在实时路径上） | `WIRING_COST_ANALYSIS.md` §七.5 |
+| 11 | ~~库宿主的显式激活期建内核~~ **已于 2026-09-24 修复** | 内核改在 `on_activate()` 建（管理器先 `assign_interfaces()` 再 `activate()`，所以借用的接口此时已就绪），`on_deactivate()` 释放以免跨激活边界复用；`update()` 不再有任何建内核分支，缺内核直接返回 `ERROR`。`test_hierarchy_comparison` 新增断言：**激活后第一个 `update()` 分配数 = 0**（旧实现在这一周期分配） | `test_composite_library/generic_composite_controller.cpp` |
 | 12 | **`members_active_` 的非 switch 状态变化** | 缓存会过期，仅记为限制 | §8.1 |
 | 13 | **阶段 B 接到执行组端口声明** | 量纲与所有权**尚未**与 `staged_*_ports()` 的字符串名打通（目前只在 `Contract` 内检查） | `PORT_DIMENSIONS.md` §3 |
 | 14 | **状态端口的语义建模** | 见 §11 边界 | 同上 |
 | 15 | **深链编译成本优化** | `ancestry` 按值复制，成本随深度增长（8→64 层约 2.9 倍）；可改为沿父链查询 | `COMPILE_COST.md` §3 |
-| 16 | **诊断携带可读节点名** | 曾评估为"收益有限"而放弃，后被实践推翻（嵌套模板定位成本高） | `PAPER.md` §8 陷阱 8 |
+| 16 | ~~诊断携带可读节点名~~ **已于 2026-09-24 完成** | `StagedExecutionGroup::node_name(index)` 返回组内字符串（越界返回 `"<none>"`，不抛异常、不分配）；管理器失败日志现在是 `at node 2 ('tp_module') (status 4, fault 0x52)`。`StagedResult` 仍只带索引，所以 `run_ns` 保持零分配 | `staged_execution_group.hpp`、`controller_manager.cpp` |
 
 ### 12.2 环境阻塞（不是"没做"，是"做不了"）
 
@@ -683,15 +683,16 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | 2 | **耗时不稳**：非实时虚机，`max` 波动 8–300 µs；未报 p95/p99；未做 CPU 绑定；未做消融（帧校验 / 整组提交各占多少） |
 | 3 | **接线成本只测了一种拓扑变化（加叶）**：未测插入中间层、叶换子树、共享模块 |
 | 4 | **代码量统计只算行数**：没有区分难度或出错概率 |
-| 5 | **库宿主惰性建内核**：严格说仍有一次实时路径分配 |
+| 5 | ~~库宿主惰性建内核~~ **已修复**（见 12.1 #11）；仍需注意 `update()` 里的 `std::atomic_load(shared_ptr)` 不是无锁操作 |
 
 ### 12.4 已知的未修缺陷 / 妥协
 
 | # | 妥协 |
 |---|---|
 | 1 | `refresh_member_active_state()` 不加锁 ⇒ 非 switch 的状态变化会让缓存过期 |
-| 2 | 库宿主第一次 `update()` 惰性建内核（一次性分配） |
+| 2 | ~~库宿主第一次 `update()` 惰性建内核（一次性分配）~~ **已修复**（见 12.1 #11） |
 | 3 | legacy 与 two-phase 混用时**相对顺序无保证**（已写入 API 注释） |
+| 6 | 两趟模式的**非实时重构点**（switch/load/unload）在 `two_phase_enabled_ == false` 时**直接返回**：否则那些无谓的 `dynamic_cast`/`make_shared`/`sort` 会拉长切换，改变实时循环在切换期间完成的周期数——`test_controllers_chaining_with_controller_manager` 的计数器断言会因此失败（**这是实测到的回归**，已修） |
 | 4 | `plan_.preorder` 仍被赋值但内核不再使用（兼容保留） |
 | 5 | `test_controllers_chaining_with_controller_manager` 是**既有 flaky 测试**（负载下偶发计数偏差），本次改动未触碰原生 chaining 逻辑 |
 
