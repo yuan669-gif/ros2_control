@@ -27,18 +27,22 @@
 //   * (=>) The edges satisfied by a single pass are consistent with one total order, hence form an
 //     acyclic subgraph. So a valid k-pass schedule induces such a partition.
 //
-//   Minimum passes = the minimum number of acyclic classes (a "DAG edge cover number"). This is
-//   NP-hard in general but tiny for the graphs here, so it is computed exactly.
+//   Minimum passes = the minimum number of acyclic classes. NOTE (2026-09-23 correction): this is
+//   NOT NP-hard. For any digraph without self-loops, pick any vertex order and split the edges into
+//   the forward and the backward group; both are acyclic, so the answer is always
+//   0 (no edges), 1 (non-empty acyclic) or 2 (contains a cycle). The enumeration below verifies
+//   that trivial classification -- it is NOT evidence for an optimality claim.
 //
 // Lower bound: edges that PAIRWISE form a cycle cannot share a pass, so the minimum is at least the
 // size of the largest pairwise-conflicting edge set. This test verifies exhaustively that the bound
-// is attained on all small digraphs, and in particular for cascades of any depth.
+// is attained on all small digraphs.
 //
 // Consequence for this project: for a cascade that is bidirectional at every level, the
 // same-cycle digraph contains a 2-cycle at each level, so at least 2 passes are needed; and the
 // two-pass scheme (state pass in postorder, command pass over the same order reversed) attains 2
-// for ANY depth. Hence two passes are optimal, and the cascade depth D does not increase the pass
-// count -- it only increases the LAG of a single-pass schedule.
+// for ANY depth. This is a special case of the trivial classification above, so it only says that
+// the number of complete stage traversals cannot be reduced further -- it does NOT say anything
+// about CPU time, end-to-end latency, or scheduling optimality in general.
 
 #include <gtest/gtest.h>
 

@@ -144,11 +144,20 @@ public:
 
   /// Opt-in FineMote-style execution: controllers implementing TwoPhaseControllerInterface are run
   /// as two passes over the SAME ordered controller list (reverse for `update_phase`, forward for
-  /// `handle_phase`) instead of the native single-pass loop. Requires a switch to refresh
-  /// membership; legacy and two-phase controllers may be mixed but their relative order is not
-  /// guaranteed.
+  /// `handle_phase`) instead of the native single-pass loop. Legacy and two-phase controllers may
+  /// be mixed but their relative order is not guaranteed.
+  ///
+  /// Enabling is refused, and nothing is changed, when any controller that implements
+  /// TwoPhaseControllerInterface cannot be run by this path. The native loop rate-gates controllers
+  /// on their own update_rate; the two-phase passes always run every cycle, so a controller whose
+  /// update_rate differs from the manager's would silently be called off-rate. The two paths also
+  /// own disjoint controller sets, so a controller that is already a staged group member is
+  /// rejected rather than executed twice per cycle.
+  ///
+  /// \return OK when the flag was applied, ERROR when the request was rejected (the offending
+  /// controller and the reason are logged).
   CONTROLLER_MANAGER_PUBLIC
-  void set_two_phase_execution(bool enabled);
+  controller_interface::return_type set_two_phase_execution(bool enabled);
 
   CONTROLLER_MANAGER_PUBLIC
   bool two_phase_execution() const;
@@ -521,26 +530,45 @@ private:
 
   std::unique_ptr<rclcpp::PreShutdownCallbackHandle> preshutdown_cb_handle_{nullptr};
   RTControllerListWrapper rt_controllers_wrapper_;
-  /// Opt-in staged execution group. Assigned while its members are inactive; read in `update()`.
-  std::shared_ptr<StagedExecutionGroup> staged_group_;
+  /// Opt-in staged execution group. Published with `std::atomic_store` by the non-real-time thread
+  /// and read with `std::atomic_load` by `update()`, so installing or retiring a group never races
+  /// with the control loop. `mutable` because the atomic accessors take a non-const pointer.
+  mutable std::shared_ptr<StagedExecutionGroup> staged_group_;
 
-  /// Opt-in two-phase (FineMote Update/Handle) execution. Membership is resolved outside the
-  /// control loop so the passes only do a pointer lookup.
+  /// Opt-in two-phase (FineMote Update/Handle) execution. The membership vector is rebuilt only
+  /// outside the control loop and published atomically; the passes do one pointer lookup per
+  /// controller and never allocate.
   static constexpr std::size_t no_two_phase = std::numeric_limits<std::size_t>::max();
   struct TwoPhaseEntry
   {
     const controller_interface::ControllerInterfaceBase * base;
     hierarchical_control::TwoPhaseControllerInterface * instance;
   };
+  /// Why a controller that implements TwoPhaseControllerInterface may not join the two-phase path.
+  enum class TwoPhaseAdmission
+  {
+    accepted,
+    /// Already a member of the installed staged execution group, which would execute it too.
+    already_staged,
+    /// Has a nonzero update_rate that the two-phase passes cannot honour.
+    unsupported_update_rate
+  };
   bool two_phase_enabled_ = false;
-  bool two_phase_entries_dirty_ = false;
-  std::vector<TwoPhaseEntry> two_phase_entries_;
-  /// Rebuild membership from a controller list the caller already owns. Never locks: the
-  /// real-time path must not contend with switch_controller(), which holds the controllers lock
-  /// while it waits for the real-time loop to apply the switch.
+  /// Immutable once published, so a reader in `update()` may dereference it without locking.
+  /// `mutable` because the atomic accessors take a non-const pointer.
+  mutable std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries_;
+  /// Only touched by the non-real-time thread.
+  std::size_t two_phase_rejected_ = 0;
+  static const char * two_phase_admission_reason(TwoPhaseAdmission admission) noexcept;
+  TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
+  const std::vector<TwoPhaseEntry> & two_phase_entries() const noexcept;
+  /// Build membership from a controller list the caller already owns, then publish it atomically.
+  /// Never locks: it is only called from the non-real-time thread, which must not contend with
+  /// switch_controller() while that holds the controllers lock waiting for the control loop.
   void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);
   void refresh_two_phase_controllers();
   std::size_t two_phase_index(
+    const std::vector<TwoPhaseEntry> & entries,
     const controller_interface::ControllerInterfaceBase * controller) const noexcept;
   /// mutex copied from ROS1 Control, protects service callbacks
   /// not needed if we're guaranteed that the callbacks don't come from multiple threads

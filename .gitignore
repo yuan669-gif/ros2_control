@@ -32,6 +32,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# --- case study runtime artefacts ---------------------------------------------------------------
+# The Gazebo harness writes generated URDF/YAML, gzserver logs and a throwaway HOME tree here.
+# That tree previously captured a real PulseAudio cookie; runtime output must never be committed.
+# Kept locally for inspection, reproducible with case_study/scripts/phase_b.sh.
+case_study/logs/
+
 # --- ROS local state ------------------------------------------------------------------------
 .ros/
 .gazebo/
@@ -45,3 +51,5 @@ FineMote-main/
 FineMote-main.zip
 FineMote系统内版本.pdf
 FineMote论文_文本.txt
+
+.coverage

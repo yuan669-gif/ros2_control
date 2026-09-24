@@ -50,9 +50,9 @@
 
 | 文件 | 改动 |
 |---|---|
-| `controller_manager/include/controller_manager/controller_manager.hpp` | +33 行 include；新增 5 个公开 API（行 135–154）；私有成员 `no_two_phase`(529)、`TwoPhaseEntry`(530–534)、`two_phase_enabled_`(535)、`two_phase_entries_dirty_`(536)、`two_phase_entries_`(537)、`staged_group_`(525)；3 个私有辅助声明(541–543) |
-| `controller_manager/src/controller_manager.cpp` | 两个构造函数读 `two_phase_execution` 参数(289–295, 336–342)；新增 `rebuild_two_phase_entries`(2200)、`refresh_two_phase_controllers`(2221)、`two_phase_index`(2229)、`set_two_phase_execution`(2240)、`two_phase_execution`(2249)、`set_staged_execution_group`(2251)、`clear_staged_execution_group`(2312)、`staged_execution_group`(2318)；**唯一被改动的既有函数是 `update()`**(2323–2465) |
-| `controller_manager/test/*` | 新增 4 个测试文件（见 1.3）；两个既有测试**未改** |
+| `controller_manager/include/controller_manager/controller_manager.hpp` | +33 行 include；新增 5 个公开 API（行 135–163；`set_two_phase_execution` 自 2026-09-23 起返回 `controller_interface::return_type`）；私有成员 `staged_group_`(536，`mutable` + 原子发布)、`no_two_phase`(541)、`TwoPhaseEntry`(542–546)、`TwoPhaseAdmission`(548–557)、`two_phase_enabled_`、`two_phase_entries_`(559，`shared_ptr<const vector>` + 原子发布)、`two_phase_rejected_`；私有辅助 `two_phase_admission_reason`/`two_phase_admission`/`two_phase_entries()`/`rebuild_two_phase_entries`/`refresh_two_phase_controllers`/`two_phase_index`(563–573) |
+| `controller_manager/src/controller_manager.cpp` | 两个构造函数读 `two_phase_execution` 参数(289–295, 336–342)；新增 `two_phase_admission_reason`(2207)、`two_phase_admission`(2223)、`two_phase_entries()`(2240)、`rebuild_two_phase_entries`(2248)、`refresh_two_phase_controllers`(2307)、`two_phase_index`(2315)、`set_two_phase_execution`(2327)、`two_phase_execution`(2370)、`set_staged_execution_group`(2372)、`clear_staged_execution_group`(2464)、`staged_execution_group`(2472)、`update`(2477)；另有 6 个**非实时**重建点：`unload_controller`、`reorder_controllers`、`switch_controller`、`add_controller_impl`、`set_staged_execution_group`、`clear_staged_execution_group` |
+| `controller_manager/test/*` | 新增 4 个测试文件（见 1.3）；`test_two_phase_execution.cpp` 增加 `TestExecutionPathAdmission` 夹具（6 个 R7 准入用例）；既有 2 个滞后用例**未改语义** |
 
 ### 1.3 新增兼容 shim（2 个，各 ~20 行）
 
@@ -318,75 +318,95 @@ public:
 
 **没有端口声明、没有帧、没有组提交。**
 
-### 4.2 开关
+### 4.2 开关（2026-09-23 起会**拒绝**而不是静默降级）
 
 ```cpp
 // 参数（两个构造函数都读，行 289 与 336）
 two_phase_execution: bool   // 默认 false
 // 或运行时
-cm->set_two_phase_execution(true);
+controller_interface::return_type r = cm->set_two_phase_execution(true);
+//   OK    : 已启用（成员集已重建）
+//   ERROR : 请求被拒，two_phase_enabled_ 保持原值，原因已记日志
 cm->two_phase_execution();   // 查询
 ```
 
-### 4.3 成员索引的构建与缓存
+`set_two_phase_execution(true)` 会**整体拒绝**该请求（而不是排除个别控制器）当且仅当存在
+某个实现 `TwoPhaseControllerInterface` 的控制器满足下列任一条：
+
+| 拒绝原因 | 判定 | 为什么必须拒绝 |
+|---|---|---|
+| `already_staged` | 它是**当前已安装 staged group 的成员** | staged group 与两趟遍历在同一周期各自执行一次 ⇒ 该控制器每周期跑两遍 |
+| `unsupported_update_rate` | `get_update_rate() != 0 && != 管理器频率` | 两条新路径**没有**原生循环的 `update_loop_counter_ % controller_update_factor` 门控（`controller_manager.cpp:2400–2416`），会把它按管理器频率调用，静默改变离散化 |
+
+注意：判定依据是**成员身份**而不是"是否实现 `StagedControllerInterface`"。
+一个控制器同时支持两种执行模式是合理设计（`TestStagedController` 就是），
+真正的危险是**被两条路径同时实际执行**。反方向的镜像校验在 `set_staged_execution_group()` 里：
+若 `two_phase_enabled_` 且该成员正在两趟成员集里，则拒绝入组；
+组内成员也被施加同一条频率规则（组同样是每周期一次、传管理器周期）。
+
+### 4.3 成员索引：非实时构建、原子发布、实时只读
 
 ```cpp
-struct TwoPhaseEntry {   // controller_manager.hpp:530-534
-  controller_interface::ControllerInterfaceBase * base;
+struct TwoPhaseEntry {   // controller_manager.hpp:542-546
+  const controller_interface::ControllerInterfaceBase * base;
   hierarchical_control::TwoPhaseControllerInterface * instance;
 };
-static constexpr std::size_t no_two_phase = SIZE_MAX;   // 行 529
+static constexpr std::size_t no_two_phase = SIZE_MAX;   // 行 541
+// 不可变快照：构建者先造好新 vector，再一次性发布
+std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries_;  // 行 559
 
-void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);  // 行 2200
-void refresh_two_phase_controllers();                                            // 行 2221
-std::size_t two_phase_index(const controller_interface::ControllerInterfaceBase *) const; // 行 2229
+void rebuild_two_phase_entries(const std::vector<ControllerSpec> &);           // 行 2248
+void refresh_two_phase_controllers();                                          // 行 2307
+std::size_t two_phase_index(const std::vector<TwoPhaseEntry> &, const ... *) const noexcept; // 行 2315
 ```
 
-- `rebuild_two_phase_entries` 对列表做 `dynamic_cast<TwoPhaseControllerInterface*>`
-  （行 2208），**每个切换最多一次**；
-- `two_phase_index` 用**指针比较**（不比较字符串），运行路径上是 `O(n)` 线性查找；
-- `refresh_two_phase_controllers()` 从**非实时线程**调用（`set_two_phase_execution`），
-  那里**可以**加锁。
+- `rebuild_two_phase_entries()` 做 `dynamic_cast<TwoPhaseControllerInterface*>`
+  + 准入判定，`std::sort` 后 `std::atomic_store` 发布新快照；**只在非实时线程调用**；
+- `two_phase_index()` 在**排好序**的快照上做 `std::lower_bound`（指针比较，不比较字符串），
+  `O(log n)`；快照不变，所以实时侧无需任何同步原语；
+- `update()` 每周期**只做一次** `std::atomic_load`，把结果放进局部 `shared_ptr`；
+  该局部量使旧快照在整个周期内存活，即使另一线程已发布新快照。
+  这是本项目的 `O(1)`、**不分配**的发布协议。
 
-### 4.4 `update()` 的实际形态（行 2323 起）
+### 4.4 `update()` 的实际形态（行 2477 起）
 
 ```cpp
-// (0) 若装了 staged group 且无切换挂起，先跑执行组
-if (staged_group_ && !switch_params_.do_switch) {
-  const auto staged_result = staged_group_->run(time, period);
+// (0) 只读发布一次：一次原子加载 + 局部 shared_ptr 保活（不分配、不加锁）
+const auto staged = std::atomic_load(&staged_group_);
+const auto two_phase_entries_holder = std::atomic_load(&two_phase_entries_);
+const auto & entries = two_phase_entries_holder ? *two_phase_entries_holder : no_entries;
+
+// (1) 若装了 staged group 且无切换挂起，先跑执行组
+if (staged && !switch_params_.do_switch) {
+  const auto staged_result = staged->run(time, period);
   ...
 }
 
-// (1) 若两趟启用且条目脏：用本线程已持有的 rt_controller_list 重建（不加锁！）
-if (two_phase_enabled_ && two_phase_entries_dirty_)
-  rebuild_two_phase_entries(rt_controller_list);
-
 // (2) Pass 1 "Update"：反向遍历 → update_phase（子先于父）
-const bool run_two_phase =
-    two_phase_enabled_ && !two_phase_entries_.empty() && !switch_params_.do_switch;
+const bool run_two_phase = two_phase_enabled_ && !entries.empty() && !switch_params_.do_switch;
 if (run_two_phase) {
   for (std::size_t slot = rt_controller_list.size(); slot-- > 0;) {
     auto & spec = rt_controller_list[slot];
-    const auto index = two_phase_index(spec.c.get());
+    const auto index = two_phase_index(entries, spec.c.get());
     if (index == no_two_phase || !is_controller_active(*spec.c)) continue;
-    if (two_phase_entries_[index].instance->update_phase(time, period) != OK)
+    if (entries[index].instance->update_phase(time, period) != OK)
       { RCLCPP_ERROR(...); ret = ERROR; }
   }
 }
 
 // (3) legacy 单相循环：跳过 staged 成员，也跳过 two-phase 成员
 for (auto loaded_controller : rt_controller_list) {
-  if (staged_group_ && staged_group_->owns(loaded_controller.c.get())) continue;
-  if (run_two_phase && two_phase_index(loaded_controller.c.get()) != no_two_phase) continue;
-  ... 原生 update() ...
+  if (staged && staged->owns(loaded_controller.c.get())) continue;
+  if (run_two_phase && two_phase_index(entries, loaded_controller.c.get()) != no_two_phase) continue;
+  ... 原生 update()（含 2400–2416 的逐控制器降频门控）...
 }
 
 // (4) Pass 2 "Handle"：正向遍历同一列表 → handle_phase（父先于子）
 if (run_two_phase) {
   for (auto & spec : rt_controller_list) {
-    const auto index = two_phase_index(spec.c.get());
+    const auto index = two_phase_index(entries, spec.c.get());
     if (index == no_two_phase || !is_controller_active(*spec.c)) continue;
-    if (two_phase_entries_[index].instance->handle_phase(time, period) != OK) ...
+    if (entries[index].instance->handle_phase(time, period) != OK) ...
   }
 }
 
@@ -397,6 +417,10 @@ if (run_two_phase) {
 
 - 两趟**跳过**切换挂起时的执行（成员集合可能正在变化）；
 - legacy 与 two-phase 控制器**可以混用**，但**相对顺序无保证**（已写入 API 注释）；
+- **准入**（2026-09-23）：实现 `TwoPhaseControllerInterface` 的控制器若已在 staged group 里、
+  或声明了不等于管理器频率的 `update_rate`，`set_two_phase_execution(true)` 返回 `ERROR`
+  且**不改变**任何状态；反方向由 `set_staged_execution_group()` 镜像拒绝。
+  这保证了一个控制器**每周期最多被一条路径执行一次**；
 - 控制器侧的 `update_and_write_commands()` 在两阶段模式下**什么都不做**：
   ```cpp
   if (legacy_) { update_phase(...); return handle_phase(...); }  // 单入口模式自己跑两阶段
@@ -511,9 +535,9 @@ void refresh_member_active_state() noexcept;   // 只在 manage_switch() 之后�
 ### 8.3 安装/清除（管理器宿主）
 
 ```cpp
-set_staged_execution_group(names, max_age_ns);  // 行 2251
-clear_staged_execution_group();                 // 行 2312
-staged_execution_group();                       // 行 2318
+set_staged_execution_group(names, max_age_ns);  // 行 2372
+clear_staged_execution_group();                 // 行 2464
+staged_execution_group();                       // 行 2472
 ```
 
 `set_staged_execution_group` 的拒绝条件（配置期，返回 `ERROR` 并记录日志）：
@@ -521,11 +545,18 @@ staged_execution_group();                       // 行 2318
 - 未知控制器名；
 - 成员已是 **ACTIVE**（必须 INACTIVE 才能加入）；
 - 成员未实现 `StagedControllerInterface`（`dynamic_cast` 失败）；
+- **（2026-09-23）** 两趟执行已启用且该成员**正在两趟成员集里**——两条路径会同周期执行它；
+- **（2026-09-23）** 成员声明了 `!= 0 && != 管理器频率` 的 `update_rate`——组没有原生循环那种
+  逐控制器降频门控；
 - `StagedExecutionGroup::create` 抛 `std::invalid_argument`（拓扑/端口错误）。
 
 **组的成员必须已经加载、configure 完成且 INACTIVE。**
 
-`clear_staged_execution_group()` 必须在任何成员被卸载或转为 ACTIVE **之前**调用。
+`clear_staged_execution_group()` 必须在任何成员被卸载或转为 ACTIVE **之前**调用；
+它会原子释放组，并**重新发布**两趟成员集（原先被"已入组"排除的控制器因此重新合格）。
+
+安装与清除都用 `std::atomic_store(&staged_group_, ...)` 发布，`update()` 用
+`std::atomic_load` 读取一次并复用该局部量。
 
 ---
 
@@ -544,15 +575,27 @@ staged_execution_group();                       // 行 2318
 > 实时线程阻塞在锁上 → 不再推进 `used_by_realtime_controllers_index_` →
 > 等待切换的线程在 `wait_until_rt_not_using()` 里**永久自旋**。
 
-### 9.3 修复
+### 9.3 修复（含 2026-09-23 的发布协议重做）
 
 | 位置 | 做法 |
 |---|---|
-| `set_two_phase_execution()`（非实时线程） | **可以**加锁，直接刷新 |
-| `update()`（实时路径） | 只用**脏标志** `two_phase_entries_dirty_`，在下一周期开头用本线程**已持有**的 `rt_controller_list` 重建（`O(n)` `dynamic_cast`，每切换最多一次），**全程不加锁** |
-| `refresh_member_active_state()` | 特意**不加锁**，同一原因 |
+| `set_two_phase_execution()`（非实时线程） | 加锁重建成员集并原子发布 |
+| **成员集重建的全部调用点** | 全部在**非实时**线程：`unload_controller`、`reorder_controllers`、`switch_controller`（列表切换后）、`add_controller_impl`、`set_staged_execution_group`、`clear_staged_execution_group` |
+| `update()`（实时路径） | **只读**：每周期一次 `std::atomic_load(&two_phase_entries_)` 和一次 `std::atomic_load(&staged_group_)`，局部 `shared_ptr` 保活；**不重建、不加锁、不分配** |
+| `refresh_member_active_state()` | 特意**不加锁**，同一原因；对 `update()` 取到的局部组对象调用 |
 
-**规则**：任何接入 `ControllerManager` 实时循环的新机制都必须遵守。
+**为什么不再用"脏标志 + 实时重建"**：初版用 `two_phase_entries_dirty_` 让实时线程在下一周期开头
+用自己已持有的 `rt_controller_list` 重建。这解决了死锁，却引入两个新问题：
+(1) `rebuild` 里有 `reserve/push_back/dynamic_cast/sort` 和旧 vector 析构——**实时路径在分配**；
+(2) 非实时线程（`set_two_phase_execution`）也可能写同一个 `two_phase_entries_`，
+与实时线程构成**数据竞争**。改为"非实时构建 + 原子发布不可变快照"后两个问题一起消失。
+
+**代价与边界（不要夸大）**：`std::atomic_load/atomic_store(shared_ptr)` 是 C++17 设施
+（本仓库 `cxx_std_17`），**不保证无锁**（libstdc++ 用自旋锁池）。实时路径上是一次原子引用计数操作，
+**不是零开销**。另外 **TSan 未运行**，本节的正确性是设计论证 + 代码审查，不是并发实测。
+
+**规则**：任何接入 `ControllerManager` 实时循环的新机制都必须遵守——
+"非实时线程构建不可变快照，实时线程一次原子加载只读"。
 
 ### 9.4 调试提示
 
@@ -571,7 +614,7 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | 设备内部状态 | `StagedFrame` + 控制器自有 `update_state_stage` | `staged_controller_interface.hpp` |
 | 摄取 vs 产生的分离 | `update_state_stage` / `update_command_stage` | 同上 |
 | （FineMote 无） | 帧校验、最旧采样、整组提交 | `staged_execution_group.hpp` |
-| （FineMote 无） | 管理器 opt-in 两趟（轻量版） | `controller_manager.cpp` 2365–2445 |
+| （FineMote 无） | 管理器 opt-in 两趟（轻量版） | `controller_manager.cpp` 2477–2610 |
 
 **实现对照**：`for (const auto node : plan_.postorder)` 与
 `for (command_slot = plan_.postorder.size(); command_slot-- > 0;)`

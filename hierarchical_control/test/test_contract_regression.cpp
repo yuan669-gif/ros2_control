@@ -30,6 +30,9 @@
 #include <vector>
 
 #include "hierarchical_control/staged_execution_group.hpp"
+#include "hierarchical_control/topology_binding.hpp"
+#include "hierarchical_control/typed_ports.hpp"
+#include "test_controller_stub.hpp"
 
 namespace hc = hierarchical_control;
 using Return = controller_interface::return_type;
@@ -277,58 +280,73 @@ TEST(ContractRegression, r4_late_sink_failure_leaves_internal_view_consistent)
     << "R4: a late sink failure must not leave the internal command image half-updated";
 }
 
-/// R6: one owner providing TWO ports to the same consumer is a single writer, not a conflict.
+/// R6: one parent providing TWO ports to the same child is a single writer, not a conflict.
 ///
-/// Direction convention (verified against upstream and the case study): a controller that CLAIMS
-/// "<owner>/port" is the CONSUMER, and <owner> is its PARENT. So `owner` here is the parent and
-/// `consumer` is the child. The rule lives in `derive_parents_from_claimed_interfaces`
-/// (hierarchy.hpp), which keeps it testable without a full ControllerInterfaceBase stub.
-TEST(ContractRegression, r6_one_owner_may_provide_two_ports_to_the_same_consumer)
+/// Direction convention, taken from the staged kernel's own contract (`StagedGroupMember` in
+/// `staged_execution_group.hpp`) and confirmed end-to-end by
+/// `controller_manager/test/test_staged_execution_group.cpp`: the controller that CLAIMS
+/// "<owner>/port" is the reference *producer*, hence the PARENT, and the prefix owner is the CHILD
+/// that reads it. (The claimant writes the claimed command interface.) The rule lives in
+/// `derive_parents_from_claimed_interfaces` (hierarchy.hpp), testable without a full
+/// ControllerInterfaceBase stub.
+///
+/// NOTE: an earlier revision of this test asserted the OPPOSITE direction; that inverted the
+/// hierarchy and broke `test_staged_execution_group` / `test_hierarchy_comparison`.
+TEST(ContractRegression, r6_one_parent_may_provide_two_ports_to_the_same_child)
 {
-  // `wheel` owns both ports; `chassis` consumes them. This is an ordinary 2-D reference.
+  // `chassis` writes both ports; `wheel` reads them. This is an ordinary 2-D reference.
   const std::vector<std::string> names{"wheel", "chassis"};
   const std::vector<std::vector<std::string>> claimed{{}, {"wheel/x", "wheel/y"}};
 
   std::vector<std::string> parents;
   ASSERT_NO_THROW(parents = hc::derive_parents_from_claimed_interfaces(names, claimed))
-    << "R6: two ports from ONE owner to one consumer must be accepted";
+    << "R6: two ports from ONE parent to one child must be accepted";
   ASSERT_EQ(2u, parents.size());
-  EXPECT_EQ("", parents[0]) << "the port owner is the root here";
-  EXPECT_EQ("wheel", parents[1]) << "the consumer is the child of the port owner";
+  EXPECT_EQ("chassis", parents[0]) << "the claimant is the parent of the port owner";
+  EXPECT_EQ("", parents[1]) << "the claimant is the root here";
 }
 
-/// Two consumers claiming the SAME port of one owner is fan-out, not a writer conflict.
-///
-/// This is a deliberate scope decision: the function derives "who is whose parent", and two
-/// children of one parent are consistent with a tree. Whether a single exported reference may be
-/// shared by two consumers is enforced by the runtime interface claim, not by this derivation.
-TEST(ContractRegression, r6_two_children_of_one_owner_are_consistent)
+/// One parent taking references from two different children is ordinary fan-out, not a conflict.
+TEST(ContractRegression, r6_one_parent_with_two_children_is_consistent)
 {
-  const std::vector<std::string> names{"wheel", "c1", "c2"};
-  const std::vector<std::vector<std::string>> claimed{{}, {"wheel/x"}, {"wheel/x"}};
+  const std::vector<std::string> names{"p", "c1", "c2"};
+  const std::vector<std::vector<std::string>> claimed{{"c1/x", "c2/y"}, {}, {}};
 
   std::vector<std::string> parents;
-  ASSERT_NO_THROW(parents = hc::derive_parents_from_claimed_interfaces(names, claimed));
+  ASSERT_NO_THROW(parents = hc::derive_parents_from_claimed_interfaces(names, claimed))
+    << "one controller may take references from two different controllers";
   ASSERT_EQ(3u, parents.size());
-  EXPECT_EQ("wheel", parents[1]);
-  EXPECT_EQ("wheel", parents[2]);
+  EXPECT_EQ("", parents[0]) << "the single claimant is the root";
+  EXPECT_EQ("p", parents[1]);
+  EXPECT_EQ("p", parents[2]);
 }
 
-/// One consumer claiming the SAME port twice is a duplicate claim and is rejected.
-TEST(ContractRegression, r6_duplicate_claim_by_one_consumer_is_rejected)
+/// A child fed by two different parents is rejected: a tree node has exactly one parent.
+TEST(ContractRegression, r6_child_with_two_parents_is_rejected)
 {
-  const std::vector<std::string> names{"wheel", "c1"};
-  const std::vector<std::vector<std::string>> claimed{{}, {"wheel/x", "wheel/x"}};
+  // Two claimants take different ports of the SAME owner, so `wheel` would have two parents.
+  const std::vector<std::string> names{"wheel", "c1", "c2"};
+  const std::vector<std::vector<std::string>> claimed{{}, {"wheel/x"}, {"wheel/y"}};
 
   EXPECT_THROW(
     hc::derive_parents_from_claimed_interfaces(names, claimed), std::invalid_argument);
 }
 
-/// A consumer claiming ports from two different owners has no single parent and is rejected.
-TEST(ContractRegression, r6_consumer_with_two_parents_is_rejected)
+/// Two claimants taking the SAME port is two writers for one port and is rejected.
+TEST(ContractRegression, r6_port_with_two_writers_is_rejected)
 {
-  const std::vector<std::string> names{"a", "b", "consumer"};
-  const std::vector<std::vector<std::string>> claimed{{}, {}, {"a/x", "b/y"}};
+  const std::vector<std::string> names{"wheel", "c1", "c2"};
+  const std::vector<std::vector<std::string>> claimed{{}, {"wheel/x"}, {"wheel/x"}};
+
+  EXPECT_THROW(
+    hc::derive_parents_from_claimed_interfaces(names, claimed), std::invalid_argument);
+}
+
+/// One claimant listing the SAME port twice is a duplicate claim and is rejected.
+TEST(ContractRegression, r6_duplicate_claim_by_one_claimant_is_rejected)
+{
+  const std::vector<std::string> names{"wheel", "c1"};
+  const std::vector<std::vector<std::string>> claimed{{}, {"wheel/x", "wheel/x"}};
 
   EXPECT_THROW(
     hc::derive_parents_from_claimed_interfaces(names, claimed), std::invalid_argument);
@@ -357,4 +375,89 @@ TEST(ContractRegression, r6_foreign_owner_is_ignored)
   ASSERT_NO_THROW(parents = hc::derive_parents_from_claimed_interfaces(names, claimed));
   ASSERT_EQ(1u, parents.size());
   EXPECT_EQ("", parents[0]) << "a single node with only hardware interfaces is a root";
+}
+
+
+/// ---------------------------------------------------------------------------------------------
+/// R5: instance pointers must survive the binding even when a controller inherits the staged
+/// interface at a NON-ZERO offset.
+///
+/// The reviewed revision erased instances to `void*` and recovered them with a cast back to the
+/// staged interface. For a class that inherits both ControllerInterfaceBase and
+/// StagedControllerInterface, that second base usually sits at an offset, and the round trip loses
+/// the adjustment. This test measures the offset first, so it cannot pass vacuously on a layout
+/// where the two pointers happen to coincide.
+/// ---------------------------------------------------------------------------------------------
+namespace
+{
+namespace tp = hierarchical_control::typed_ports;
+namespace dm = hierarchical_control::dimensions;
+namespace st = hierarchical_control::static_topology;
+namespace tc = hierarchical_control::topology_contract;
+
+struct mi_owner_n
+{
+  static constexpr auto value = st::NameOf("mi_owner/state");
+};
+using mi_owner_port = tc::Port<mi_owner_n, dm::Position>;
+struct mi_node_n
+{
+  static constexpr auto value = st::NameOf("mi_owner");
+};
+using mi_node = st::Root<mi_node_n>;
+using mi_contract = tc::Contract<tc::PortList<>, tc::PortList<mi_owner_port>>;
+
+/// A controller whose StagedControllerInterface base is NOT the first base.
+class MultiInheritController : public hierarchical_control_test::MinimalController,
+                               public hierarchical_control::StagedControllerInterface
+{
+public:
+  MultiInheritController() : MinimalController("mi_owner") {}
+
+  std::vector<std::string> staged_state_ports() const override {return {"mi_owner/state"};}
+
+  Return update_state_stage(
+    const rclcpp::Time &, const rclcpp::Duration &, const hc::StagedContext &,
+    const hc::StagedInputView &, hc::StagedValueWriter state) noexcept override
+  {
+    for (std::size_t i = 0; i < state.size(); ++i) {state[i] = 7.0;}
+    return Return::OK;
+  }
+
+  Return update_command_stage(
+    const rclcpp::Time &, const rclcpp::Duration &, const hc::StagedContext &,
+    const hc::StagedValueView &, const hc::StagedValueView &, const hc::StagedReferenceWriter &,
+    hc::StagedValueWriter) noexcept override
+  {
+    return Return::OK;
+  }
+};
+}  // namespace
+
+TEST(ContractRegression, r5_non_zero_base_offset_survives_the_binding)
+{
+  MultiInheritController controller;
+
+  auto * as_controller =
+    static_cast<controller_interface::ControllerInterfaceBase *>(&controller);
+  auto * as_staged = static_cast<hc::StagedControllerInterface *>(&controller);
+  if (as_controller == static_cast<void *>(as_staged))
+  {
+    GTEST_SKIP() << "this layout has no base offset, so it cannot exercise R5";
+  }
+
+  const auto binding = tc::make_leaf<mi_node, mi_contract>(&controller);
+  const auto rows = tc::build_spec_rows(binding);
+  ASSERT_EQ(1u, rows.names.size());
+
+  // The stored pointer must be the ControllerInterfaceBase subobject, not the object address.
+  EXPECT_EQ(as_controller, rows.instances[0])
+    << "the binding must store the adjusted base pointer";
+
+  // And the kernel must recover a *working* staged interface from it: a cast that ignored the
+  // offset would land on the wrong subobject and this run would not reach the controller.
+  auto group = hierarchical_control::topology_binding::create_library_group(binding);
+  ASSERT_NE(nullptr, group);
+  const auto result = group->run_ns(0, 1000);
+  EXPECT_EQ(hc::StagedStatus::committed, result.status);
 }

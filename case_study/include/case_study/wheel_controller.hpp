@@ -51,6 +51,7 @@ public:
     const rclcpp::Time & time, const rclcpp::Duration & period) noexcept override;
 
   double travel() const override {return travel_;}
+  std::uint64_t cycle() const override {return cycle_;}
 
 protected:
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
@@ -65,6 +66,7 @@ private:
   double ki_ = 1.0;
   bool legacy_ = true;
   double travel_ = 0.0;
+  std::uint64_t cycle_ = 0;  ///< increments once per update_phase, i.e. once per control cycle
   double velocity_ = 0.0;
   double filtered_velocity_ = 0.0;  // estimator state: NOT re-derivable by the parent
   double integral_ = 0.0;

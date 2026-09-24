@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -22,6 +23,7 @@
 #include "controller_manager/controller_manager.hpp"
 #include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "hardware_interface/resource_manager.hpp"
+#include "lifecycle_msgs/msg/state.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "ros2_control_test_assets/descriptions.hpp"
@@ -72,16 +74,38 @@ double Expected(double reference) {return reference - 7.0 * kStateOffset;}
 
 // ---------------------------------------------------------------------------------------------
 // Dynamic-allocation counting, enabled only around the measured update() call.
+//
+// `g_count_only_current_thread` narrows the count to `g_counted_thread`, so a probe can measure
+// the control-loop thread while another thread (switch_controller, a driver) allocates freely.
 // ---------------------------------------------------------------------------------------------
 std::atomic<bool> g_count_allocations{false};
 std::atomic<std::size_t> g_allocation_count{0};
+std::atomic<bool> g_count_only_current_thread{false};
+std::thread::id g_counted_thread;
+
+/// Restores the default (count every thread) even when a test aborts early.
+struct AllocationCounterGuard
+{
+  AllocationCounterGuard() = default;
+  ~AllocationCounterGuard()
+  {
+    g_count_allocations.store(false, std::memory_order_relaxed);
+    g_count_only_current_thread.store(false, std::memory_order_relaxed);
+  }
+  AllocationCounterGuard(const AllocationCounterGuard &) = delete;
+  AllocationCounterGuard & operator=(const AllocationCounterGuard &) = delete;
+};
 
 void CountAllocation() noexcept
 {
-  if (g_count_allocations.load(std::memory_order_relaxed))
+  if (!g_count_allocations.load(std::memory_order_relaxed)) {return;}
+  if (
+    g_count_only_current_thread.load(std::memory_order_relaxed) &&
+    std::this_thread::get_id() != g_counted_thread)
   {
-    g_allocation_count.fetch_add(1, std::memory_order_relaxed);
+    return;
   }
+  g_allocation_count.fetch_add(1, std::memory_order_relaxed);
 }
 }  // namespace
 
@@ -852,6 +876,184 @@ TEST_F(HierarchyFairComparison, library_host_matches_staged_group)
     EXPECT_EQ(0u, library_allocations);
 
     staged_group.cm->clear_staged_execution_group();
+  }
+}
+
+/// R8: the two-phase membership set must be built off the real-time path.
+///
+/// The reviewed revision set a "dirty" flag inside the switch and rebuilt the entry vector at the
+/// top of the NEXT real-time cycle (`reserve` / `push_back` / `dynamic_cast` / `sort` plus the old
+/// vector's destructor). That is a per-configuration allocation inside `update()`, and it is
+/// invisible to a steady-state allocation measurement.
+///
+/// The probe is deliberately run with NO controller active: the per-cycle allocation count then
+/// contains no per-controller component, so the baseline is flat and a membership rebuild shows up
+/// as a clearly larger cycle. `switch_controller()` still republishes membership while every member
+/// is inactive, which is exactly what makes this window meaningful.
+///
+/// The count is restricted to the control-loop thread, so the concurrent `switch_controller()`
+/// thread (which legitimately allocates: async launch, controller-list copy, service bookkeeping)
+/// can neither mask nor fake the result. Counting starts on the first cycle AFTER the switch has
+/// been applied -- the cycle the reviewed revision rebuilt in.
+TEST_F(HierarchyFairComparison, post_switch_two_phase_cycles_do_not_rebuild_membership)
+{
+  constexpr int kBaselineCycles = 30;
+  constexpr int kPostSwitchCycles = 10;
+
+  auto cm = MakeManager(executor_, "cmp_r8_cm");
+  auto root = std::make_shared<TestStagedController>();
+  auto mid = std::make_shared<TestStagedController>();
+  auto leaf = std::make_shared<TestStagedController>();
+
+  // root claims mid/target, mid claims leaf/target: root is the top of the command chain, which
+  // also exercises the parent-derivation direction that the staged kernel documents.
+  root->set_reference_interface_names({"command"});
+  root->set_command_interface_configuration(individual({std::string(kModule) + "/target"}));
+  root->set_state_interface_configuration(individual({}));
+  mid->set_reference_interface_names({"target"});
+  mid->set_command_interface_configuration(individual({std::string(kLeaf) + "/target"}));
+  mid->set_state_interface_configuration(individual({}));
+  leaf->set_reference_interface_names({"target"});
+  leaf->set_actuator_ports({"joint2/velocity"});
+  leaf->set_command_interface_configuration(individual({"joint2/velocity"}));
+  leaf->set_state_interface_configuration(individual({}));
+  for (auto * controller : {root.get(), mid.get(), leaf.get()})
+  {
+    controller->set_two_phase_legacy(true);
+  }
+
+  cm->add_controller(root, kRoot, kChainedType);
+  cm->add_controller(mid, kModule, kChainedType);
+  cm->add_controller(leaf, kLeaf, kChainedType);
+  ConfigureController(cm, kLeaf);
+  ConfigureController(cm, kModule);
+  ConfigureController(cm, kRoot);
+  ASSERT_EQ(Return::OK, cm->set_two_phase_execution(true));
+
+  // Everything stays INACTIVE: the per-cycle allocation count is then the fixed control-loop
+  // overhead only, with no per-active-controller component to hide a rebuild behind.
+  AllocationCounterGuard guard;
+  std::array<std::size_t, kBaselineCycles> per_cycle{};
+  std::size_t previous = 0;
+  g_counted_thread = std::this_thread::get_id();
+  g_count_only_current_thread.store(true, std::memory_order_relaxed);
+  g_allocation_count.store(0, std::memory_order_relaxed);
+  g_count_allocations.store(true, std::memory_order_relaxed);
+  for (int i = 0; i < kBaselineCycles; ++i)
+  {
+    ASSERT_EQ(Return::OK, cm->update(kTime, kPeriod));
+    const auto now = g_allocation_count.load(std::memory_order_relaxed);
+    per_cycle[static_cast<std::size_t>(i)] = now - previous;
+    previous = now;
+  }
+  g_count_allocations.store(false, std::memory_order_relaxed);
+
+  // The very first update() of a freshly configured manager is a warm-up cycle; after it the idle
+  // loop must be perfectly flat, otherwise this probe could not attribute a change to anything.
+  for (int i = 2; i < kBaselineCycles; ++i)
+  {
+    ASSERT_EQ(per_cycle[1], per_cycle[static_cast<std::size_t>(i)])
+      << "the idle control loop must have a flat per-cycle allocation count for this probe to "
+         "mean anything (cycle " << i << ")";
+  }
+
+  // Activate and then deactivate `leaf`, with counting disabled. The deactivation leaves the group
+  // empty again, so the window below is directly comparable with the baseline; and because it is a
+  // switch, the reviewed revision left its entry set dirty for the very next control cycle.
+  const auto run_switch = [&](const std::vector<std::string> & activate,
+                              const std::vector<std::string> & deactivate, int expected_state)
+  {
+    auto future = std::async(
+      std::launch::async, &controller_manager::ControllerManager::switch_controller, cm.get(),
+      activate, deactivate, kStrict, true, rclcpp::Duration(0, 0));
+    for (int i = 0;
+         i < 4000 &&
+         future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
+    {
+      cm->update(kTime, kPeriod);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(30)));
+    EXPECT_EQ(Return::OK, future.get());
+    EXPECT_EQ(expected_state, leaf->get_state().id());
+  };
+  run_switch({kLeaf}, {}, lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+
+  // Start the deactivation but stop as soon as it has been applied: the whole update() that applied
+  // it has returned by then, so do_switch is already false and the next cycle is the first
+  // post-switch cycle.
+  auto future = std::async(
+    std::launch::async, &controller_manager::ControllerManager::switch_controller, cm.get(),
+    std::vector<std::string>{}, std::vector<std::string>{kLeaf}, kStrict, true,
+    rclcpp::Duration(0, 0));
+  for (int i = 0; i < 4000; ++i)
+  {
+    cm->update(kTime, kPeriod);
+    if (leaf->get_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {break;}
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(
+    lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, leaf->get_state().id())
+    << "the deactivation switch never completed";
+
+  // Count from the first post-switch cycle. The loop must keep running until switch_controller()
+  // returns, because that thread waits (inside `switch_updated_list`) for the control loop to move
+  // off the old controller list.
+  std::array<std::size_t, 4096> post_cycle{};
+  std::size_t cycles_counted = 0;
+  g_allocation_count.store(0, std::memory_order_relaxed);
+  previous = 0;
+  g_count_allocations.store(true, std::memory_order_relaxed);
+  for (int i = 0;
+       i < 4000 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
+  {
+    ASSERT_EQ(Return::OK, cm->update(kTime, kPeriod));
+    const auto now = g_allocation_count.load(std::memory_order_relaxed);
+    post_cycle[cycles_counted] = now - previous;
+    previous = now;
+    ++cycles_counted;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  for (int i = 0; i < kPostSwitchCycles; ++i)
+  {
+    ASSERT_EQ(Return::OK, cm->update(kTime, kPeriod));
+    const auto now = g_allocation_count.load(std::memory_order_relaxed);
+    post_cycle[cycles_counted] = now - previous;
+    previous = now;
+    ++cycles_counted;
+  }
+  g_count_allocations.store(false, std::memory_order_relaxed);
+
+  ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::seconds(30)));
+  ASSERT_EQ(Return::OK, future.get());
+  ASSERT_GT(cycles_counted, 1u);
+
+  std::cout << "[comparison] idle baseline per cycle: first=" << per_cycle[0]
+            << " steady=" << per_cycle[1] << " | post-switch profile:";
+  for (std::size_t i = 0; i < cycles_counted; ++i) {std::cout << " " << post_cycle[i];}
+  std::cout << "\n";
+
+  // The cycle that applied the switch is not counted, so the first counted cycle is the one the
+  // reviewed revision rebuilt its membership in.
+  //
+  // MEASURED LIMITATION, stated so nobody over-reads this probe: the settled idle loop already
+  // spends ~18 allocations per cycle in upstream code, while rebuilding a 3-entry membership vector
+  // costs only ~2 (`make_shared` + `reserve`). The ambient count therefore dwarfs the signal, and no
+  // assertion here can prove the absence of the rebuild. What is asserted is:
+  //   * the settled cycles after the switch cost EXACTLY one idle cycle -- this does catch a
+  //     rebuild (or any other allocation) that runs every cycle;
+  //   * the first post-switch cycle carries at most the one-off reconfiguration allocation the
+  //     probe actually measures (+1 here), which is below the >=2 allocations the reviewed
+  //     `make_shared` + `reserve` rebuild needed.
+  // The structural guarantee is in the code: `update()` contains no call that republishes
+  // membership, so there is nothing left on the control path to rebuild.
+  EXPECT_LE(post_cycle[0], per_cycle[1] + 1u)
+    << "a surplus on the first post-switch control cycle is the signature of rebuilding membership "
+       "inside update()";
+  for (std::size_t i = 1; i < cycles_counted; ++i)
+  {
+    EXPECT_EQ(per_cycle[1], post_cycle[i])
+      << "settled idle cycles after a switch must cost exactly one idle cycle (cycle " << i << ")";
   }
 }
 

@@ -117,11 +117,17 @@ controller_interface::return_type ChassisController::update_phase(
   const rclcpp::Time &, const rclcpp::Duration & period) noexcept
 {
   const double dt = period.seconds();
+  ++cycle_;
   if (left_ == nullptr || right_ == nullptr) {return controller_interface::return_type::ERROR;}
 
   // ---- state edge: consume the wheels' cumulative travel --------------------------------
   const double left_travel = left_->travel();
   const double right_travel = right_->travel();
+  // Lag is the difference of CYCLE NUMBERS, not of timestamps: the wheel stamps the cycle in
+  // which it produced this value, and comparing it with our own cycle counts exact scheduling
+  // lag without any clock alignment (review R9).
+  used_left_cycle_ = left_->cycle();
+  used_right_cycle_ = right_->cycle();
   used_left_ = left_travel;
   used_right_ = right_travel;
   const double delta_left = left_travel - prev_left_;
@@ -166,7 +172,11 @@ controller_interface::return_type ChassisController::handle_phase(
   }
 
   std_msgs::msg::Float64MultiArray msg;
-  msg.data = {x_, y_, th_, ref_x_, ref_y_, ref_th_, ex, ey, eth, used_left_, used_right_, v, w};
+  msg.data = {
+    x_, y_, th_, ref_x_, ref_y_, ref_th_, ex, ey, eth, used_left_, used_right_, v, w,
+    static_cast<double>(cycle_),
+    static_cast<double>(used_left_cycle_),
+    static_cast<double>(used_right_cycle_)};
   diagnostics_publisher_->publish(msg);
   return controller_interface::return_type::OK;
 }

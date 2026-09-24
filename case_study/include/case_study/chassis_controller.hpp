@@ -71,6 +71,9 @@ private:
   double prev_left_ = 0.0;
   double prev_right_ = 0.0;
   double used_left_ = 0.0;
+  std::uint64_t cycle_ = 0;          ///< this controller's own control cycle
+  std::uint64_t used_left_cycle_ = 0;   ///< the cycle in which wheel_left last updated its travel
+  std::uint64_t used_right_cycle_ = 0;
   double used_right_ = 0.0;
 
   double x_ = 0.0, y_ = 0.0, th_ = 0.0;

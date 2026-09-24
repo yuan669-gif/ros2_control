@@ -34,18 +34,23 @@ struct ControllerHierarchyPlan
 
 /// Derive each node's parent from the reference interfaces it claims.
 ///
-/// ros2_control names interfaces "<owner>/<local>", so an entry in `claimed_interfaces[i]` whose
-/// owner is another node means node `i` is the CHILD of that owner: node `i` consumes a reference
-/// the owner produces. Entries whose owner is not a node of this group are ordinary hardware
-/// command interfaces and are ignored.
+/// ros2_control names interfaces "<owner>/<local>". An entry in `claimed_interfaces[c]` whose owner
+/// `o` is another node of this group defines a command edge, and the direction is fixed by the
+/// staged kernel's own contract (see `StagedGroupMember` in `staged_execution_group.hpp`):
+/// the CLAIMANT `c` is the reference *producer* and therefore the **parent**; the prefix owner `o`
+/// is the *consumer* and therefore the **child**. (`c` writes the claimed command interface, `o`
+/// reads it through its exported reference interface, so `c` must run first in the command stage.)
+/// Entries whose owner is not a node of this group are ordinary hardware command interfaces.
 ///
-/// A node may claim SEVERAL ports of the same owner (a 2-D or 3-D reference is ordinary in
-/// control). That is one writer per port, not a conflict. A conflict is one PORT with two
-/// different writers, so uniqueness is checked per (owner, port) pair rather than per node.
+/// Two distinct constraints, deliberately keyed differently:
+///   * a fully qualified PORT must have exactly one writer (= one claimant). One node claiming
+///     SEVERAL ports of the same owner is an ordinary 2-D/3-D reference, NOT a conflict;
+///   * a node (as a child) must have exactly one parent, so two different claimants taking
+///     references from the same owner are rejected. One claimant taking references from two
+///     different owners is legal: it is simply a parent with two children.
 ///
 /// Returns a vector parallel to `names`, with an empty string for a root. Throws
-/// std::invalid_argument when a single port is claimed by two different writers, or when a node
-/// claims a reference interface that would make it its own parent.
+/// std::invalid_argument on a port with two writers or on a child with two parents.
 inline std::vector<std::string> derive_parents_from_claimed_interfaces(
   const std::vector<std::string> & names,
   const std::vector<std::vector<std::string>> & claimed_interfaces)
@@ -71,28 +76,28 @@ inline std::vector<std::string> derive_parents_from_claimed_interfaces(
   }
 
   std::vector<std::string> parents(names.size());
-  // One entry per fully qualified port name, across ALL consumers, so that the same port claimed
-  // by two different consumers is detected as two writers.
+  // One entry per fully qualified port name, across ALL claimants, so that the same port claimed
+  // by two different claimants is detected as two writers. The stored value is the CLAIMANT.
   std::unordered_map<std::string, std::string> port_writers;
   port_writers.reserve(names.size());
 
-  for (std::size_t consumer = 0; consumer < names.size(); ++consumer)
+  for (std::size_t claimant = 0; claimant < names.size(); ++claimant)
   {
-    // Ports this consumer claims more than once would be its own duplicate, not a conflict.
-    std::unordered_map<std::string, bool> seen_in_consumer;
+    // Ports this claimant lists more than once would be its own duplicate, not a conflict.
+    std::unordered_map<std::string, bool> seen_in_claimant;
 
-    for (const auto & interface : claimed_interfaces[consumer])
+    for (const auto & interface : claimed_interfaces[claimant])
     {
-      if (!seen_in_consumer.emplace(interface, true).second)
+      if (!seen_in_claimant.emplace(interface, true).second)
       {
         throw std::invalid_argument(
-          "controller '" + names[consumer] + "' claims reference interface '" + interface +
+          "controller '" + names[claimant] + "' claims reference interface '" + interface +
           "' more than once");
       }
       const auto split = interface.find_first_of('/');
       if (split == std::string::npos) {continue;}
       const auto owner = interface.substr(0, split);
-      if (owner == names[consumer])
+      if (owner == names[claimant])
       {
         // Own hardware command interface, not a reference into this group.
         continue;
@@ -103,31 +108,28 @@ inline std::vector<std::string> derive_parents_from_claimed_interfaces(
         // Ordinary hardware command interface owned by a controller outside this group.
         continue;
       }
-      if (owner_it->second == consumer)
-      {
-        throw std::invalid_argument(
-          "controller hierarchy node cannot consume its own reference: " + names[consumer]);
-      }
 
-      // Uniqueness is per PORT. The same owner writing several ports of one child is fine.
-      const auto inserted = port_writers.emplace(interface, owner);
-      if (!inserted.second && inserted.first->second != owner)
+      // Uniqueness is per PORT: the claimant is the single writer of this port. The same claimant
+      // taking several ports of one owner is an ordinary multi-dimensional reference.
+      const auto inserted = port_writers.emplace(interface, names[claimant]);
+      if (!inserted.second && inserted.first->second != names[claimant])
       {
         throw std::invalid_argument(
           "reference interface '" + interface + "' has multiple writers: '" +
-          inserted.first->second + "' and '" + owner + "'");
+          inserted.first->second + "' and '" + names[claimant] + "'");
       }
 
-      const std::string & parent = owner;
-      if (parents[consumer].empty())
+      // The claimant is the parent, the prefix owner is the child. A child has exactly one parent.
+      const std::size_t child = owner_it->second;
+      if (parents[child].empty())
       {
-        parents[consumer] = parent;
+        parents[child] = names[claimant];
       }
-      else if (parents[consumer] != parent)
+      else if (parents[child] != names[claimant])
       {
         throw std::invalid_argument(
-          "controller '" + names[consumer] + "' consumes references from both '" +
-          parents[consumer] + "' and '" + parent + "'; a node may have only one parent");
+          "controller '" + names[child] + "' takes references from both '" + parents[child] +
+          "' and '" + names[claimant] + "'; a node may have only one parent");
       }
     }
   }

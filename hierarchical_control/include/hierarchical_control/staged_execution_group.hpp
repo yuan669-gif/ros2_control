@@ -387,21 +387,22 @@ public:
     // ---------------------------------------------------------------------------- commit
     // Two-phase commit over the leaves.
     //
-    // Phase 1 calls every sink, recording which succeeded. A sink is the controller's adapter to
-    // the real command handles, so `sink->commit()` is where a process-global side effect can
-    // happen; that cannot be rolled back, and we do not pretend otherwise (see the note below).
+    // Pass 1 performs every sink side effect; pass 2 mirrors into the group's own committed view,
+    // and runs ONLY IF pass 1 completed. Before this split, a success on an early leaf updated
+    // `actuator_committed_` and `committed_` even when a later leaf failed, leaving the group's
+    // internal state describing a cycle that never committed (review R4). With the split, the
+    // internal view always matches the last fully committed cycle.
     //
-    // Phase 2 mirrors into the group's own committed view ONLY IF every sink succeeded. Before
-    // this split, a success on an early leaf updated `actuator_committed_` and `committed_` even
-    // when a later leaf failed, leaving the group's internal state describing a cycle that never
-    // committed (review R4). With the split, the internal view always matches the last fully
-    // committed cycle.
+    // Both passes re-iterate the same `leaves_` array, so the split costs no storage: an earlier
+    // revision collected the committed leaves in a local `std::vector`, which allocated once per
+    // cycle and silently broke the kernel's zero-allocation contract (caught by
+    // `test_hierarchy_comparison`). A sink is the controller's adapter to the real command handles,
+    // so `sink->commit()` is where a process-global side effect can happen; that cannot be rolled
+    // back, and we do not pretend otherwise (see the note below).
     //
     // CONTRACT NOTE: "all-or-nothing" holds for the group's own buffers and for anything the group
     // controls. It does NOT hold for side effects a sink's commit() already performed on
     // process-global state; those are the hardware fault domain and are reported, not undone.
-    std::vector<std::size_t> committed_leaves;
-    committed_leaves.reserve(leaves_.size());
     for (const auto leaf : leaves_)
     {
       auto & scratch = actuator_scratch_[leaf];
@@ -414,12 +415,12 @@ public:
       {
         return {StagedStatus::command_failed, cycle, leaf, actuator_frames_[leaf].fault_code};
       }
-      committed_leaves.push_back(leaf);
     }
 
-    for (const auto leaf : committed_leaves)
+    for (const auto leaf : leaves_)
     {
       const auto & scratch = actuator_scratch_[leaf];
+      if (scratch.empty()) {continue;}
       std::copy(scratch.begin(), scratch.end(), actuator_committed_[leaf].begin());
       const auto destination =
         committed_.begin() + static_cast<std::ptrdiff_t>(actuator_offset_[leaf]);

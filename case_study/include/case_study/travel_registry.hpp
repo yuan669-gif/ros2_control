@@ -4,6 +4,7 @@
 #ifndef CASE_STUDY__TRAVEL_REGISTRY_HPP_
 #define CASE_STUDY__TRAVEL_REGISTRY_HPP_
 
+#include <cstdint>
 #include <string>
 
 namespace case_study
@@ -23,6 +24,14 @@ public:
   /// Accumulated wheel travel in metres; an integral of the measured velocity, so a parent cannot
   /// reconstruct it from raw joint feedback alone.
   virtual double travel() const = 0;
+
+  /// The control cycle in which this source last updated its travel.
+  /**
+   * Lag is measured by comparing cycle NUMBERS, not wall-clock timestamps. Timestamp-based nearest
+   * neighbour alignment on the subscriber side mixes in DDS queueing, topic offsets and the
+   * simulation clock, so it cannot distinguish a scheduling lag from transport jitter.
+   */
+  virtual std::uint64_t cycle() const = 0;
 };
 
 class TravelRegistry
