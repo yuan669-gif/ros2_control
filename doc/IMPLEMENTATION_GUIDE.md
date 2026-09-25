@@ -699,6 +699,9 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | 1 | `refresh_member_active_state()` 不加锁 ⇒ 非 switch 的状态变化会让缓存过期 |
 | 2 | ~~库宿主第一次 `update()` 惰性建内核（一次性分配）~~ **已修复**（见 12.1 #11） |
 | 3 | legacy 与 two-phase 混用时**相对顺序无保证**（已写入 API 注释） |
+| 7 | 模式/成员/计划的发布**不是一个 generation**：标志与成员快照各自原子、启用/禁用顺序已固定，但它们与控制器列表、staged group 仍独立发布 ⇒ **首版要求"控制循环停止时配置"**（写在 `set_two_phase_execution` 的注释里）；完整 generation 协议未实现（评审 D） |
+| 8 | 静态 binding 只表达**链**（`BoundNode` 一个 `next`）；分叉树只在运行期内核里存在 ⇒ 分叉树的 typed builder 未实现（评审 B） |
+| 9 | 两趟与 legacy 的**跨模式依赖**未拒绝：pass 2 在原生循环之后，"两趟父 → legacy 子"的参考边会退化成上一周期（评审 E） |
 | 6 | 两趟模式的**非实时重构点**（switch/load/unload）在 `two_phase_enabled_ == false` 时**直接返回**：否则那些无谓的 `dynamic_cast`/`make_shared`/`sort` 会拉长切换，改变实时循环在切换期间完成的周期数——`test_controllers_chaining_with_controller_manager` 的计数器断言会因此失败（**这是实测到的回归**，已修） |
 | 4 | `plan_.preorder` 仍被赋值但内核不再使用（兼容保留） |
 | 5 | `test_controllers_chaining_with_controller_manager` 是**既有 flaky 测试**：它断言精确的 `internal_counter`，而计数由 `ControllerManagerFixture::startCmUpdater` 的 10 ms 睡线程 tick 次数决定（一次切换需要 2 个 tick，偶尔变成 3 个）。**实测：空闲时 0/4 运行全绿，加 2 个 CPU 忙循环后 4/4 全绿**——与调度实现无关。详见 `doc/CODE_AUDIT_SCHEDULING_METAPROGRAMMING.md` §3.1。本次改动未触碰原生 chaining 逻辑；要根治需改该 fixture 的驱动方式（会波及所有用它的上游用例） |

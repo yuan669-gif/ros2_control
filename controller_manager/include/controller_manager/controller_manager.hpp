@@ -137,6 +137,9 @@ public:
     const std::vector<std::string> & controller_names, std::int64_t max_age_ns = 0);
 
   /// Remove the staged group; required before unloading any of its members.
+  ///
+  /// Same configuration constraint as `set_two_phase_execution`: install and clear it while the
+  /// control loop is stopped, or before it starts.
   CONTROLLER_MANAGER_PUBLIC
   void clear_staged_execution_group();
 
@@ -157,6 +160,15 @@ public:
   ///
   /// \return OK when the flag was applied, ERROR when the request was rejected (the offending
   /// controller and the reason are logged).
+  ///
+  /// CONFIGURATION CONSTRAINT (phase 1). The flag is atomic, the entry set is published atomically,
+  /// and enabling publishes the set BEFORE setting the flag, so no cycle can observe "enabled but no
+  /// entries". Those atomics do NOT make this and the controller-list publication a single
+  /// generation, though: a cycle that begins before the call sees the old state and one that begins
+  /// after sees the new one, with no ordering guarantee between them. Call this (and
+  /// `set_staged_execution_group`) while the control loop is STOPPED, or before it starts.
+  /// Reconfiguring under a running loop needs one generation covering mode + members + plan
+  /// together, which is not implemented (review item D).
   CONTROLLER_MANAGER_PUBLIC
   controller_interface::return_type set_two_phase_execution(bool enabled);
 

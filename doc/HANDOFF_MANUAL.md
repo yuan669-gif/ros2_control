@@ -690,6 +690,8 @@ mixin 控制器**真的能在执行组里运行**（端到端 `committed`）。
 | **`doc/REVIEW_RESPONSE_2026-09-23.md`** | **外部评审 R1–R11 的逐条处理记录**（改了什么、怎么验证、哪些没做）。接手时优先读它，避免重复踩已知坑 |
 | `doc/RELATED_WORK.md` | **相关工作与定位（评审 R11）**：逐条重叠分析（结论对本项目不利）、LET 对比、拆分基线对照、引用清单与不确定性 |
 | **`doc/CODE_AUDIT_SCHEDULING_METAPROGRAMMING.md`** | **双向调度 + 元编程的代码审查记录**（2026-09-24）：修掉的 4 个问题、仍存在的边界、以及"既有测试是时间校准的"这一实测结论 |
+| **`doc/REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md`** | **第二份评审（A–E）的处理记录**：A（静态父关系 vs 实际生成关系）、C（端口检查成为建组必经步骤）、D（模式标志与快照发布的两个真 race）已修；B（分叉树 typed builder）、E（跨模式准入）有明确计划 |
+| `doc/REVIEW_REQUIREMENTS_2026-09-24.md` | 第二份评审原文（A–E） |
 | `doc/REVIEW_HUMBLE_WORK_2026-09-23.md` | 外部评审原文（R1–R11） |
 | `doc/TWO_PASS_VS_SINGLE_PASS.md` | 两趟 vs 单趟的阶跃响应定量证明 |
 | `doc/PROJECT_REPORT_2026-09-21.md` | 项目全貌报告（给导师/新读者看）。⚠ **第 3 节「接口连接是依赖来源」的叙事已过时**，需按本文第 1.4 / 2 节修订 |
