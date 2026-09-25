@@ -347,8 +347,20 @@ controller_interface::return_type TestStagedController::update_phase(
 {
   ++update_phase_calls;
   if (fail_update_) {return controller_interface::return_type::ERROR;}
-  const double child_estimate =
-    two_phase_child_ ? two_phase_child_->two_phase_estimate_ : two_phase_input_;
+  double child_estimate = two_phase_input_;
+  if (!two_phase_children_.empty())
+  {
+    // A branch node: the estimate it ingests is the MEAN of its children's CURRENT estimates. With
+    // the two-phase passes (children first) every branch contributes in the SAME cycle; with the
+    // single parents-first pass it would see only the previous one.
+    double sum = 0.0;
+    for (const auto * child : two_phase_children_) {sum += child->two_phase_estimate_;}
+    child_estimate = sum / static_cast<double>(two_phase_children_.size());
+  }
+  else if (two_phase_child_ != nullptr)
+  {
+    child_estimate = two_phase_child_->two_phase_estimate_;
+  }
   // Deliberately non-re-derivable: the node's estimate depends on its own history plus the
   // child's CURRENT estimate, so a parent cannot reconstruct it from raw hardware.
   two_phase_estimate_ = 0.5 * two_phase_estimate_ + 0.5 * child_estimate;
@@ -372,6 +384,12 @@ void TestStagedController::set_two_phase_legacy(bool enabled) {two_phase_legacy_
 void TestStagedController::set_two_phase_child(TestStagedController * child)
 {
   two_phase_child_ = child;
+}
+
+void TestStagedController::set_two_phase_children(
+  std::vector<TestStagedController *> children)
+{
+  two_phase_children_ = std::move(children);
 }
 
 void TestStagedController::set_two_phase_input(double value) {two_phase_input_ = value;}

@@ -24,6 +24,11 @@ This script compiles a small corpus and asserts each file's outcome:
     compile_fail_port_unqualified.cpp     -> must FAIL (ownership)
     compile_fail_child_declares_other_parent.cpp -> must FAIL (nesting vs declared parent)
     compile_fail_root_as_child.cpp        -> must FAIL (a declared Root used as a child)
+    must_compile_typed_tree.cpp           -> must COMPILE (control for the typed branching cases)
+    compile_fail_typed_reference_edge_mismatch.cpp -> must FAIL (typed reference edge)
+    compile_fail_typed_state_edge_order.cpp -> must FAIL (typed state edge, wrong child order)
+    compile_fail_typed_wrong_dimension.cpp -> must FAIL (typed reference edge, dimension)
+    compile_fail_typed_wrong_name.cpp      -> must FAIL (typed state edge, same length, other port)
 
 If a "compile_fail" file ever starts compiling, a guarantee has regressed and this test fails.
 If the control file stops compiling, the test infrastructure is broken and this test also fails --
@@ -73,6 +78,14 @@ CORPUS = {
     "compile_fail_port_unqualified.cpp": (False, "OWNERSHIP VIOLATION"),
     "compile_fail_child_declares_other_parent.cpp": (False, "TOPOLOGY MISMATCH"),
     "compile_fail_root_as_child.cpp": (False, "TOPOLOGY MISMATCH"),
+    # Typed branching tree: a parent's per-child edge declarations must equal the concatenation, in
+    # child order, of what its children declare (names, order AND dimension). The control file is
+    # the same tree with a coherent root declaration.
+    "must_compile_typed_tree.cpp": (True, None),
+    "compile_fail_typed_reference_edge_mismatch.cpp": (False, "REFERENCE EDGE MISMATCH"),
+    "compile_fail_typed_state_edge_order.cpp": (False, "STATE EDGE MISMATCH"),
+    "compile_fail_typed_wrong_dimension.cpp": (False, "REFERENCE EDGE MISMATCH"),
+    "compile_fail_typed_wrong_name.cpp": (False, "STATE EDGE MISMATCH"),
 }
 
 

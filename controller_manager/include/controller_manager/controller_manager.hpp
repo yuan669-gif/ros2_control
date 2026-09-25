@@ -175,6 +175,27 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   bool two_phase_execution() const;
 
+  /// One controller that implements `TwoPhaseControllerInterface` but is NOT executing through the
+  /// two-phase passes, with the reason it was excluded.
+  struct TwoPhaseRejection
+  {
+    std::string name;
+    std::string reason;
+  };
+
+  /// The controllers that implement the interface but cannot join the two-phase path, in list order.
+  /**
+   * Exposes what the rebuild would otherwise only log. A controller that is silently excluded keeps
+   * running through the native single-pass loop, which means the parent-before-child order it relies
+   * on is NOT the one its neighbours see, so a caller has to be able to observe it (review item E).
+   *
+   * Empty when the feature is off and every implementing controller was admitted. Returns BY VALUE:
+   * the set is rebuilt by the non-real-time thread whenever membership changes, so a reference could
+   * race with a concurrent republish. Call it from the non-real-time thread.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  std::vector<TwoPhaseRejection> two_phase_rejected_controllers() const;
+
   template <
     typename T, typename std::enable_if<
                   std::is_convertible<T *, controller_interface::ControllerInterfaceBase *>::value,
@@ -564,7 +585,18 @@ private:
     /// Already a member of the installed staged execution group, which would execute it too.
     already_staged,
     /// Has a nonzero update_rate that the two-phase passes cannot honour.
-    unsupported_update_rate
+    unsupported_update_rate,
+    /// Claims a reference interface owned by a loaded controller that is NOT a two-phase member (or
+    /// is such a controller claimed by a non-member). The two ends would then be ordered by
+    /// DIFFERENT schedules -- pass 2 runs after the native loop -- so the edge silently degrades to
+    /// the previous cycle. Review item E rejects the whole admission instead.
+    cross_mode_dependency,
+    /// The controller manager's controller list puts a reference edge's two ends in the wrong
+    /// order, so `update_phase` (backward walk) and `handle_phase` (forward walk) would both visit
+    /// the parent before the child (or the child before the parent) and the edge would silently use
+    /// the previous cycle's value. Measured case: upstream `controller_sorting()` places a chainable
+    /// controller that claims NO command interface BEFORE the parent that claims its reference.
+    unschedulable_order
   };
   /// Read by `update()` every cycle and written by the non-real-time setter, so it is atomic.
   /// An earlier revision used a plain bool, which is a data race on its own -- making the entry
@@ -573,10 +605,28 @@ private:
   /// Immutable once published, so a reader in `update()` may dereference it without locking.
   /// `mutable` because the atomic accessors take a non-const pointer.
   mutable std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries_;
-  /// Only touched by the non-real-time thread.
-  std::size_t two_phase_rejected_ = 0;
-  static const char * two_phase_admission_reason(TwoPhaseAdmission admission) noexcept;
+  /// Human-readable reason, with the offending owner name where one is relevant.
+  std::string two_phase_admission_reason(TwoPhaseAdmission admission, const std::string & detail)
+    const;
   TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
+  /// The command interfaces a controller would claim, WITHOUT trusting the cached copy.
+  /**
+   * `ControllerSpec::info::claimed_interfaces` is filled by `switch_controller()` for ACTIVE
+   * controllers only, so a freshly configured one has it empty. The cross-mode check has to work
+   * before that, so fall back to the controller's own declaration -- which is only legal once it is
+   * configured (`TestStagedController` throws otherwise) -- and to the resource manager for the
+   * "claim everything" case.
+   */
+  std::vector<std::string> claimed_command_interfaces(const ControllerSpec & controller) const;
+  /// Every controller that implements the interface but is not admitted, in list order.
+  /**
+   * `only_active` restricts the verdict to controllers that are ACTIVE, which is what a switch has
+   * to judge: the two-phase passes skip inactive members, so a non-conforming but deactivated
+   * controller cannot break an edge yet. The enable path deliberately checks the WHOLE configured
+   * set instead, because the flag describes the mode the set is in.
+   */
+  std::vector<TwoPhaseRejection> two_phase_rejections(
+    const std::vector<ControllerSpec> & controllers, bool only_active = false) const;
   /// The published entry set, BY VALUE: the caller must own the snapshot for as long as it uses it.
   /**
    * An earlier revision returned a reference into a snapshot held only by a local `shared_ptr`, so

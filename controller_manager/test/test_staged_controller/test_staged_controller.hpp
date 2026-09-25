@@ -104,6 +104,15 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   void set_two_phase_child(TestStagedController * child);
 
+  /// The same, for a BRANCHING node: the estimate consumed is the MEAN of the children's estimates.
+  /**
+   * The chain accessor above is kept (one child is the common case and its callers must not change);
+   * when this list is non-empty it takes precedence. A branching tree is what review item B asked
+   * for, and this is how the manager-level two-phase test builds one.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  void set_two_phase_children(std::vector<TestStagedController *> children);
+
   /// Hardware stand-in for a leaf's own input.
   CONTROLLER_MANAGER_PUBLIC
   void set_two_phase_input(double value);
@@ -251,6 +260,7 @@ private:
   bool record_diagnostics_ = true;
   bool two_phase_legacy_ = false;
   TestStagedController * two_phase_child_ = nullptr;
+  std::vector<TestStagedController *> two_phase_children_;
   double two_phase_input_ = 0.0;
   double two_phase_estimate_ = 0.0;
   double two_phase_command_ = 0.0;

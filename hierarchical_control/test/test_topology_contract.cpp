@@ -101,9 +101,12 @@ TEST(TopologyContract, ownership_is_checked_at_compile_time)
 TEST(TopologyContract, binding_depth_is_a_compile_time_constant)
 {
   static_assert(tc::binding_depth<decltype(root)>() == 3);
+  // Children are a parameter pack, so a node knows how many it has and can address each one.
   static_assert(decltype(root)::has_child);
-  static_assert(decltype(root)::next_type::has_child);
+  static_assert(decltype(root)::child_count == 1u);
+  static_assert(decltype(root)::template child<0>(root).has_child);
   static_assert(!decltype(leaf)::has_child);
+  static_assert(decltype(leaf)::child_count == 0u);
   static_assert(decltype(root)::name() == std::string_view{"chassis"});
   static_assert(decltype(leaf)::name() == std::string_view{"tire"});
   SUCCEED();

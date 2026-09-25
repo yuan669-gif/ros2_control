@@ -224,6 +224,79 @@ public:
   std::shared_ptr<TestStagedController> root_, mid_, leaf_;
 };
 
+/// A chainable controller that does NOT implement `TwoPhaseControllerInterface`: it stands for the
+/// legacy mode. It exports one reference interface so a two-phase controller can claim it, which is
+/// exactly the cross-mode edge review item E refuses.
+class TestLegacyChainableController : public controller_interface::ChainableControllerInterface
+{
+public:
+  TestLegacyChainableController()
+  {
+    command_interface_configuration_.type =
+      controller_interface::interface_configuration_type::INDIVIDUAL;
+    state_interface_configuration_.type =
+      controller_interface::interface_configuration_type::INDIVIDUAL;
+  }
+
+  controller_interface::InterfaceConfiguration command_interface_configuration() const override
+  {
+    return command_interface_configuration_;
+  }
+
+  controller_interface::InterfaceConfiguration state_interface_configuration() const override
+  {
+    return state_interface_configuration_;
+  }
+
+  CallbackReturn on_init() override
+  {
+    reference_interface_names_ = {"target"};
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_configure(const rclcpp_lifecycle::State & /*previous_state*/) override
+  {
+    reference_interfaces_.assign(reference_interface_names_.size(), 0.0);
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_activate(const rclcpp_lifecycle::State & /*previous_state*/) override
+  {
+    return CallbackReturn::SUCCESS;
+  }
+
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/) override
+  {
+    return CallbackReturn::SUCCESS;
+  }
+
+protected:
+  std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override
+  {
+    std::vector<hardware_interface::CommandInterface> interfaces;
+    interfaces.reserve(reference_interface_names_.size());
+    for (std::size_t i = 0; i < reference_interface_names_.size(); ++i)
+    {
+      interfaces.emplace_back(
+        get_node()->get_name(), reference_interface_names_[i], &reference_interfaces_[i]);
+    }
+    return interfaces;
+  }
+
+  Return update_reference_from_subscribers() override {return Return::OK;}
+
+  Return update_and_write_commands(
+    const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/) override
+  {
+    return Return::OK;
+  }
+
+private:
+  std::vector<std::string> reference_interface_names_;
+  controller_interface::InterfaceConfiguration command_interface_configuration_;
+  controller_interface::InterfaceConfiguration state_interface_configuration_;
+};
+
 /// R7: the two-phase passes always run every cycle, so a controller whose own update rate differs
 /// from the manager's would silently be called off-rate. Enabling must therefore be refused, and
 /// the controller must keep running through the native, rate-gated loop.
@@ -323,6 +396,297 @@ TEST_F(TestExecutionPathAdmission, two_phase_enable_accepts_the_default_rate)
   BuildChain(0);
   EXPECT_EQ(Return::OK, cm_->set_two_phase_execution(true));
   EXPECT_TRUE(cm_->two_phase_execution());
+}
+
+/// Item E, cross-mode edge: a two-phase parent claims a reference interface owned by a LEGACY
+/// controller. The two ends would be ordered by different schedules (the two-phase command pass runs
+/// after the native loop), so the reference the parent writes reaches the child a cycle late. The
+/// enable request is refused, the flag stays false, and the offending edge is exposed by name.
+TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_for_a_cross_mode_reference_edge)
+{
+  auto legacy = std::make_shared<TestLegacyChainableController>();
+  cm_->add_controller(legacy, kLeaf, kType);
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+
+  // Two-phase parent, claiming the legacy child's exported reference interface.
+  root_ = std::make_shared<TestStagedController>();
+  MakeChainController(root_, kRoot, "command", {std::string(kLeaf) + "/target"}, {}, {});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
+  EXPECT_FALSE(cm_->two_phase_execution()) << "a refused request must not flip the flag";
+
+  const auto rejections = cm_->two_phase_rejected_controllers();
+  ASSERT_FALSE(rejections.empty());
+  EXPECT_EQ(kRoot, rejections.front().name);
+  EXPECT_NE(std::string::npos, rejections.front().reason.find(kLeaf))
+    << "the reason must name the other end of the edge: " << rejections.front().reason;
+}
+
+/// Item E, late member: the mode is enabled for a conforming chain, and a controller that implements
+/// the interface but declares a lower update rate is configured afterwards. It used to be logged and
+/// silently left to the native loop, so the configuration looked successful while the controller did
+/// not follow the two-phase schedule. The configure now fails, and the rejected member is exposed.
+TEST_F(TestExecutionPathAdmission, a_late_low_rate_member_fails_configure_while_two_phase_is_enabled)
+{
+  ASSERT_GE(cm_->get_update_rate(), 2u);
+  BuildChain(0);
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  ASSERT_TRUE(cm_->two_phase_execution());
+
+  auto late = std::make_shared<TestStagedController>();
+  MakeChainController(late, "tp_late", "target", {}, {"joint2/velocity"}, {"joint2/position"});
+  // The parameter must be set AFTER add_controller(): only then does the plugin have a live node.
+  late->get_node()->set_parameter({"update_rate", static_cast<int>(cm_->get_update_rate() / 2)});
+
+  EXPECT_EQ(Return::ERROR, cm_->configure_controller("tp_late"));
+  const auto rejections = cm_->two_phase_rejected_controllers();
+  ASSERT_EQ(1u, rejections.size());
+  EXPECT_EQ("tp_late", rejections.front().name);
+  EXPECT_NE(std::string::npos, rejections.front().reason.find("update rate"))
+    << rejections.front().reason;
+  // The conforming chain is untouched: the mode is still on and still admits its three members.
+  EXPECT_TRUE(cm_->two_phase_execution());
+  EXPECT_EQ(0u, late->update_phase_calls);
+}
+
+/// Item E, member deactivated: the two-phase passes must skip an inactive member while the other
+/// members keep running. Before this was stated, "member runs every cycle" could have meant "even
+/// when it is not active", which would advance a controller the rest of the system considers
+/// stopped.
+///
+/// Two INDEPENDENT members are used, not a parent and its child: upstream ros2_control refuses to
+/// deactivate a chained child while an active controller still claims its reference interface (see
+/// the test below), so the "deactivated child with a running parent" state cannot be produced at
+/// all. What the kernel actually has to guarantee is that it obeys the lifecycle flag it is given.
+TEST_F(TestExecutionPathAdmission, a_deactivated_member_stops_running_while_other_members_continue)
+{
+  auto alpha = std::make_shared<TestStagedController>();
+  auto beta = std::make_shared<TestStagedController>();
+  MakeChainController(alpha, kRoot, "command", {}, {}, {});
+  MakeChainController(beta, kLeaf, "command", {}, {}, {});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  ASSERT_TRUE(cm_->two_phase_execution());
+
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kRoot}, {});
+  Cycle(3);
+  const int root_before = alpha->update_phase_calls;
+  const int root_handles_before = alpha->handle_phase_calls;
+  const int leaf_before = beta->update_phase_calls;
+  const int leaf_handles_before = beta->handle_phase_calls;
+  ASSERT_GT(leaf_before, 0) << "the member must have run while it was active";
+  ASSERT_GT(root_before, 0);
+
+  // Deactivate one member; the other stays active.
+  SwitchNow({}, {kLeaf});
+  Cycle(3);
+
+  EXPECT_GT(alpha->update_phase_calls, root_before) << "the active member must keep running";
+  EXPECT_GT(alpha->handle_phase_calls, root_handles_before);
+  EXPECT_EQ(leaf_before, beta->update_phase_calls) << "an inactive member must not advance";
+  EXPECT_EQ(leaf_handles_before, beta->handle_phase_calls);
+}
+
+/// Item E, the case the review named cannot be reached: upstream `switch_controller()` refuses to
+/// deactivate a chained child while an active controller still claims the child's reference
+/// interface, so "member deactivated, parent still running" is not a state the manager can enter for
+/// a real parent-child edge. Recording it as a test keeps the claim falsifiable: if upstream ever
+/// starts allowing the switch, this test fails and the kernel-level skip above becomes the case that
+/// matters for edges too.
+TEST_F(TestExecutionPathAdmission, a_chained_child_cannot_be_deactivated_while_its_parent_runs)
+{
+  BuildChain(0);
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kMid}, {});
+  SwitchNow({kRoot}, {});
+  Cycle(3);
+
+  const int leaf_before = leaf_->update_phase_calls;
+  auto future = std::async(
+    std::launch::async, &controller_manager::ControllerManager::switch_controller, cm_.get(),
+    std::vector<std::string>{}, std::vector<std::string>{kLeaf}, STRICT, true,
+    rclcpp::Duration(0, 0));
+  for (int i = 0; i < 400 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
+       ++i)
+  {
+    cm_->update(TIME, PERIOD);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::milliseconds(0)));
+  EXPECT_EQ(Return::ERROR, future.get()) << "upstream must refuse to orphan the mid level";
+
+  // The child is still active, so it still runs through the passes: nothing changed.
+  Cycle(3);
+  EXPECT_GT(leaf_->update_phase_calls, leaf_before);
+}
+
+/// Review B at the MANAGER level: one BRANCHING tree (root -> {left, right} -> {a, b} each, seven
+/// controllers) driven by the real `ControllerManager::update()` two-phase passes. The kernel always
+/// supported multi-child nodes; what this pins down is that the manager's own controller ORDERING
+/// (`controller_sorting`, which upstream documents as handling branched chains) is a valid
+/// parents-before-children linearization, so walking it FORWARD for `handle_phase` and BACKWARD for
+/// `update_phase` really does order every edge of a tree correctly.
+///
+/// The numeric assertion is exact and only holds if every level ingested its children's value from
+/// the SAME cycle: with `estimate = 0.5*estimate + 0.5*mean(children)`, a step of 1.0 at all four
+/// leaves in cycle N gives leaves 0.5, the two modules 0.25 and the root 0.125 at the END of cycle N
+/// (a single parents-first pass would leave the root at 0). `two_phase_command()` is then
+/// `0 - estimate`, so it also proves the command pass ran AFTER the state pass in that cycle.
+TEST_F(TestExecutionPathAdmission, two_pass_runs_a_branching_tree_and_propagates_it_same_cycle)
+{
+  constexpr char kRootName[] = "bt_root";
+  constexpr char kLeft[] = "bt_left";
+  constexpr char kRight[] = "bt_right";
+  constexpr char kLA[] = "bt_la";
+  constexpr char kLB[] = "bt_lb";
+  constexpr char kRA[] = "bt_ra";
+  constexpr char kRB[] = "bt_rb";
+
+  auto root = std::make_shared<TestStagedController>();
+  auto left = std::make_shared<TestStagedController>();
+  auto right = std::make_shared<TestStagedController>();
+  auto la = std::make_shared<TestStagedController>();
+  auto lb = std::make_shared<TestStagedController>();
+  auto ra = std::make_shared<TestStagedController>();
+  auto rb = std::make_shared<TestStagedController>();
+
+  // Leaves: one exported reference so the parent can claim it, and one REAL hardware command
+  // interface each. The command interface is not decoration: upstream `controller_sorting()` places
+  // a chainable controller that claims NOTHING before its own parent, which would invert both passes
+  // for that edge (the admission check below refuses such a configuration, and a separate test pins
+  // that down).
+  struct LeafSpec
+  {
+    std::shared_ptr<TestStagedController> controller;
+    const char * name;
+    const char * hardware_port;
+  };
+  const std::vector<LeafSpec> leaves = {
+    {la, kLA, "joint2/velocity"},
+    {lb, kLB, "joint3/velocity"},
+    {ra, kRA, "joint1/position"},
+    {rb, kRB, "joint1/max_velocity"}};
+  for (const auto & leaf : leaves)
+  {
+    MakeChainController(leaf.controller, leaf.name, "target", {}, {leaf.hardware_port}, {});
+    leaf.controller->set_two_phase_input(0.0);
+  }
+  // Modules: claim the two children's reference interfaces, in declaration order.
+  MakeChainController(left, kLeft, "target", {std::string(kLA) + "/target", std::string(kLB) + "/target"}, {}, {});
+  MakeChainController(right, kRight, "target", {std::string(kRA) + "/target", std::string(kRB) + "/target"}, {}, {});
+  // Root: claims both modules.
+  MakeChainController(
+    root, kRootName, "command", {std::string(kLeft) + "/target", std::string(kRight) + "/target"}, {}, {});
+
+  left->set_two_phase_children({la.get(), lb.get()});
+  right->set_two_phase_children({ra.get(), rb.get()});
+  root->set_two_phase_children({left.get(), right.get()});
+
+  // Children first, so a parent's reference interfaces exist when it is configured.
+  for (const auto & leaf : leaves) {ASSERT_EQ(Return::OK, cm_->configure_controller(leaf.name));}
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeft));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRight));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRootName));
+
+  for (const auto & child : {la, lb, ra, rb, left, right}) {ASSERT_TRUE(child->set_chained_mode(true));}
+
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true)) << "a fully two-phase tree must be admitted";
+  ASSERT_TRUE(cm_->two_phase_execution());
+
+  SwitchNow({kLA}, {});
+  SwitchNow({kLB}, {});
+  SwitchNow({kRA}, {});
+  SwitchNow({kRB}, {});
+  SwitchNow({kLeft}, {});
+  SwitchNow({kRight}, {});
+  SwitchNow({kRootName}, {});
+
+  const std::vector<std::shared_ptr<TestStagedController>> all = {root, left, right, la, lb, ra, rb};
+
+  // A steady cycle first, so any cycle-0 artefact is out of the way.
+  Cycle(1);
+  const std::vector<int> updates_before = {root->update_phase_calls, left->update_phase_calls,
+                                           right->update_phase_calls, la->update_phase_calls,
+                                           lb->update_phase_calls, ra->update_phase_calls,
+                                           rb->update_phase_calls};
+  const std::vector<int> handles_before = {root->handle_phase_calls, left->handle_phase_calls,
+                                           right->handle_phase_calls, la->handle_phase_calls,
+                                           lb->handle_phase_calls, ra->handle_phase_calls,
+                                           rb->handle_phase_calls};
+
+  for (const auto & leaf : leaves) {leaf.controller->set_two_phase_input(1.0);}
+  Cycle(1);
+
+  // Exactly one of each phase per node per cycle.
+  for (std::size_t i = 0; i < all.size(); ++i)
+  {
+    EXPECT_EQ(1, all[i]->update_phase_calls - updates_before[i])
+      << "node " << all[i]->get_node()->get_name() << " ran a wrong number of state stages";
+    EXPECT_EQ(1, all[i]->handle_phase_calls - handles_before[i])
+      << "node " << all[i]->get_node()->get_name() << " ran a wrong number of command stages";
+  }
+
+  // Same-cycle upward propagation, exact: 0.5 -> 0.25 -> 0.125.
+  EXPECT_DOUBLE_EQ(0.5, la->two_phase_estimate());
+  EXPECT_DOUBLE_EQ(0.5, lb->two_phase_estimate());
+  EXPECT_DOUBLE_EQ(0.5, ra->two_phase_estimate());
+  EXPECT_DOUBLE_EQ(0.5, rb->two_phase_estimate());
+  EXPECT_DOUBLE_EQ(0.25, left->two_phase_estimate()) << "the left module must see both leaves in the same cycle";
+  EXPECT_DOUBLE_EQ(0.25, right->two_phase_estimate());
+  EXPECT_DOUBLE_EQ(0.125, root->two_phase_estimate()) << "the root must see both branches in the same cycle";
+
+  // ... and the command pass propagated the root's reference down the tree in the SAME cycle:
+  // command = reference - estimate, and the reference each level sees is the value its parent just
+  // wrote. The root's own external reference is 0, so:
+  //   root  = 0        - 0.125 = -0.125
+  //   left  = -0.125   - 0.25  = -0.375        (right likewise)
+  //   leaf  = -0.375   - 0.5   = -0.875
+  // A single parents-first pass cannot produce these values for the deeper levels in one cycle.
+  EXPECT_DOUBLE_EQ(-0.125, root->two_phase_command());
+  EXPECT_DOUBLE_EQ(-0.375, left->two_phase_command());
+  EXPECT_DOUBLE_EQ(-0.375, right->two_phase_command());
+  EXPECT_DOUBLE_EQ(-0.875, la->two_phase_command());
+  EXPECT_DOUBLE_EQ(-0.875, lb->two_phase_command());
+  EXPECT_DOUBLE_EQ(-0.875, ra->two_phase_command());
+  EXPECT_DOUBLE_EQ(-0.875, rb->two_phase_command());
+}
+
+/// The order validation above is NOT vacuous, and this is the configuration that motivated it: a
+/// chainable child that keeps its exported reference but claims NO command interface at all. Upstream
+/// `controller_sorting()` sorts such a controller ahead of one that has command interfaces, so the
+/// manager's list holds the CHILD before its PARENT. The two-phase passes walk that list backwards
+/// and forwards without re-sorting, so both would traverse the edge in the same (wrong) direction and
+/// the parent would quietly compute from the previous cycle's child estimate -- exactly the lag the
+/// feature exists to remove, while every counter still says "one call per stage per cycle".
+///
+/// The manager therefore refuses the mode instead of producing wrong numbers.
+TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_when_the_manager_order_inverts_an_edge)
+{
+  auto child = std::make_shared<TestStagedController>();
+  // No command interface, one exported reference interface: the child is a pure source.
+  MakeChainController(child, kLeaf, "target", {}, {}, {});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+
+  root_ = std::make_shared<TestStagedController>();
+  MakeChainController(
+    root_, kRoot, "command", {std::string(kLeaf) + "/target"}, {"joint2/velocity"}, {});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
+  EXPECT_FALSE(cm_->two_phase_execution()) << "a refused request must not flip the flag";
+
+  const auto rejections = cm_->two_phase_rejected_controllers();
+  ASSERT_FALSE(rejections.empty());
+  bool mentions_order = false;
+  for (const auto & rejection : rejections)
+  {
+    mentions_order |= rejection.reason.find("ordered AFTER its child") != std::string::npos;
+  }
+  EXPECT_TRUE(mentions_order) << "expected an order rejection, got: " << rejections.front().reason;
 }
 
 /// Native single pass: the manager walks parents first, so every parent ingests its child's

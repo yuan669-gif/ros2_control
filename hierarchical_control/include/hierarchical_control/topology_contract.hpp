@@ -48,6 +48,8 @@
 #define HIERARCHICAL_CONTROL_TOPOLOGY_CONTRACT_HPP
 
 #include <array>
+#include <tuple>
+#include <utility>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -147,6 +149,118 @@ struct port_at<PortList<First, Rest...>, Index>
 template <typename List, std::size_t Index>
 using port_at_t = typename port_at<List, Index>::type;
 
+/// Two port lists are equal element-wise, comparing NAME and DIMENSION together.
+template <typename ListA, typename ListB>
+struct port_lists_agree : std::false_type
+{
+};
+
+template <>
+struct port_lists_agree<PortList<>, PortList<>> : std::true_type
+{
+};
+
+template <typename A0, typename... A, typename B0, typename... B>
+struct port_lists_agree<PortList<A0, A...>, PortList<B0, B...>>
+  : std::bool_constant<
+      // `same_port_v` folds NAME and DIMENSION together, so one comparison covers both.
+      same_port_v<A0, B0> && port_lists_agree<PortList<A...>, PortList<B...>>::value>
+{
+};
+
+/// Concatenate port lists, so a parent's per-child declarations can be compared against the
+/// CONCATENATION of what its children declare, in child order.
+template <typename... Lists>
+struct concat_port_lists
+{
+  using type = PortList<>;
+};
+
+template <typename... As>
+struct concat_port_lists<PortList<As...>>
+{
+  using type = PortList<As...>;
+};
+
+template <typename... As, typename... Bs, typename... Rest>
+struct concat_port_lists<PortList<As...>, PortList<Bs...>, Rest...>
+{
+  using type = typename concat_port_lists<PortList<As..., Bs...>, Rest...>::type;
+};
+
+template <typename... Lists>
+using concat_port_lists_t = typename concat_port_lists<Lists...>::type;
+
+/// The REFERENCE edge of a parent with ANY NUMBER of children: the ports the parent declares it
+/// writes into its children must be the CONCATENATION, in child order, of the reference ports those
+/// children declare they receive.
+/**
+ * The concatenation is what makes the routing per-child rather than aggregate: port i of the
+ * parent's list belongs to whichever child owns that segment, so a declaration cannot silently
+ * associate a parent's ports with the wrong child (review item B).
+ */
+template <typename ParentPorts, typename... ChildPorts>
+constexpr bool children_references_agree() noexcept
+{
+  return port_lists_agree<
+    typename ParentPorts::for_children, concat_port_lists_t<typename ChildPorts::reference...>>::value;
+}
+
+/// The STATE edge of a parent with ANY NUMBER of children: the child state ports the parent
+/// declares it consumes must be the concatenation, in child order, of the state ports those
+/// children declare they publish.
+template <typename ParentPorts, typename... ChildPorts>
+constexpr bool children_states_agree() noexcept
+{
+  return port_lists_agree<
+    typename ParentPorts::child_state, concat_port_lists_t<typename ChildPorts::state...>>::value;
+}
+
+/// Both edges agree for a branching parent.
+template <typename ParentPorts, typename... ChildPorts>
+constexpr bool children_declarations_agree() noexcept
+{
+  return children_references_agree<ParentPorts, ChildPorts...>() &&
+         children_states_agree<ParentPorts, ChildPorts...>();
+}
+
+/// Halt compilation unless both edges of a branching parent/child group agree.
+template <typename ParentPorts, typename... ChildPorts>
+constexpr void require_children_declarations_compatible()
+{
+  static_assert(
+    children_references_agree<ParentPorts, ChildPorts...>(),
+    "topology_contract: REFERENCE EDGE MISMATCH -- the reference ports this parent declares it "
+    "writes into its children are not the concatenation, in child order, of the reference ports its "
+    "children declare they receive (name, order or physical dimension differs)");
+  static_assert(
+    children_states_agree<ParentPorts, ChildPorts...>(),
+    "topology_contract: STATE EDGE MISMATCH -- the child state ports this parent declares it "
+    "consumes are not the concatenation, in child order, of the state ports its children declare "
+    "they publish (name, order or physical dimension differs)");
+}
+
+/// Detection: does a controller declare its ports as types (`TypedPortsMixin` exposes
+/// `using typed_ports = Ports;`)? A controller that hand-writes its runtime strings has nothing to
+/// compare here, and the runtime verifier covers it instead.
+template <typename T, typename = void>
+struct typed_ports_of
+{
+  using type = void;
+};
+
+template <typename T>
+struct typed_ports_of<T, std::void_t<typename T::typed_ports>>
+{
+  using type = typename T::typed_ports;
+};
+
+template <typename T>
+using typed_ports_of_t = typename typed_ports_of<T>::type;
+
+template <typename T>
+inline constexpr bool has_typed_ports_v = !std::is_void_v<typed_ports_of_t<T>>;
+
 /// A controller's static interface contract, split by direction from ITS OWN point of view:
 ///   Produced -- ports it writes (its actuator commands, or the reference interfaces it exports)
 ///   Consumed -- ports it reads  (its reference from its parent, or state from its children)
@@ -220,44 +334,72 @@ struct contract_owners_are_known
 // Bound topology
 // ---------------------------------------------------------------------------------------------
 
-/// Safe extraction of a child binding's members; the void case must never instantiate `void::...`.
-template <typename Next>
-struct next_traits
+/// Concatenate two TypeLists.
+template <typename A, typename B>
+struct concat;
+
+template <typename... As, typename... Bs>
+struct concat<TypeList<As...>, TypeList<Bs...>>
 {
-  static constexpr bool present = true;
-  using node_type = typename Next::node_type;
-  using contract_type = typename Next::contract_type;
+  using type = TypeList<As..., Bs...>;
 };
 
-template <>
-struct next_traits<void>
+template <typename A, typename B>
+using concat_t = typename concat<A, B>::type;
+
+/// Fold a pack of TypeLists into one (empty pack -> empty list).
+template <typename... Lists>
+struct concat_all
 {
-  static constexpr bool present = false;
-  using node_type = void;
-  using contract_type = void;
+  using type = TypeList<>;
 };
 
-/// Optional storage for the child binding: empty when there is no child, so a leaf carries no
-/// extra state (empty base optimisation).
-template <typename Next>
-struct next_storage
+template <typename First, typename... Rest>
+struct concat_all<First, Rest...>
 {
-  Next next{};
+  using type = concat_t<First, typename concat_all<Rest...>::type>;
 };
 
-template <>
-struct next_storage<void>
-{
-};
+/// Forward declaration: `BoundNode` uses it to expose its own ownership verdict, since the verdict
+/// needs the whole subtree's name list, which only the enclosing template can expand.
+template <typename Binding, typename OwnerList>
+struct node_owners_ok;
 
-/// A topology node bound to its port contract and to its child (if any).
-template <typename ControllerT, typename Node, typename ContractT, typename Next = void>
-struct BoundNode : next_storage<Next>
+/// Slot access to a `std::tuple`, guarded so that an out-of-range index is a compile error with a
+/// message instead of a template backtrace.
+template <std::size_t Index, typename... Children>
+constexpr const auto & child_at(const std::tuple<Children...> & children)
+{
+  static_assert(
+    Index < sizeof...(Children), "topology_contract: child index out of range for this node");
+  return std::get<Index>(children);
+}
+
+template <std::size_t Index, typename... Children>
+constexpr auto & child_at(std::tuple<Children...> & children)
+{
+  static_assert(
+    Index < sizeof...(Children), "topology_contract: child index out of range for this node");
+  return std::get<Index>(children);
+}
+
+/// A topology node bound to its port contract and to ANY NUMBER of child bindings.
+/**
+/// The children are a parameter pack stored in a `std::tuple`, so one declaration describes a whole
+/// branching tree, not just a chain. An earlier revision had a single `Next` slot
+/// (`next_storage<Next>`) and could therefore only express a chain, even though the runtime kernel
+/// has always supported multi-child nodes (review item B).
+///
+/// `compose(node, c1, c2, ...)` builds one; `make_leaf(node)` builds a node with no children.
+/// A single-child call is unchanged, so existing chain declarations keep compiling.
+*/
+template <typename ControllerT, typename Node, typename ContractT, typename... Children>
+struct BoundNode
 {
   using controller_type = ControllerT;
   using node_type = Node;
   using contract_type = ContractT;
-  using next_type = Next;
+  using children_types = TypeList<Children...>;
 
   static_assert(
     std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
@@ -272,10 +414,47 @@ struct BoundNode : next_storage<Next>
   // Typed, NOT erased to void*: converting to a second base needs an address adjustment that a
   // void* round trip would lose (review R5).
   controller_interface::ControllerInterfaceBase * instance = nullptr;
+  /// The child bindings, in DECLARATION order. Every parent-side per-child declaration list is
+  /// matched against exactly this order, so a port can never be routed to the wrong child.
+  std::tuple<Children...> children{};
+
+  static constexpr std::size_t child_count = sizeof...(Children);
+  static constexpr bool has_child = (sizeof...(Children) > 0);
+
+  /// Every node name in this SUBTREE, pre-order: this node first, then each child's subtree in
+  /// declaration order. Expandable here because the children pack is in scope.
+  using subtree_names = concat_t<
+    TypeList<typename Node::name_type>, typename concat_all<typename Children::subtree_names...>::type>;
+
+  /// Number of nodes in this subtree (this node + all descendants).
+  static constexpr std::size_t subtree_size = 1 + (0 + ... + Children::subtree_size);
+
+  /// Does every node in this subtree declare only ports owned by `OwnerList`?
+  /**
+   * The owner list of a whole tree contains the names of all of its nodes, so this is the "no port
+   * refers to a controller outside the tree" rule, checked per subtree.
+   */
+  template <typename OwnerList>
+  struct owners_ok_for
+    : std::bool_constant<
+        node_owners_ok<BoundNode, OwnerList>::value &&
+        (Children::template owners_ok_for<OwnerList>::value && ...)>
+  {
+  };
 
   static constexpr std::string_view name() { return st::node_name<Node>(); }
 
-  static constexpr bool has_child = next_traits<Next>::present;
+  template <std::size_t Index>
+  static constexpr auto & child(BoundNode & self)
+  {
+    return child_at<Index>(self.children);
+  }
+
+  template <std::size_t Index>
+  static constexpr const auto & child(const BoundNode & self)
+  {
+    return child_at<Index>(self.children);
+  }
 };
 
 /// A binding's topology has TWO sources: the structural nesting of `BoundNode::next` and each
@@ -305,27 +484,72 @@ constexpr bool child_declares_this_parent()
   }
 }
 
-/// Compose a parent binding on top of an existing child binding.
+/// Every child of this node must declare it as its parent, and the children must be distinct.
+template <typename Node, typename... ChildBindings>
+constexpr bool children_declare_this_parent()
+{
+  return (child_declares_this_parent<Node, ChildBindings>() && ...);
+}
+
+/// No two children may carry the same node name, and none may reuse this node's name.
+template <typename Node, typename... ChildBindings>
+constexpr bool children_names_are_distinct()
+{
+  constexpr std::array<std::string_view, sizeof...(ChildBindings)> child_names{
+    ChildBindings::name()...};
+  for (std::size_t i = 0; i < child_names.size(); ++i)
+  {
+    if (child_names[i] == st::node_name<Node>()) {return false;}
+    for (std::size_t j = i + 1; j < child_names.size(); ++j)
+    {
+      if (child_names[i] == child_names[j]) {return false;}
+    }
+  }
+  return true;
+}
+
+/// Compose a parent binding on top of ANY NUMBER of child bindings.
 ///
-/// The controller type is deduced from the argument, so the binding keeps a correctly adjusted
-/// `ControllerInterfaceBase*` and never sees a `void*`.
-template <typename Node, typename ContractT, typename ControllerT, typename ChildBinding>
-BoundNode<ControllerT, Node, ContractT, ChildBinding> compose(
-  ControllerT * parent_instance, const ChildBinding & child)
+/// The controller type and the children are deduced from the arguments, so the binding keeps
+/// correctly adjusted `ControllerInterfaceBase*` pointers and never sees a `void*`. A single-child
+/// call (`compose<Parent, Contract>(instance, child)`) is unchanged; passing two or more children is
+/// what makes a branching tree expressible.
+template <typename Node, typename ContractT, typename ControllerT, typename... ChildBindings>
+BoundNode<ControllerT, Node, ContractT, ChildBindings...> compose(
+  ControllerT * parent_instance, const ChildBindings &... children)
 {
   static_assert(
     std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
     "topology_contract: compose needs a controller deriving from ControllerInterfaceBase");
   static_assert(
-    child_declares_this_parent<Node, ChildBinding>(),
-    "topology_contract: TOPOLOGY MISMATCH -- the child binding does not declare this node as its "
+    children_declare_this_parent<Node, ChildBindings...>(),
+    "topology_contract: TOPOLOGY MISMATCH -- a child binding does not declare this node as its "
     "parent. Either the child is declared a Root (a root cannot be nested under anything), or its "
     "static_topology parent_type names a different node. The structural nesting and the type-level "
     "parent must agree, otherwise the emitted plan would silently differ from the declared "
     "topology.");
-  BoundNode<ControllerT, Node, ContractT, ChildBinding> binding;
+  static_assert(
+    children_names_are_distinct<Node, ChildBindings...>(),
+    "topology_contract: a node's children must have distinct names, and none may repeat the node's "
+    "own name");
+
+  // PER-CHILD PORT ROUTING, when every participant declares its ports as types. The parent's
+  // child-facing lists are compared against the CONCATENATION of its children's declarations in
+  // child order, so each segment belongs to a known child and a port can never be routed to the
+  // wrong one -- checking the parent's whole list against a single child (which an earlier revision
+  // did) cannot express that. A controller that hand-writes its runtime strings has no type-level
+  // declaration to compare; the runtime verifier covers that case instead.
+  if constexpr (
+    has_typed_ports_v<ControllerT> &&
+    (has_typed_ports_v<typename ChildBindings::controller_type> && ...))
+  {
+    require_children_declarations_compatible<
+      typed_ports_of_t<ControllerT>,
+      typed_ports_of_t<typename ChildBindings::controller_type>...>();
+  }
+  BoundNode<ControllerT, Node, ContractT, ChildBindings...> binding;
   binding.instance = static_cast<controller_interface::ControllerInterfaceBase *>(parent_instance);
-  binding.next = child;
+  binding.children = std::make_tuple(children...);
   return binding;
 }
 
@@ -335,12 +559,12 @@ BoundNode<ControllerT, Node, ContractT, ChildBinding> compose(
 /// `Descendant`, so its `parent_type` is its real parent. Whether that parent is the node it ends up
 /// nested under is checked by `compose`.
 template <typename Node, typename ContractT, typename ControllerT>
-BoundNode<ControllerT, Node, ContractT, void> make_leaf(ControllerT * instance)
+BoundNode<ControllerT, Node, ContractT> make_leaf(ControllerT * instance)
 {
   static_assert(
     std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
     "topology_contract: make_leaf needs a controller deriving from ControllerInterfaceBase");
-  BoundNode<ControllerT, Node, ContractT, void> binding;
+  BoundNode<ControllerT, Node, ContractT> binding;
   binding.instance = static_cast<controller_interface::ControllerInterfaceBase *>(instance);
   return binding;
 }
@@ -359,21 +583,6 @@ struct prepend<Item, TypeList<Items...>>
   using type = TypeList<Item, Items...>;
 };
 
-/// Collect the node name types of a binding chain into a `TypeList`.
-template <typename Binding>
-struct binding_owner_types
-{
-  using type = typename prepend<
-    typename Binding::node_type::name_type,
-    typename binding_owner_types<typename Binding::next_type>::type>::type;
-};
-
-template <>
-struct binding_owner_types<void>
-{
-  using type = TypeList<>;
-};
-
 /// Apply the ownership check for one node against a given owner list.
 template <typename Binding, typename OwnerList>
 struct node_owners_ok;
@@ -384,19 +593,11 @@ struct node_owners_ok<Binding, TypeList<Names...>>
 {
 };
 
-/// Recurse over the chain: every node's ports must be owned by some controller in the topology.
-/// The void case terminates the recursion.
-template <typename Binding, typename OwnerList>
-struct binding_owners_ok
-  : std::bool_constant<
-      node_owners_ok<Binding, OwnerList>::value &&
-      binding_owners_ok<typename Binding::next_type, OwnerList>::value>
+/// The names of every node in the binding TREE (not just a chain).
+template <typename Binding>
+struct binding_owner_types
 {
-};
-
-template <typename OwnerList>
-struct binding_owners_ok<void, OwnerList> : std::true_type
-{
+  using type = typename Binding::subtree_names;
 };
 
 /// The public check: fails to compile when a declared port names an owner outside the topology.
@@ -404,7 +605,7 @@ template <typename Binding>
 constexpr void require_ports_are_owned()
 {
   static_assert(
-    binding_owners_ok<Binding, typename binding_owner_types<Binding>::type>::value,
+    Binding::template owners_ok_for<typename binding_owner_types<Binding>::type>::value,
     "topology_contract: OWNERSHIP VIOLATION -- a declared port does not belong to any controller "
     "in this topology. Port names must be \"<owner>/<local>\" where <owner> is a controller in the "
     "group. This is the defect class upstream ros2_control accepts silently (a declared interface "
@@ -425,22 +626,34 @@ struct SpecRows
   std::vector<std::string> parents;
 };
 
+/// Number of nodes in a binding tree.
 template <typename Binding>
 constexpr std::size_t binding_depth()
 {
-  if constexpr (std::is_void_v<typename Binding::next_type>) {return 1;}
-  else {return 1 + binding_depth<typename Binding::next_type>();}
+  return Binding::subtree_size;
 }
 
+template <typename Binding>
+void fill_spec_rows(const Binding & binding, const std::string & parent_name, SpecRows & rows);
+
+/// Emit every child of `binding` with `binding`'s name as their parent, in DECLARATION order.
+template <typename Binding, std::size_t... Index>
+void fill_child_rows(
+  const Binding & binding, SpecRows & rows, std::index_sequence<Index...>)
+{
+  (fill_spec_rows(child_at<Index>(binding.children), std::string{Binding::name()}, rows), ...);
+}
+
+/// Emit one node, then its subtree: the order is pre-order, parents always before their children.
 template <typename Binding>
 void fill_spec_rows(const Binding & binding, const std::string & parent_name, SpecRows & rows)
 {
   rows.names.emplace_back(Binding::name());
   rows.instances.push_back(binding.instance);
   rows.parents.push_back(parent_name);
-  if constexpr (!std::is_void_v<typename Binding::next_type>)
+  if constexpr (Binding::child_count > 0)
   {
-    fill_spec_rows(binding.next, std::string{Binding::name()}, rows);
+    fill_child_rows(binding, rows, std::make_index_sequence<Binding::child_count>{});
   }
 }
 

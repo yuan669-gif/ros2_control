@@ -507,6 +507,19 @@ Humble 不导出 state interface，所以无法在 Humble 上验证「父真的�
 父子端口的**名字 + 顺序 + 量纲**可编译期检查（量纲检查是内核做不到的）。
 mixin 控制器**真的能在执行组里运行**（端到端 `committed`）。
 
+**追加完成（2026-09-24，评审 B/E）：分叉树 typed builder 与跨模式准入**
+`BoundNode` 改为变参（`std::tuple<Children...>`），`compose`/`make_leaf` 支持任意分叉；
+父侧 `ForChildren`/`ChildState` 与"各孩子声明的按序拼接"逐段比较（名字+顺序+量纲），
+`compose` 在 typed 参与者之间自动检查；七节点验收树
+`test_typed_tree.cpp`（含兄弟顺序对调变体）把静态声明 → 实际边 → 阶段顺序 → 本周期数值
+一次跑通，并按端口名核对。**同一棵树也在 manager 路径验证**
+（`test_two_phase_execution.cpp::two_pass_runs_a_branching_tree_and_propagates_it_same_cycle`：
+叶 0.5 / 模块 0.25 / 根 0.125，命令值沿树 −0.125 / −0.375 / −0.875，全部精确相等）。
+manager 侧新增跨模式准入拒绝、**列表顺序校验**（新发现：认领 0 个 command interface 的
+chainable 子节点会被上游排在父节点之前，使两条 pass 同向走错）与
+`two_phase_rejected_controllers()`；晚配置的不合格成员使 `configure_controller` 返回 ERROR。
+详见 `doc/REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md` §B.1/§E.1。
+
 **未完成**：
 1. **状态端口的语义区分未下探到类型层**（`staged_state_ports()` 同时承载发布与消费，
    内核按拓扑而非名字区分；在类型层建模会与内核规则重复）；
@@ -516,7 +529,9 @@ mixin 控制器**真的能在执行组里运行**（端到端 `committed`）。
 
 - 「估计器/命令分离」的第三种基线（第 4 个对照）。
 - 多频 / 异步执行；动态拓扑；生命周期回滚。
-- 更严格的故障一致性验证（目前只有 staged group 有该证据，两趟模式没有）。
+- 更严格的故障一致性验证（staged group 与两趟路径的"状态失败即抑制本周期命令"规则都已补，
+  见 `REVIEW_RESPONSE_2026-09-23.md` R10；**未做**的是"提交失败后硬件句柄的部分副作用回滚"，
+  那需要事务式 handle，超出本项目范围）。
 - 实测两趟的额外开销（多一次列表遍历 + 每控制器一次虚调用），要与单趟对比并如实报告。
 - TMP 编译期维度/单位检查。
 - `Spec::parents` 显式父子字段接到配置（YAML/参数入口）。
@@ -643,7 +658,15 @@ mixin 控制器**真的能在执行组里运行**（端到端 `committed`）。
   "两趟**不需要第二份拓扑顺序**"；内核仍保存 `preorder`/`postorder` 两份 `O(|V|)` 线性化
   与按端口分配的 scratch/frame/committed 缓冲，两趟相对单趟只是不增加**量级**。
 - ❌ **两条 manager 执行路径可以混用同一个控制器**（2026-09-23 新增，**外部评审 R7**）：
-  现在配置期**拒绝**重叠成员与频率不匹配成员（见 API 一节）。
+  现在配置期**拒绝**重叠成员与频率不匹配成员（见 API 一节）；
+  **2026-09-24 评审 E 后进一步收紧**：一条参考边两端恰有一端是两趟成员（跨模式边）时
+  **拒绝启用/配置/激活**，因此"混用导致某条边用旧状态"不再可能。
+- ✅ **一份类型声明可以生成任意分叉树的运行计划**（2026-09-24 更新，**评审 B**）：
+  `compose<Node, Contract>(inst, children...)` 变参，父侧 `ForChildren`/`ChildState` 与
+  "各孩子声明按孩子顺序的拼接"逐段比较（名字/顺序/量纲），`compose` 自动检查；
+  七节点分叉树用例同时验证静态边、阶段顺序与**按端口名的本周期数值**，
+  并把兄弟顺序对调后重跑（`hierarchical_control/test/test_typed_tree.cpp`）。
+  这一条**不是**说"首次提出"，只是说本实现具备该能力。
 - ✅ **发布协议的并发模式已用 TSan 验证**（2026-09-24 更新）：racy 模式必报、atomic 模式干净
   （`hierarchical_control/test/run_tsan_publish_protocol.sh`）；
   但 ❌ **不能声称"整个 `ControllerManager` 已通过 TSan"**——那需要给全包另开 TSan 构建树，
@@ -690,7 +713,7 @@ mixin 控制器**真的能在执行组里运行**（端到端 `committed`）。
 | **`doc/REVIEW_RESPONSE_2026-09-23.md`** | **外部评审 R1–R11 的逐条处理记录**（改了什么、怎么验证、哪些没做）。接手时优先读它，避免重复踩已知坑 |
 | `doc/RELATED_WORK.md` | **相关工作与定位（评审 R11）**：逐条重叠分析（结论对本项目不利）、LET 对比、拆分基线对照、引用清单与不确定性 |
 | **`doc/CODE_AUDIT_SCHEDULING_METAPROGRAMMING.md`** | **双向调度 + 元编程的代码审查记录**（2026-09-24）：修掉的 4 个问题、仍存在的边界、以及"既有测试是时间校准的"这一实测结论 |
-| **`doc/REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md`** | **第二份评审（A–E）的处理记录**：A（静态父关系 vs 实际生成关系）、C（端口检查成为建组必经步骤）、D（模式标志与快照发布的两个真 race）已修；B（分叉树 typed builder）、E（跨模式准入）有明确计划 |
+| **`doc/REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md`** | **第二份评审（A–E）的处理记录**：A（静态父关系 vs 实际生成关系）、C（端口检查成为建组必经步骤）、D（模式标志与快照发布的两个真 race）、**B（分叉树 typed builder，§B.1）**、**E（跨模式准入与晚加载成员，§E.1）** 均已修，含七节点验收树、四个新编译反例与四个 manager 行为用例 |
 | `doc/REVIEW_REQUIREMENTS_2026-09-24.md` | 第二份评审原文（A–E） |
 | `doc/REVIEW_HUMBLE_WORK_2026-09-23.md` | 外部评审原文（R1–R11） |
 | `doc/TWO_PASS_VS_SINGLE_PASS.md` | 两趟 vs 单趟的阶跃响应定量证明 |

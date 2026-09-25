@@ -17,6 +17,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -937,6 +938,28 @@ controller_interface::return_type ControllerManager::configure_controller(
     RCLCPP_DEBUG(this->get_logger(), "\t%s", ctrl.info.name.c_str());
   }
 
+  // Item E: two-phase execution is a mode of the whole controller SET, and this is the operation
+  // that admits a controller into it. A late-loaded controller that implements the interface but
+  // cannot join the passes used to be logged and excluded, so the configuration looked successful
+  // while the controller actually ran through the native loop -- with the wrong order relative to
+  // its neighbours. Fail the configure instead, BEFORE the new list is published, so the caller
+  // sees the misconfiguration at the last point where it can still react.
+  if (two_phase_enabled_.load(std::memory_order_relaxed))
+  {
+    const auto rejections = two_phase_rejections(to);
+    if (!rejections.empty())
+    {
+      for (const auto & rejection : rejections)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Can not configure '%s' while two-phase execution is enabled: controller '%s' %s.",
+          controller_name.c_str(), rejection.name.c_str(), rejection.reason.c_str());
+      }
+      return controller_interface::return_type::ERROR;
+    }
+  }
+
   // switch lists
   rt_controllers_wrapper_.switch_updated_list(guard);
   // clear unused list
@@ -1405,6 +1428,27 @@ controller_interface::return_type ControllerManager::switch_controller(
           get_logger(), "Could not deactivate controller : '%s'", controller.info.name.c_str());
         switch_result = controller_interface::return_type::ERROR;
       }
+    }
+  }
+
+  // Item E: an activation must not create a reference edge whose two ends are ordered by different
+  // schedules. Only ACTIVE controllers are judged here: the two-phase passes skip inactive members,
+  // so a deactivated non-conforming controller cannot break an edge yet. The switch itself has
+  // already been applied by the control loop (this runs after `do_switch` cleared), so returning
+  // ERROR reports the misconfiguration rather than undoing it -- the same shape as the existing
+  // "could not activate" failures above.
+  if (switch_result == controller_interface::return_type::OK && two_phase_enabled_.load(std::memory_order_relaxed))
+  {
+    const auto rejections = two_phase_rejections(to, /*only_active=*/true);
+    if (!rejections.empty())
+    {
+      for (const auto & rejection : rejections)
+      {
+        RCLCPP_ERROR(
+          get_logger(), "Two-phase execution can not schedule controller '%s': %s.",
+          rejection.name.c_str(), rejection.reason.c_str());
+      }
+      switch_result = controller_interface::return_type::ERROR;
     }
   }
 
@@ -2204,7 +2248,8 @@ void ControllerManager::read(const rclcpp::Time & time, const rclcpp::Duration &
   resource_manager_->read(time, period);
 }
 
-const char * ControllerManager::two_phase_admission_reason(TwoPhaseAdmission admission) noexcept
+std::string ControllerManager::two_phase_admission_reason(
+  TwoPhaseAdmission admission, const std::string & detail) const
 {
   switch (admission)
   {
@@ -2216,6 +2261,18 @@ const char * ControllerManager::two_phase_admission_reason(TwoPhaseAdmission adm
     case TwoPhaseAdmission::unsupported_update_rate:
       return "declares an update rate that differs from the controller manager's, which the "
              "two-phase passes cannot honour (they always run every cycle)";
+    case TwoPhaseAdmission::cross_mode_dependency:
+      return "takes part in a reference edge that crosses the two-phase/legacy boundary with '" +
+             detail +
+             "', whose end would be ordered by a different schedule (the two-phase command pass "
+             "runs after the native loop), silently degrading that edge to the previous cycle";
+    case TwoPhaseAdmission::unschedulable_order:
+      return "is ordered AFTER its child '" + detail +
+             "' in the controller manager's controller list, so the two-phase passes would walk that "
+             "reference edge in the wrong direction (the backwards state pass would visit the parent "
+             "first and the forwards command pass the child first), silently using the previous "
+             "cycle's value. Upstream `controller_sorting()` places a chainable controller that "
+             "claims NO command interface BEFORE its parent, which is the usual cause";
   }
   return "is rejected";
 }
@@ -2235,6 +2292,179 @@ ControllerManager::TwoPhaseAdmission ControllerManager::two_phase_admission(
     return TwoPhaseAdmission::unsupported_update_rate;
   }
   return TwoPhaseAdmission::accepted;
+}
+
+std::vector<std::string> ControllerManager::claimed_command_interfaces(
+  const ControllerSpec & controller) const
+{
+  if (!controller.info.claimed_interfaces.empty())
+  {
+    return controller.info.claimed_interfaces;
+  }
+  // Reading the controller's own declaration is only defined once it is configured; before that
+  // the interface set it will claim is not known yet, and asking can throw.
+  if (!is_controller_active(controller.c) && !is_controller_inactive(controller.c)) {return {};}
+
+  const auto configuration = controller.c->command_interface_configuration();
+  if (configuration.type == controller_interface::interface_configuration_type::ALL)
+  {
+    return resource_manager_->available_command_interfaces();
+  }
+  if (configuration.type == controller_interface::interface_configuration_type::INDIVIDUAL)
+  {
+    return configuration.names;
+  }
+  return {};
+}
+
+std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_rejections(
+  const std::vector<ControllerSpec> & controllers, bool only_active) const
+{
+  // Which loaded controller owns a "<owner>/..." port, and whether that owner implements the
+  // interface. An edge between a two-phase member and a non-member cannot be ordered by either
+  // schedule, so BOTH ends of such an edge are reported -- excluding only the member would leave
+  // the non-member silently writing a reference the member reads a cycle late.
+  std::unordered_map<std::string, std::size_t> by_name;
+  by_name.reserve(controllers.size());
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    by_name.emplace(controllers[i].info.name, i);
+  }
+
+  std::vector<char> implements(controllers.size(), 0);
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    implements[i] =
+      dynamic_cast<hierarchical_control::TwoPhaseControllerInterface *>(controllers[i].c.get()) !=
+      nullptr;
+  }
+
+  std::vector<TwoPhaseRejection> rejections;
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    if (!implements[i]) {continue;}
+    if (only_active && !is_controller_active(controllers[i].c)) {continue;}
+
+    auto admission = two_phase_admission(controllers[i]);
+    std::string detail;
+    if (admission == TwoPhaseAdmission::accepted)
+    {
+      for (const auto & port : claimed_command_interfaces(controllers[i]))
+      {
+        const auto split = port.find_first_of('/');
+        if (split == std::string::npos) {continue;}
+        const auto owner = port.substr(0, split);
+        if (owner == controllers[i].info.name) {continue;}
+        const auto owner_it = by_name.find(owner);
+        if (owner_it == by_name.end()) {continue;}  // hardware or an unloaded controller
+        if (!implements[owner_it->second])
+        {
+          admission = TwoPhaseAdmission::cross_mode_dependency;
+          detail = owner;
+          break;
+        }
+      }
+    }
+    if (admission == TwoPhaseAdmission::accepted) {continue;}
+    rejections.push_back(
+      TwoPhaseRejection{
+        controllers[i].info.name, two_phase_admission_reason(admission, detail)});
+  }
+
+  // The mirror direction: a controller that does NOT implement the interface is a neighbour of one
+  // that does, so it too is part of a cross-mode edge and cannot be scheduled consistently.
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    if (implements[i]) {continue;}
+    if (only_active && !is_controller_active(controllers[i].c)) {continue;}
+    for (const auto & port : claimed_command_interfaces(controllers[i]))
+    {
+      const auto split = port.find_first_of('/');
+      if (split == std::string::npos) {continue;}
+      const auto owner = port.substr(0, split);
+      const auto owner_it = by_name.find(owner);
+      if (owner_it == by_name.end() || !implements[owner_it->second]) {continue;}
+      rejections.push_back(
+        TwoPhaseRejection{
+          controllers[i].info.name,
+          two_phase_admission_reason(TwoPhaseAdmission::cross_mode_dependency, owner)});
+      break;
+    }
+  }
+
+  // ORDER VALIDATION. The passes do not sort the controllers themselves: they walk the manager's
+  // own controller list, BACKWARD for the state pass and FORWARD for the command pass. That is only
+  // correct if, for every reference edge, the parent (the claimant that writes "<child>/<port>")
+  // appears BEFORE the child in that list -- then the backward walk reaches the child first and the
+  // forward walk reaches the parent first. Upstream `controller_sorting()` normally produces that
+  // order, but it places a chainable controller with NO command interface ahead of one that has
+  // them, so a child that claims nothing lands before its own parent and BOTH passes run that edge
+  // in the wrong direction (measured: the parent then reads the previous cycle's child estimate).
+  // The staged group is immune because it derives its order from the declared edges; the two-phase
+  // path has to verify the order it is handed. Only edges between two members are checked here;
+  // cross-mode edges are already rejected above.
+  {
+    // Members = implementing controllers that passed the checks above.
+    std::unordered_map<std::string, std::size_t> rejected_index;
+    for (const auto & rejection : rejections)
+    {
+      const auto it = by_name.find(rejection.name);
+      if (it != by_name.end()) {rejected_index.emplace(rejection.name, it->second);}
+    }
+    std::vector<char> is_member(controllers.size(), 0);
+    for (std::size_t i = 0; i < controllers.size(); ++i)
+    {
+      is_member[i] = implements[i] && rejected_index.find(controllers[i].info.name) ==
+                                       rejected_index.end();
+      if (only_active && !is_controller_active(controllers[i].c)) {is_member[i] = 0;}
+    }
+
+    bool order_broken = false;
+    for (std::size_t parent = 0; parent < controllers.size() && !order_broken; ++parent)
+    {
+      if (!is_member[parent]) {continue;}
+      for (const auto & port : claimed_command_interfaces(controllers[parent]))
+      {
+        const auto split = port.find_first_of('/');
+        if (split == std::string::npos) {continue;}
+        const auto owner = port.substr(0, split);
+        const auto child_it = by_name.find(owner);
+        if (child_it == by_name.end() || !is_member[child_it->second]) {continue;}
+        const std::size_t child = child_it->second;
+        if (parent < child) {continue;}  // the required order
+
+        // Report BOTH ends, so a caller that can only exclude (the rebuild path) never keeps one end
+        // of an edge the schedule cannot order.
+        rejections.push_back(
+          TwoPhaseRejection{
+            controllers[parent].info.name,
+            two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, owner)});
+        rejections.push_back(
+          TwoPhaseRejection{
+            controllers[child].info.name,
+            two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, owner)});
+        order_broken = true;  // one report is enough; the caller fails the whole operation
+        break;
+      }
+    }
+  }
+
+  // De-duplicate by name: a controller can take part in several rejected edges.
+  std::vector<TwoPhaseRejection> unique;
+  unique.reserve(rejections.size());
+  std::unordered_map<std::string, bool> seen;
+  for (auto & rejection : rejections)
+  {
+    if (seen.emplace(rejection.name, true).second) {unique.push_back(std::move(rejection));}
+  }
+  return unique;
+}
+
+std::vector<ControllerManager::TwoPhaseRejection>
+ControllerManager::two_phase_rejected_controllers() const
+{
+  std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
+  return two_phase_rejections(rt_controllers_wrapper_.get_updated_list(guard));
 }
 
 std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
@@ -2262,7 +2492,6 @@ void ControllerManager::rebuild_two_phase_entries(
     // enough to change how many cycles the loop completes (which controller-update-count tests
     // observe). Publishing a null snapshot makes `update()` use its static empty vector.
     std::atomic_store(&two_phase_entries_, std::shared_ptr<const std::vector<TwoPhaseEntry>>());
-    two_phase_rejected_ = 0;
     return;
   }
 
@@ -2270,32 +2499,28 @@ void ControllerManager::rebuild_two_phase_entries(
   // `update()` either sees the whole old set or the whole new one and is never blocked.
   auto entries = std::make_shared<std::vector<TwoPhaseEntry>>();
   entries->reserve(controllers.size());
-  std::size_t rejected = 0;
-  std::string first_rejected_name;
-  TwoPhaseAdmission first_rejection = TwoPhaseAdmission::accepted;
 
+  // Rejections are computed ONCE, up front, so the log and the published set cannot disagree: the
+  // same verdict decides both. A rejected member is left out because the native loop below
+  // rate-gates it and the staged group, if any, owns it -- leaving it out is what makes "no
+  // controller runs twice per cycle" true.
+  const auto rejections = two_phase_rejections(controllers);
+  std::unordered_map<std::string, std::string> rejected_names;
+  rejected_names.reserve(rejections.size());
+  for (const auto & rejection : rejections) {rejected_names.emplace(rejection.name, rejection.reason);}
+
+  std::size_t rejected_members = 0;
   for (const auto & controller : controllers)
   {
     auto * instance =
       dynamic_cast<hierarchical_control::TwoPhaseControllerInterface *>(controller.c.get());
     if (instance == nullptr) {continue;}
 
+    if (rejected_names.find(controller.info.name) != rejected_names.end())
     {
-      const auto admission = two_phase_admission(controller);
-      if (admission != TwoPhaseAdmission::accepted)
-      {
-        if (rejected == 0)
-        {
-          first_rejection = admission;
-          first_rejected_name = controller.info.name;
-        }
-        ++rejected;
-        // Do not add it: the native loop below rate-gates it and the staged group, if any, owns
-        // it. Leaving it out is what makes "no controller runs twice per cycle" true.
-        continue;
-      }
+      ++rejected_members;
+      continue;
     }
-
     entries->push_back(TwoPhaseEntry{controller.c.get(), instance});
   }
 
@@ -2306,18 +2531,26 @@ void ControllerManager::rebuild_two_phase_entries(
       return std::less<const controller_interface::ControllerInterfaceBase *>()(a.base, b.base);
     });
 
-  two_phase_rejected_ = rejected;
   std::atomic_store(&two_phase_entries_, std::shared_ptr<const std::vector<TwoPhaseEntry>>(entries));
 
   // Non-real-time thread only, and only when something was actually excluded, so this cannot spam
-  // the control loop.
-  if (rejected != 0)
+  // the control loop. EVERY rejection is logged, not just the first: the caller has to be able to
+  // see why the configuration is half-working (review item E). `two_phase_rejected_controllers()`
+  // exposes the same information programmatically.
+  if (rejected_members != 0)
   {
     RCLCPP_ERROR(
       get_logger(),
-      "Two-phase execution excluded %zu controller(s); '%s' %s. They keep running through the "
-      "native single-pass loop.",
-      rejected, first_rejected_name.c_str(), two_phase_admission_reason(first_rejection));
+      "Two-phase execution excluded %zu controller(s) that implement the interface. They keep "
+      "running through the native single-pass loop, so their order relative to the two-phase passes "
+      "is NOT the parent-before-child one.",
+      rejected_members);
+  }
+  for (const auto & rejection : rejections)
+  {
+    RCLCPP_ERROR(
+      get_logger(), "Two-phase execution: controller '%s' %s.", rejection.name.c_str(),
+      rejection.reason.c_str());
   }
 }
 
@@ -2359,22 +2592,16 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
     std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
     const std::vector<ControllerSpec> & controllers =
       rt_controllers_wrapper_.get_updated_list(guard);
-    for (const auto & controller : controllers)
+    const auto rejections = two_phase_rejections(controllers);
+    if (!rejections.empty())
     {
-      if (
-        dynamic_cast<hierarchical_control::TwoPhaseControllerInterface *>(controller.c.get()) ==
-        nullptr)
-      {
-        continue;
-      }
-      const auto admission = two_phase_admission(controller);
-      if (admission != TwoPhaseAdmission::accepted)
+      for (const auto & rejection : rejections)
       {
         RCLCPP_ERROR(
           get_logger(), "Can not enable two-phase execution: controller '%s' %s.",
-          controller.info.name.c_str(), two_phase_admission_reason(admission));
-        return controller_interface::return_type::ERROR;
+          rejection.name.c_str(), rejection.reason.c_str());
       }
+      return controller_interface::return_type::ERROR;
     }
   }
 

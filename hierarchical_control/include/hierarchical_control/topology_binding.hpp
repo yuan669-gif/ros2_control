@@ -53,6 +53,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <type_traits>
 #include <vector>
 
@@ -166,6 +167,20 @@ StagedExecutionGroup::Spec to_library_spec(const Binding & binding)
   return to_library_spec(tc::build_spec_rows(binding));
 }
 
+template <typename Binding>
+bool verify_binding_ports(const Binding & binding, std::string * reason);
+
+/// Verify every child subtree, stopping at the first failure.
+template <typename Binding, std::size_t... Index>
+bool verify_children_ports(
+  const Binding & binding, std::string * reason, std::index_sequence<Index...>)
+{
+  bool ok = true;
+  // The fold short-circuits: once a child fails, later children are not visited.
+  ((ok = ok && verify_binding_ports(tc::child_at<Index>(binding.children), reason)), ...);
+  return ok;
+}
+
 /// Verify that every node's RUNTIME port lists agree with the contract it was bound with.
 ///
 /// This is the last hop of the metaprogramming chain, and it is deliberately NOT automatic. The
@@ -186,7 +201,7 @@ StagedExecutionGroup::Spec to_library_spec(const Binding & binding)
 /// `typed_ports::verify_ports_match_interface()` for a full three-list check when the declaration
 /// type is available.
 template <typename Binding>
-bool verify_binding_ports(const Binding & binding, std::string * reason = nullptr)
+bool verify_binding_ports(const Binding & binding, std::string * reason)
 {
   const auto * staged = as_staged(binding.instance);
   if (staged == nullptr)
@@ -210,10 +225,11 @@ bool verify_binding_ports(const Binding & binding, std::string * reason = nullpt
     return false;
   }
 
-  if constexpr (!std::is_void_v<typename Binding::next_type>)
+  if constexpr (Binding::child_count > 0)
   {
-    // The child's message already names the node, so a failure deeper in the chain propagates as is.
-    return verify_binding_ports(binding.next, reason);
+    // Every child's message already names its own node, so a failure deeper in the tree propagates.
+    return verify_children_ports(
+      binding, reason, std::make_index_sequence<Binding::child_count>{});
   }
   if (reason != nullptr) {reason->clear();}
   return true;

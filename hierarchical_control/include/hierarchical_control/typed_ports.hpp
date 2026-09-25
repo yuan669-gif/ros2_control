@@ -299,6 +299,10 @@ public:
     return out;
   }
 
+  /// The declaration itself, so `topology_contract` can check a whole branching tree against it
+  /// without knowing this mixin.
+  using typed_ports = Ports;
+
   static constexpr std::size_t exported_port_count = Ports::for_children_count;
   static constexpr std::size_t state_port_count = Ports::state_count;
   static constexpr std::size_t reference_port_count = Ports::reference_count;
@@ -309,65 +313,27 @@ public:
 // Cross-checking
 // ---------------------------------------------------------------------------------------------
 
-/// Two port lists are equal element-wise, comparing NAME and DIMENSION together.
-template <typename ListA, typename ListB>
-struct port_lists_agree : std::false_type
-{
-};
-
-template <>
-struct port_lists_agree<tc::PortList<>, tc::PortList<>> : std::true_type
-{
-};
-
-template <typename A0, typename... A, typename B0, typename... B>
-struct port_lists_agree<tc::PortList<A0, A...>, tc::PortList<B0, B...>>
-  : std::bool_constant<
-      // `same_port_v` folds NAME and DIMENSION together, so one comparison covers both.
-      hc_topology::same_port_v<A0, B0> &&
-      port_lists_agree<tc::PortList<A...>, tc::PortList<B...>>::value>
-{
-};
-
-/// The REFERENCE edge of a parent/child pair: the ports the parent declares it writes into its
-/// child must be exactly the ports the child declares it receives -- in NAME, in ORDER and in
-/// DIMENSION.
-///
-/// This is the dimension-carrying counterpart of the kernel's name matching: the kernel compares
-/// strings only, so it accepts a position port wired to a velocity port. Comparing dimensions as
-/// well is the point of this header.
+/// The REFERENCE edge of a parent/child pair. Thin wrapper over the variadic check in
+/// `topology_contract`, which is where the branching case (several children) lives: a parent's
+/// declaration is compared against the CONCATENATION of what its children declare, in child order.
 template <typename ParentPorts, typename ChildPorts>
 constexpr bool reference_declarations_agree() noexcept
 {
-  return port_lists_agree<
-    typename ParentPorts::for_children, typename ChildPorts::reference>::value;
+  return tc::children_references_agree<ParentPorts, ChildPorts>();
 }
 
-/// The STATE edge of a parent/child pair: the child state ports the parent declares it consumes
-/// must be exactly the state ports the child declares it publishes -- in NAME, in ORDER and in
-/// DIMENSION.
-///
-/// This is the edge the earlier revisions of this header did NOT check at all (see
-/// doc/PORT_DIMENSIONS.md section 3). The kernel hands the parent a view straight into the child's
-/// state slots, so a mismatch here is a parent indexing a slot the child never wrote -- which the
-/// NaN/`all_finite` completeness check then reports as `state_failed`, far from the cause.
-///
-/// It is exact for a CHAIN, which is what a compile-time binding expresses (see
-/// topology_binding.hpp): each node has exactly one child, so one flat list per node matches one
-/// child's declaration. A branching binding is not expressible in this layer at all.
+/// The STATE edge of a parent/child pair.
 template <typename ParentPorts, typename ChildPorts>
 constexpr bool state_declarations_agree() noexcept
 {
-  return port_lists_agree<typename ParentPorts::child_state, typename ChildPorts::state>::value;
+  return tc::children_states_agree<ParentPorts, ChildPorts>();
 }
 
-/// Both edges of a parent/child pair agree. Compile-time only; see the two predicates above for
-/// which one failed.
+/// Both edges of a parent/child pair agree.
 template <typename ParentPorts, typename ChildPorts>
 constexpr bool declarations_are_compatible() noexcept
 {
-  return reference_declarations_agree<ParentPorts, ChildPorts>() &&
-         state_declarations_agree<ParentPorts, ChildPorts>();
+  return tc::children_declarations_agree<ParentPorts, ChildPorts>();
 }
 
 /// Halt compilation unless a parent/child pair's REFERENCE edge agrees.
