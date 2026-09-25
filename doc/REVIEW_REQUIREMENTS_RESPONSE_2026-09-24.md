@@ -395,6 +395,38 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 必须在这类调用期间继续泵，否则主线程会停在 `hrtimer_nanosleep`（实测：20 s 后用
 `/proc/<pid>/task/*/wchan` 看到 `hrtimer_nanosleep`）。已加 `ConfigureWithPump()` 辅助函数并写明原因。
 
+### B.2 把 typed 树放进普通 composite 插件（评审"推荐下一步"第 5 条后半句）——**已完成**
+
+`controller_manager/test/test_composite_library/typed_fork_composite_controller.{hpp,cpp}`
+是一个普通 composite 插件，内部**只声明一次**类型级拓扑：
+
+```
+fork_root -> { fork_a, fork_b }      // 端口、量纲、父子边都在这一处
+```
+
+与既有的 `GenericCompositeController` 的差别**只在拓扑来源**：那个宿主是数据驱动的
+（运行期 `CompositeNodeSpec` 列表、父子用字符串、端口字符串手写、内核由 `Spec` 构建）；
+这个宿主的成员端口字符串由 `TypedPortsMixin` **从类型生成**，
+内核由**检查版入口** `topology_binding::create_library_group(binding)` 构建
+（编译期父关系/量纲 + 整棵树的运行期端口校验 + 计划 + 执行组），
+算法、接口映射、内核完全是同一套，所以两者可以在同样输入上逐周期对比。
+
+用例 `typed_declaration_hosted_by_a_composite_plugin_matches_the_spec_host`（`test_hierarchy_comparison`）：
+
+- 计划确实来自声明：3 个节点，`typed_root, typed_a, typed_b`（父在前）；
+- **激活后第一个周期分配数 = 0**（内核整体在 `on_activate()` 里建好，控制路径不分配）；
+- 6 个周期里两条叶命令**精确等于**闭式期望 `ForkExpectedA/B`，**并逐周期等于数据驱动宿主**的输出；
+- 三个节点每周期各一次状态阶段、一次命令阶段，两个叶每周期各一次提交。
+
+**一个必须记录的 API 约束（写插件时实测撞到）**：`topology_binding` 存的是**带类型的
+`ControllerInterfaceBase *`**（评审 R5：换成 `void *` 会在第二个基类的地址调整上出错），
+因此**要被绑定的内部节点必须派生自 `ControllerInterfaceBase`**——只实现
+`StagedControllerInterface` 的节点无法通过 `compose` 绑定。插件里的 `NodeBase` 就是为满足这条而写的
+最小实现（节点从不被管理器 init/configure/activate）。绕过绑定的运行期 `Spec` 路径
+（`StagedExecutionGroup::create_library`）没有这个要求，这正是数据驱动宿主能只用
+`StagedControllerInterface` 的原因。**若将来要走"纯 `StagedControllerInterface` 也能绑定"，
+需要把绑定的实例指针类型参数化**，那会触及 R5 的不变式，本轮没做。
+
 ### B.2 编译成本：分叉树不比同规模深链贵（新增测量）
 `BoundNode` 从单槽改成变参包后，专门测了"同节点数下链 vs 树"
 （`hierarchical_control/test/measure_binding_cost.py`，三次运行）：
@@ -410,8 +442,9 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 |---|---|
 | `hierarchical_control` | **12 个 ctest 程序全通过**：11 个 gtest 程序 / **76 用例** + 编译语料脚本 |
 | `test_typed_tree`（新） | **3 用例**：七节点分叉树（库路径）、兄弟顺序对调变体、运行时端口校验递归到第二个孩子 |
+| `test_hierarchy_comparison` | **7 用例**（含新增的 typed 声明插件宿主用例） |
 | 编译语料 | **15/15**（13 必须失败 + 2 必须编译的对照） |
-| `controller_manager` | **18 个 gtest 程序逐个直接运行全部通过**（19 个程序 / **162 用例**，其中 `test_cycle_tree_contract` 不是 gtest 二进制）：`test_two_phase_execution` **19**、`test_load_controller` 39、`test_controller_manager` 18、`test_controller_manager_srvs` 14、`test_spawner_unspawner` 22/22（第二轮）|
+| `controller_manager` | **19 个 gtest 程序 / 165 用例**，逐个直接运行全部通过：`test_two_phase_execution` **20**、`test_load_controller` 39、`test_controller_manager` 18、`test_controller_manager_srvs` 14、`test_hierarchy_comparison` **7**；另加 `test_cycle_tree_contract` 与 5 个 pytest（`ctest -R` 一并跑过，6/6） |
 | TSan harness | `[tsan] RESULT: PASS (racy reported, atomic clean)` |
 | 阶段图穷举 | 465/465；一个状态阶段/顶点的调度数 **0** |
 | 绑定层编译成本 | 链 **130–172 ms/节点** vs 同规模分叉树 **2–25 ms/节点**（3 次运行，方向稳定、倍数不稳定）→ 见 §B.2 与 `COMPILE_COST.md` §3.1 |
@@ -448,11 +481,11 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 
 | # | 未做项 | 现状 |
 |---|---|---|
-| 1 | **把 typed 分叉树放进一个普通 composite 插件**（评审"推荐下一步"第 5 条的后半句） | typed 七节点树已经在**库内核**上验证（`test_typed_tree` 用 `create_library_group` 真的建组并跑周期），分叉树也在**manager 路径**验证；但"一个 ROS controller 插件内部持有 typed 绑定 + 硬件接口槽 + 由它 `update()` 驱动"这一组合尚未写。现有 `GenericCompositeController` 从**运行期 spec** 建内核，与编译期绑定是两条入口 |
-| 2 | 模式/成员/计划的**统一 generation**（评审 D 的第二半） | 未做；首版约束是"控制循环停止时配置"，已写进 API 注释与 `REVIEW_RESPONSE_2026-09-23.md` |
-| 3 | 真实 `ControllerManager` 的 **TSan** | 磁盘不允许另开 GB 级构建树；只有发布协议 harness 做了 TSan |
-| 4 | 多频 / 异步 / 动态拓扑 / 生命周期回滚 | 明确不做（评审也建议不要扩） |
-| 5 | `Spec::parents` 的 YAML/参数入口 | 未做；两趟与 staged 都从 claimed interfaces 推导，该字段不是必需 |
-| 6 | 状态端口的**语义**区分下探到类型层 | 未做（会与内核"按拓扑而非名字区分"的规则重复） |
-| 7 | Gazebo 真值轨迹指标 | 仍不可靠（gzserver 约 1/3 启动失败，真值来源不足） |
+| 1 | 模式/成员/计划的**统一 generation**（评审 D 的第二半） | 未做；首版约束是"控制循环停止时配置"，已写进 API 注释与 `REVIEW_RESPONSE_2026-09-23.md` |
+| 2 | 真实 `ControllerManager` 的 **TSan** | 磁盘不允许另开 GB 级构建树；只有发布协议 harness 做了 TSan |
+| 3 | 多频 / 异步 / 动态拓扑 / 生命周期回滚 | 明确不做（评审也建议不要扩） |
+| 4 | `Spec::parents` 的 YAML/参数入口 | 未做；两趟与 staged 都从 claimed interfaces 推导，该字段不是必需 |
+| 5 | 状态端口的**语义**区分下探到类型层 | 未做（会与内核"按拓扑而非名字区分"的规则重复） |
+| 6 | Gazebo 真值轨迹指标 | 仍不可靠（gzserver 约 1/3 启动失败，真值来源不足） |
+| 7 | **绑定只接受 `ControllerInterfaceBase` 派生节点** | 见 §B.2：内部节点要经 `create_library_group` 绑定就必须满足该基类（R5 的带类型指针）。要支持"纯 `StagedControllerInterface` 节点"，需把绑定的实例指针类型参数化，触及 R5 不变式，本轮未做 |
 

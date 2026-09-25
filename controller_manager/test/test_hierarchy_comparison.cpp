@@ -29,6 +29,7 @@
 #include "ros2_control_test_assets/descriptions.hpp"
 #include "test_composite_controller/test_composite_controller.hpp"
 #include "test_composite_library/generic_composite_controller.hpp"
+#include "test_composite_library/typed_fork_composite_controller.hpp"
 #include "test_staged_controller/test_staged_controller.hpp"
 
 // GCC cannot see that this malloc-based replacement pair is consistent and reports
@@ -45,6 +46,7 @@ using Return = controller_interface::return_type;
 using TestStagedController = test_staged_controller::TestStagedController;
 using TestCompositeController = test_composite_controller::TestCompositeController;
 using GenericCompositeController = test_composite_library::GenericCompositeController;
+using TypedForkCompositeController = test_composite_library::TypedForkCompositeController;
 using CompositeNodeSpec = test_composite_library::CompositeNodeSpec;
 
 const auto kTime = rclcpp::Time(0);
@@ -1072,3 +1074,98 @@ TEST_F(HierarchyFairComparison, post_switch_two_phase_cycles_do_not_rebuild_memb
 
 }  // namespace
 
+
+/// The typed tree example hosted by an ordinary composite plugin, through the LIBRARY path.
+///
+/// This is the last piece of review recommendation 5. `SetupLibraryForkN` already hosts the same
+/// two-leaf fork from RUNTIME specs (`CompositeNodeSpec`: parent names as strings, port names
+/// hand-written on the node, kernel built from a `Spec`). Here the same fork is declared ONCE as
+/// types -- `typed_fork::root_ports` / `a_ports` / `b_ports` inside the plugin -- and hosted through
+/// `topology_binding::create_library_group`, the checked entry, which:
+///   * requires each child to declare the parent it is nested under (compile time),
+///   * requires the parent's per-child reference/state lists to be the concatenation, in child order,
+///     of the children's declarations, with matching physical dimensions (compile time),
+///   * verifies the RUNTIME port strings of every node in the tree against that declaration,
+///   * then builds the plan and the group.
+///
+/// The comparison is exact and per cycle: the typed host must produce the same leaf commands as the
+/// data-driven host and as the closed-form expectation, because the algorithm is identical and only
+/// the SOURCE of the topology differs.
+TEST_F(HierarchyFairComparison, typed_declaration_hosted_by_a_composite_plugin_matches_the_spec_host)
+{
+  constexpr int kCycles = 6;
+  const double offset_sum = kOffsetA + kOffsetB;
+
+  // Host 1: the runtime-spec composite (existing baseline).
+  Group spec_host = SetupLibraryForkN(executor_, "cmp_typed_spec_cm", TwoLeafFork());
+
+  // Host 2: the same fork declared as types, in its own plugin, on its own manager.
+  Group typed_host;
+  typed_host.cm = MakeManager(executor_, "cmp_typed_decl_cm");
+  auto typed = std::make_shared<TypedForkCompositeController>();
+  typed->set_external_reference(0.0);
+  typed_host.cm->add_controller(typed, "cmp_typed", "typed_fork");
+  ConfigureController(typed_host.cm, "cmp_typed");
+  SwitchNow(typed_host.cm, {"cmp_typed"}, {});
+
+  // The plan really came from the declaration: three nodes, parent before children.
+  const auto names = typed->plan_node_names();
+  ASSERT_EQ(3u, names.size());
+  EXPECT_EQ("typed_root", names[0]);
+  EXPECT_EQ("typed_a", names[1]);
+  EXPECT_EQ("typed_b", names[2]);
+
+  // The first post-activation cycle must be allocation-free: the kernel (including the checked
+  // binding and the plan) is built in `on_activate()`, never on the control path.
+  g_allocation_count.store(0, std::memory_order_relaxed);
+  g_count_allocations.store(true, std::memory_order_relaxed);
+  ASSERT_EQ(Return::OK, typed->update(kTime, kPeriod));
+  g_count_allocations.store(false, std::memory_order_relaxed);
+  const auto first_cycle_allocations = g_allocation_count.load(std::memory_order_relaxed);
+  std::cout << "[comparison] typed fork first post-activation update allocations="
+            << first_cycle_allocations << "\n";
+  EXPECT_EQ(0u, first_cycle_allocations);
+
+  // Counts are captured AFTER activation: `SwitchNow` pumps cycles, and the plugin is already active
+  // in the cycle that applies the switch, so absolute counts are not a property of this test.
+  std::vector<int> state_before(3);
+  std::vector<int> command_before(3);
+  for (std::size_t node = 0; node < 3; ++node)
+  {
+    state_before[node] = typed->state_calls(node);
+    command_before[node] = typed->command_calls(node);
+  }
+  const auto commits_before = typed->commit_calls;
+  for (int cycle = 1; cycle <= kCycles; ++cycle)
+  {
+    const double reference = ReferenceFor(cycle);
+    typed->set_external_reference(reference);
+    spec_host.generic->set_external_reference(reference);
+
+    ASSERT_EQ(Return::OK, typed->update(kTime, kPeriod));
+    ASSERT_EQ(Return::OK, spec_host.generic->update(kTime, kPeriod));
+
+    const double expected_a = ForkExpectedA(reference);
+    const double expected_b = ForkExpectedB(reference);
+    EXPECT_DOUBLE_EQ(expected_a, typed->command_interface_value(0))
+      << "typed host, cycle " << cycle;
+    EXPECT_DOUBLE_EQ(expected_b, typed->command_interface_value(1))
+      << "typed host, cycle " << cycle;
+    // ... and identical to the data-driven host on the same input.
+    EXPECT_DOUBLE_EQ(spec_host.generic->command_interface_value(0), typed->command_interface_value(0));
+    EXPECT_DOUBLE_EQ(spec_host.generic->command_interface_value(1), typed->command_interface_value(1));
+  }
+
+  // One state stage and one command stage per node per cycle, for ALL THREE nodes of the tree, and
+  // one commit per leaf per cycle.
+  for (std::size_t node = 0; node < 3; ++node)
+  {
+    EXPECT_EQ(state_before[node] + kCycles, typed->state_calls(node))
+      << "node " << names[node] << " ran a wrong number of state stages";
+    EXPECT_EQ(command_before[node] + kCycles, typed->command_calls(node))
+      << "node " << names[node] << " ran a wrong number of command stages";
+  }
+  EXPECT_EQ(commits_before + 2 * kCycles, typed->commit_calls)
+    << "the two leaves must commit once each per cycle";
+  (void)offset_sum;
+}

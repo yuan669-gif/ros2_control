@@ -84,6 +84,7 @@ if(BUILD_TESTING)
   # Gate B baseline: the same kernel hosted by a single generic composite controller plugin.
   add_library(test_composite_library SHARED
     test/test_composite_library/generic_composite_controller.cpp
+    test/test_composite_library/typed_fork_composite_controller.cpp
   )
   target_link_libraries(test_composite_library PUBLIC
     controller_manager
