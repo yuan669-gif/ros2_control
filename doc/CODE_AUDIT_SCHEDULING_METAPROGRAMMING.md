@@ -77,8 +77,8 @@ vs 子声明接收的 reference，同一方向、同一事实。量纲检查（`
 | 函数 | 作用 |
 |---|---|
 | `verify_ports_match_interface<ControllerT, Ports>` | 控制器自报字符串 vs **`TypedPorts` 声明**（三张表） |
-| `verify_ports_match_contract<ContractT, ControllerT>` | 控制器自报字符串 vs **绑定时用的 `Contract`**（状态/参考两张表的长度） |
-| `topology_binding::verify_binding_ports(binding)` | 沿类型链**整棵树一次查完**，失败时给出"哪个节点、哪张表" |
+| `verify_ports_match_contract<ContractT, ControllerT>` | 控制器自报字符串 vs **绑定时用的 `Contract`**（状态/参考两张表，**逐位置比名称与顺序**，不只是长度——评审 C） |
+| `topology_binding::verify_binding_ports(binding)` | 沿绑定**树**递归查完**每一个孩子**，失败时给出"哪个节点、哪张表"以及**实测列表 vs 声明列表**（评审 B 的递归、2026-09-24 的诊断改进） |
 
 新增 3 个负向用例（状态表不符、状态数多一个、参考数不符）证明检查非空洞，
 以及 1 个正向用例证明"声明一致 ⇒ 通过"。

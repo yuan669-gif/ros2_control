@@ -311,9 +311,9 @@ TEST(TypedPorts, generated_strings_match_the_declaration)
 TEST(TypedPorts, interface_verification_succeeds_for_a_mixin_controller)
 {
   WheelController controller;
-  const char * reason = nullptr;
+  std::string reason;
   const bool matches = tp::verify_ports_match_interface<WheelController, wheel_ports>(controller, &reason);
-  EXPECT_TRUE(matches) << (reason ? reason : "");
+  EXPECT_TRUE(matches) << reason;
 }
 
 /// Order matters, not just membership: a controller that reports the RIGHT ports in the WRONG order
@@ -321,15 +321,15 @@ TEST(TypedPorts, interface_verification_succeeds_for_a_mixin_controller)
 TEST(TypedPorts, contract_verification_checks_order_not_just_membership)
 {
   HandWrittenController in_order({"p/a", "p/b"}, {});
-  const char * reason = nullptr;
+  std::string reason;
   EXPECT_TRUE(tp::verify_ports_match_contract<two_state>(in_order, &reason))
-    << (reason ? reason : "");
+    << reason;
 
   HandWrittenController swapped({"p/b", "p/a"}, {});
-  const char * swapped_reason = nullptr;
+  std::string swapped_reason;
   EXPECT_FALSE(tp::verify_ports_match_contract<two_state>(swapped, &swapped_reason));
-  ASSERT_NE(nullptr, swapped_reason);
-  EXPECT_NE(std::string::npos, std::string(swapped_reason).find("staged_state_ports"))
+  ASSERT_FALSE(swapped_reason.empty());
+  EXPECT_NE(std::string::npos, swapped_reason.find("staged_state_ports"))
     << "got: " << swapped_reason;
 }
 
@@ -338,11 +338,11 @@ TEST(TypedPorts, contract_verification_checks_order_not_just_membership)
 TEST(TypedPorts, interface_verification_rejects_a_state_port_mismatch)
 {
   HandWrittenController controller({"not/a/state"});
-  const char * reason = nullptr;
+  std::string reason;
   const bool matches =
     tp::verify_ports_match_interface<HandWrittenController, wheel_ports>(controller, &reason);
   EXPECT_FALSE(matches);
-  ASSERT_NE(nullptr, reason);
+  ASSERT_FALSE(reason.empty());
   EXPECT_NE(std::string::npos, std::string(reason).find("staged_state_ports"))
     << "the reason must name the list that disagrees, got: " << reason;
 }
@@ -354,30 +354,30 @@ TEST(TypedPorts, a_controller_can_be_verified_against_its_contract)
   // The mixin makes a mismatch impossible, so it passes; the interesting case is a controller that
   // hand-writes its strings.
   WheelController mixin_controller;
-  const char * reason = nullptr;
+  std::string reason;
   EXPECT_TRUE(tp::verify_ports_match_contract<wheel_contract>(mixin_controller, &reason))
-    << (reason ? reason : "");
+    << reason;
 
   HandWrittenController agreeing({"wheel/travel"});
   EXPECT_TRUE(tp::verify_ports_match_contract<wheel_contract>(agreeing, &reason))
-    << (reason ? reason : "");
+    << reason;
 
   // The check is not vacuous: one state port more than the contract declares would make the kernel
   // allocate a state buffer the checked topology does not know about.
   HandWrittenController extra({"wheel/travel", "wheel/extra"});
-  const char * extra_reason = nullptr;
+  std::string extra_reason;
   EXPECT_FALSE(tp::verify_ports_match_contract<wheel_contract>(extra, &extra_reason));
-  ASSERT_NE(nullptr, extra_reason);
-  EXPECT_NE(std::string::npos, std::string(extra_reason).find("staged_state_ports"))
+  ASSERT_FALSE(extra_reason.empty());
+  EXPECT_NE(std::string::npos, extra_reason.find("staged_state_ports"))
     << "got: " << extra_reason;
 
   // SAME LENGTH, WRONG NAME: the check must compare names, not just counts (review item C: the
   // earlier revision compared only `.size()` while its comment claimed name-and-order checking).
   HandWrittenController wrong_name({"wheel/travel_wrong"});
-  const char * name_reason = nullptr;
+  std::string name_reason;
   EXPECT_FALSE(tp::verify_ports_match_contract<wheel_contract>(wrong_name, &name_reason));
-  ASSERT_NE(nullptr, name_reason);
-  EXPECT_NE(std::string::npos, std::string(name_reason).find("staged_state_ports"))
+  ASSERT_FALSE(name_reason.empty());
+  EXPECT_NE(std::string::npos, name_reason.find("staged_state_ports"))
     << "got: " << name_reason;
 
   // And a wrong reference count is reported against the reference list.
@@ -388,10 +388,10 @@ TEST(TypedPorts, a_controller_can_be_verified_against_its_contract)
     std::vector<std::string> staged_reference_ports() const override {return {};}
   };
   WrongReference wrong_reference;
-  const char * reference_reason = nullptr;
+  std::string reference_reason;
   EXPECT_FALSE(tp::verify_ports_match_contract<wheel_contract>(wrong_reference, &reference_reason));
-  ASSERT_NE(nullptr, reference_reason);
-  EXPECT_NE(std::string::npos, std::string(reference_reason).find("staged_reference_ports"))
+  ASSERT_FALSE(reference_reason.empty());
+  EXPECT_NE(std::string::npos, reference_reason.find("staged_reference_ports"))
     << "got: " << reference_reason;
 }
 

@@ -184,6 +184,13 @@ TEST(TopologyContract, well_formedness_checker_rejects_malformed_rows)
     tc::SpecRows rows;
     EXPECT_FALSE(tc::rows_are_well_formed(rows, &reason));
   }
+  {  // the SAME controller instance bound under two node names
+    auto rows = good;
+    rows.instances[2] = rows.instances[1];
+    EXPECT_FALSE(tc::rows_are_well_formed(rows, &reason));
+    EXPECT_NE(std::string::npos, reason.find("same controller instance"))
+      << "the reason must explain the aliasing: " << reason;
+  }
 }
 
 /// A leaf-only topology is a legal degenerate case: one root, no children.

@@ -110,8 +110,7 @@ inline void require_rows_are_usable(const tc::SpecRows & rows)
   if (root_count(rows) != 1)
   {
     throw std::invalid_argument(
-      "topology_binding: a single binding must describe exactly one chain, so exactly one root is "
-      "expected");
+      "topology_binding: a binding must describe exactly one tree, so exactly one root is expected");
   }
 }
 
@@ -183,18 +182,20 @@ bool verify_children_ports(
 
 /// Verify that every node's RUNTIME port lists agree with the contract it was bound with.
 ///
-/// This is the last hop of the metaprogramming chain, and it is deliberately NOT automatic. The
-/// compile-time layer checks ownership and dimensions from the `Contract`; the kernel sizes its
-/// per-node buffers from the strings the controller reports. A controller that uses
-/// `TypedPortsMixin` generates those strings from its declaration, so a mismatch is impossible by
-/// construction. A controller that hand-writes them can still disagree, and this function is how
-/// such a controller is caught:
+/// This is the last hop of the metaprogramming chain. It walks the WHOLE binding tree (every child
+/// subtree, short-circuiting at the first failure), because a mismatch in the second child is just as
+/// fatal as one in the first. The compile-time layer checks ownership and dimensions from the
+/// `Contract`; the kernel sizes its per-node buffers from the strings the controller reports. A
+/// controller that uses `TypedPortsMixin` generates those strings from its declaration, so a mismatch
+/// is impossible by construction. A controller that hand-writes them can still disagree, and this
+/// function is how such a controller is caught:
 ///
 ///     std::string reason;
 ///     if (!topology_binding::verify_binding_ports(binding, &reason)) { throw ...; }
 ///
-/// It is a runtime call because building a controller instance is not a constant expression. It is
-/// not free, so it is not on any path the kernel runs per cycle -- call it at start-up.
+/// It is a runtime call because building a controller instance is not a constant expression, and it
+/// is not on any path the kernel runs per cycle. `create_library_group` runs it for you (review item
+/// C); call it directly only when you build the group some other way.
 ///
 /// Actuator ports cannot be verified here: the `Contract` deliberately excludes hardware actuators,
 /// so there is nothing to compare them against. Use
@@ -213,14 +214,14 @@ bool verify_binding_ports(const Binding & binding, std::string * reason)
     return false;
   }
 
-  const char * node_reason = nullptr;
   using contract_type = typename Binding::contract_type;
-  if (!typed_ports::verify_ports_match_contract<contract_type>(*staged, &node_reason))
+  if (!typed_ports::verify_ports_match_contract<contract_type>(*staged, reason))
   {
+    // `verify_ports_match_contract` writes the actual and declared lists; only the node identity is
+    // added here, so the caller learns which node of the tree is wrong and why.
     if (reason != nullptr)
     {
-      *reason = "node '" + std::string(Binding::name()) + "': " +
-                (node_reason != nullptr ? node_reason : "port lists disagree with the contract");
+      *reason = "node '" + std::string(Binding::name()) + "': " + *reason;
     }
     return false;
   }

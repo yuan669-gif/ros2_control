@@ -697,6 +697,23 @@ inline bool rows_are_well_formed(const SpecRows & rows, std::string * reason = n
   }
   if (roots != 1) {return fail("a topology must have exactly one root");}
 
+  // Unique names are not enough: the kernel executes INSTANCES. The same controller object bound
+  // under two node names would be advanced twice per stage in one cycle, which is exactly what the
+  // "one call per controller per cycle" guarantee forbids, so the plan rejects it as well.
+  for (std::size_t i = 0; i < rows.instances.size(); ++i)
+  {
+    for (std::size_t j = i + 1; j < rows.instances.size(); ++j)
+    {
+      if (rows.instances[i] == rows.instances[j])
+      {
+        const std::string why =
+          "the same controller instance is bound to both node '" + rows.names[i] + "' and node '" +
+          rows.names[j] + "'";
+        return fail(why.c_str());
+      }
+    }
+  }
+
   for (std::size_t i = 0; i < rows.parents.size(); ++i)
   {
     const std::string & parent = rows.parents[i];

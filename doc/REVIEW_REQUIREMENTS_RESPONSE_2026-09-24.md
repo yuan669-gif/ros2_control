@@ -312,36 +312,75 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 （`update_phase` 里取子估计的**均值**），使分叉树能在 manager 路径上真的跑起来；
 原有的 `set_two_phase_child` 单子接口与语义不变，既有用例未改动。
 
+### E.1.6 继续查漏补缺时修掉的三个问题（本轮第二轮）
+
+1. **同一个控制器实例被绑成两个节点**（真实缺陷，之前无人拦）：
+   `rows_are_well_formed` 只查**名字**唯一，内核 `StagedExecutionGroup` 的 spec 校验也只查名字；
+   于是把**同一个对象指针**用于两个节点名（例如复制粘贴 `make_leaf` 时忘了换指针）会**通过全部检查**，
+   而内核每个阶段会**调用该对象两次**、两个节点的状态槽争抢同一个对象的状态——
+   这正是"每控制器每周期每阶段至多一次"这条核心保证的反例。
+   修复：`topology_contract::rows_are_well_formed` **和** `StagedExecutionGroup` 构造函数
+   **都**检查实例唯一性（前者给计划层好的报错，后者守住内核自己的不变式——手写 `Spec` 的用户
+   不经过绑定层）。三处测试：`test_topology_contract`（错误原因含 "same controller instance"）、
+   `test_execution_group`（`create_library` 抛 `invalid_argument`）、
+   `test_topology_binding`（`to_library_spec` 报出具体节点名）。
+2. **自查自反例**：`two_phase_rejections` 的顺序校验没有排除"控制器认领**自己**的端口"
+   （`<自己的名字>/<port>`），会把这种（罕见但合法）配置判成"排在它的子节点之后"。
+   已加 `child == parent` 跳过。这是写这条检查时引入的假阳性，不是既有缺陷。
+3. **诊断信息不够用**：`verify_ports_match_contract` / `verify_ports_match_interface`
+   原来只返回 "disagrees" 的静态字符串，且 `reason` 是 `const char **`。
+   已改为 `std::string *` 并输出**实测列表 vs 声明列表**，
+   例如 `staged_state_ports() is [neg_b/state_typo] but the contract it was bound with declares
+   [neg_b/state]`；`verify_binding_ports` 再补上节点名。
+   新增用例 `TypedTree.the_checked_build_verifies_every_child_not_only_the_first`：
+   把"手写错误端口"的控制器放在**第二个孩子**位置，断言报错**点名第二个孩子**且含错误端口名——
+   这条同时证明了运行时端口校验确实**递归到每一个孩子**，而不只是第一个。
+
+### B.2 编译成本：分叉树不比同规模深链贵（新增测量）
+
+`BoundNode` 从单槽改成变参包后，专门测了"同节点数下链 vs 树"
+（`hierarchical_control/test/measure_binding_cost.py`，三次运行）：
+链 **130–172 ms/节点**，树 **2–25 ms/节点**。方向稳定、倍数不稳定（宿主 load≈5/2 核），
+所以只声称"**深度才是成本来源，分叉不是**"，与 §2 里 `static_topology` 的结论一致。
+详见 `doc/COMPILE_COST.md` §3.1。
+
 ---
 
 ## B/E 完成后的验证（本轮实测）
 
 | 项 | 结果 |
 |---|---|
-| `hierarchical_control` | **12 个 ctest 程序全通过**：11 个 gtest 程序 / **75 用例** + 编译语料脚本 |
-| `test_typed_tree`（新） | 2 用例：七节点分叉树（库路径）+ 兄弟顺序对调变体 |
+| `hierarchical_control` | **12 个 ctest 程序全通过**：11 个 gtest 程序 / **76 用例** + 编译语料脚本 |
+| `test_typed_tree`（新） | **3 用例**：七节点分叉树（库路径）、兄弟顺序对调变体、运行时端口校验递归到第二个孩子 |
 | 编译语料 | **15/15**（13 必须失败 + 2 必须编译的对照） |
-| `controller_manager` | **20/20** ctest 程序（含 `test_two_phase_execution` **18 用例**，其中 7 个是本轮新增）；19 个 gtest 程序 / **162 用例** |
+| `controller_manager` | **18 个 gtest 程序逐个直接运行全部通过**（19 个程序 / **162 用例**，其中 `test_cycle_tree_contract` 不是 gtest 二进制）：`test_two_phase_execution` 18、`test_load_controller` 39、`test_controller_manager` 18、`test_controller_manager_srvs` 14、`test_spawner_unspawner` **22/22** |
 | TSan harness | `[tsan] RESULT: PASS (racy reported, atomic clean)` |
 | 阶段图穷举 | 465/465；一个状态阶段/顶点的调度数 **0** |
+| 绑定层编译成本 | 链 **130–172 ms/节点** vs 同规模分叉树 **2–25 ms/节点**（3 次运行，方向稳定、倍数不稳定）→ 见 §B.2 与 `COMPILE_COST.md` §3.1 |
 | 内存/磁盘 | 未新增构建树；未做真实 manager 的 TSan（磁盘不允许） |
 
-### 两个**环境性**失败（不是本轮改动的回归，须如实记录）
+### 三个**环境性**失败（不是本轮改动的回归，须如实记录）
+
+宿主为 **2 核、load average ≈ 5**，因此所有基于 launch/服务发现的用例都会间歇性超时或失败：
 
 1. `test_controller_manager_srvs`：ctest 的 `TIMEOUT 120` 不够——直接运行该二进制
-   **14/14 通过，用时 234 s**。原因是本机 load average ≈ 5.3 而 `nproc = 2`（宿主超载），
-   与调度实现无关。
+   **14/14 通过，用时 234 s**。与调度实现无关。
 2. `test_spawner_unspawner`：`TestLoadController.spawner_test_failed_activation_of_controllers`
-   **间歇**失败，失败信息是 spawner 进程
-   `Could not contact service /test_controller_manager/list_controllers`
-   （服务发现超时），断言随之看到 `get_loaded_controllers().size() == 2` 而非 3。
-   3 次单独运行 1 通过 2 失败；整个 ctest 首次全量运行时该用例是通过的。
+   曾间歇失败，失败信息是 spawner 进程
+   `Could not contact service /test_controller_manager/list_controllers`（服务发现超时）；
+   3 次单独运行 1 通过 2 失败，**第二轮全量运行 22/22 通过**。
    本轮改动只在 `two_phase_enabled_ == true` 时执行任何新代码（默认 false，该测试从不启用），
-   失败模式发生在 spawner 与 manager 的服务发现阶段，早于任何准入逻辑。
-3. `test_hierarchy_comparison.post_switch_two_phase_cycles_do_not_rebuild_membership`
+   失败模式发生在服务发现阶段，早于任何准入逻辑。
+3. `test_hardware_spawner`：`spawner_with_later_load_of_robot_description` 在第二轮全量运行中
+   失败一次，随后 **3/3 次直接运行全部通过（8/8 用例）**；该用例本身就会断言
+   "服务不可达"，在超载宿主上两边都容易翻转。
+4. `test_hierarchy_comparison.post_switch_two_phase_cycles_do_not_rebuild_membership`
    在同一时段出现过 **1 次**失败，随后连续 **8 次**运行全绿。该用例断言控制环线程
    "空闲每周期分配数完全平坦"，在宿主超载时容易被一次额外分配打破；缺陷检测目标
    （两趟成员表在实时路径重建）不受影响。
+
+**共同点**：这些断言都是时间/负载敏感的，而本轮所有改动在默认配置下
+（`two_phase_enabled_ == false`）**不改变任何实时路径**，在启用时也不改变 `update()` 的代码。
 
 ---
 

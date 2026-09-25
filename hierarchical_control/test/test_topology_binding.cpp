@@ -297,6 +297,25 @@ TEST(TopologyBinding, malformed_plans_are_rejected_with_a_reason)
     rows.parents = {"", "b"};
     EXPECT_THROW(tb::to_library_spec(rows), std::invalid_argument);
   }
+  {  // the same controller instance under two names: one controller, one call per stage
+    tc::SpecRows rows;
+    rows.names = {"a", "b"};
+    rows.instances = {
+      static_cast<controller_interface::ControllerInterfaceBase *>(&g_root),
+      static_cast<controller_interface::ControllerInterfaceBase *>(&g_root)};
+    rows.parents = {"", "a"};
+    try
+    {
+      tb::to_library_spec(rows);
+      FAIL() << "an aliased instance must be rejected";
+    }
+    catch (const std::invalid_argument & error)
+    {
+      EXPECT_NE(
+        std::string::npos, std::string(error.what()).find("same controller instance"))
+        << error.what();
+    }
+  }
 }
 
 /// A single-node binding is legal and yields a one-member group.

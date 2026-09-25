@@ -2431,7 +2431,8 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
         const auto child_it = by_name.find(owner);
         if (child_it == by_name.end() || !is_member[child_it->second]) {continue;}
         const std::size_t child = child_it->second;
-        if (parent < child) {continue;}  // the required order
+        if (child == parent) {continue;}  // a controller's own port is not an edge
+        if (parent < child) {continue;}   // the required order
 
         // Report BOTH ends, so a caller that can only exclude (the rebuild path) never keeps one end
         // of an edge the schedule cannot order.

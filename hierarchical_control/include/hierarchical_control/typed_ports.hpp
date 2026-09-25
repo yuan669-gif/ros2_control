@@ -248,6 +248,36 @@ constexpr bool same_names(
   return true;
 }
 
+/// Render a runtime list of port names, for a diagnostic.
+inline std::string render_names(const std::vector<std::string> & names)
+{
+  if (names.empty()) {return "<none>";}
+  std::string out;
+  for (std::size_t i = 0; i < names.size(); ++i)
+  {
+    if (i != 0) {out += ", ";}
+    out += names[i];
+  }
+  return out;
+}
+
+/// Render a compile-time `PortList`'s names, for a diagnostic. The pair of overloads is what makes
+/// the "actual vs declared" messages below possible; a message that only says "they disagree" forces
+/// the caller to go and print both lists by hand.
+template <typename... Ports>
+std::string render_names(tc::PortList<Ports...>)
+{
+  const std::array<std::string_view, sizeof...(Ports)> names = {Ports::name()...};
+  if (names.empty()) {return "<none>";}
+  std::string out;
+  for (std::size_t i = 0; i < names.size(); ++i)
+  {
+    if (i != 0) {out += ", ";}
+    out += names[i];
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The mixin
 // ---------------------------------------------------------------------------------------------
@@ -373,26 +403,37 @@ constexpr void require_declarations_compatible()
 /// unverified, so the documentation's claim that a controller bypassing the mixin is caught here was
 /// only true for the reference and actuator lists.
 template <typename ControllerT, typename Ports>
-bool verify_ports_match_interface(
-  const ControllerT & controller, const char ** reason = nullptr)
+bool verify_ports_match_interface(const ControllerT & controller, std::string * reason = nullptr)
 {
-  auto fail = [&](const char * why)
+  auto mismatch = [reason](
+                    const char * list_name, const std::string & actual,
+                    const std::string & declared)
   {
-    if (reason != nullptr) {*reason = why;}
+    if (reason != nullptr)
+    {
+      *reason = std::string(list_name) + " is [" + actual + "] but the declaration is [" + declared +
+                "]";
+    }
     return false;
   };
 
   if (!same_names(controller.staged_reference_ports(), name_lists<Ports>::reference))
   {
-    return fail("staged_reference_ports() disagrees with the TypedPorts declaration");
+    return mismatch(
+      "staged_reference_ports()", render_names(controller.staged_reference_ports()),
+      render_names(typename Ports::reference{}));
   }
   if (!same_names(controller.staged_state_ports(), name_lists<Ports>::state))
   {
-    return fail("staged_state_ports() disagrees with the TypedPorts declaration");
+    return mismatch(
+      "staged_state_ports()", render_names(controller.staged_state_ports()),
+      render_names(typename Ports::state{}));
   }
   if (!same_names(controller.staged_actuator_ports(), name_lists<Ports>::actuators))
   {
-    return fail("staged_actuator_ports() disagrees with the TypedPorts declaration");
+    return mismatch(
+      "staged_actuator_ports()", render_names(controller.staged_actuator_ports()),
+      render_names(typename Ports::actuators{}));
   }
   return true;
 }
@@ -415,29 +456,37 @@ bool verify_ports_match_interface(
 /// Actuator ports cannot be checked this way: the `Contract` deliberately excludes hardware
 /// actuators, so there is nothing to compare them against.
 template <typename ContractT, typename ControllerT>
-bool verify_ports_match_contract(
-  const ControllerT & controller, const char ** reason = nullptr)
+bool verify_ports_match_contract(const ControllerT & controller, std::string * reason = nullptr)
 {
   static_assert(tc::is_contract_v<ContractT>, "typed_ports: expected a topology_contract::Contract");
-  auto fail = [&](const char * why)
+  // The message names BOTH lists. "They disagree" is not enough for a caller whose only clue is the
+  // thrown string: the whole point of this check is to catch a hand-written controller, and the
+  // first thing anyone needs is which port is wrong.
+  auto mismatch = [reason](
+                    const char * list_name, const std::string & actual,
+                    const std::string & declared)
   {
-    if (reason != nullptr) {*reason = why;}
+    if (reason != nullptr)
+    {
+      *reason = std::string(list_name) + " is [" + actual +
+                "] but the contract it was bound with declares [" + declared +
+                "]; the kernel would size its buffers from the first list while the topology was "
+                "checked against the second";
+    }
     return false;
   };
 
   if (!same_names(controller.staged_state_ports(), typename ContractT::produced{}))
   {
-    return fail(
-      "staged_state_ports() disagrees with the contract's produced ports (name, order or length): "
-      "the kernel would size the state buffers from a different declaration than the topology that "
-      "was checked");
+    return mismatch(
+      "staged_state_ports()", render_names(controller.staged_state_ports()),
+      render_names(typename ContractT::produced{}));
   }
   if (!same_names(controller.staged_reference_ports(), typename ContractT::consumed{}))
   {
-    return fail(
-      "staged_reference_ports() disagrees with the contract's consumed ports (name, order or "
-      "length): the kernel would size the reference buffers from a different declaration than the "
-      "topology that was checked");
+    return mismatch(
+      "staged_reference_ports()", render_names(controller.staged_reference_ports()),
+      render_names(typename ContractT::consumed{}));
   }
   return true;
 }

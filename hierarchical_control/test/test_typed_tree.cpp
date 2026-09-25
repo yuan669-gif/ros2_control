@@ -170,6 +170,70 @@ using left_module_contract_swapped = tp::contract_of_t<left_module_ports_swapped
 using right_module_contract_swapped = tp::contract_of_t<right_module_ports_swapped>;
 
 // ---------------------------------------------------------------------------------------------
+// A small two-child tree for the RUNTIME port check: `neg_root -> {neg_a, neg_b}`, where `neg_b`
+// deliberately reports the wrong port strings. Used to prove that the checked build entry verifies
+// EVERY child, not only the first one.
+// ---------------------------------------------------------------------------------------------
+
+NAME_STRUCT(neg_root_n, "neg_root");
+NAME_STRUCT(neg_a_n, "neg_a");
+NAME_STRUCT(neg_b_n, "neg_b");
+using neg_root_node = st::Root<neg_root_n>;
+using neg_a_node = st::Descendant<neg_a_n, neg_root_node>;
+using neg_b_node = st::Descendant<neg_b_n, neg_root_node>;
+
+NAME_STRUCT(neg_a_state_n, "neg_a/state");
+NAME_STRUCT(neg_a_target_n, "neg_a/target");
+NAME_STRUCT(neg_b_state_n, "neg_b/state");
+NAME_STRUCT(neg_b_target_n, "neg_b/target");
+using neg_a_state = tc::Port<neg_a_state_n, dm::Position>;
+using neg_a_target = tc::Port<neg_a_target_n, dm::LinearVelocity>;
+using neg_b_state = tc::Port<neg_b_state_n, dm::Position>;
+using neg_b_target = tc::Port<neg_b_target_n, dm::LinearVelocity>;
+
+using neg_a_ports =
+  tp::TypedPorts<tc::PortList<neg_a_state>, tc::PortList<neg_a_target>, tc::PortList<>>;
+using neg_b_ports =
+  tp::TypedPorts<tc::PortList<neg_b_state>, tc::PortList<neg_b_target>, tc::PortList<>>;
+using neg_root_ports = tp::TypedPorts<
+  tc::PortList<>, tc::PortList<>, tc::PortList<>,
+  tc::PortList<neg_a_target, neg_b_target>, tc::PortList<neg_a_state, neg_b_state>>;
+
+/// Declares no `typed_ports` at all and hand-writes its runtime strings -- wrongly. A hand-written
+/// controller cannot be checked at compile time (there is no type-level declaration to compare), so
+/// the runtime verifier is the only thing that can catch it, and this is the case that proves the
+/// verifier reaches the SECOND child of a branch.
+class LyingController : public hierarchical_control_test::MinimalController,
+                        public hierarchical_control::StagedControllerInterface
+{
+public:
+  explicit LyingController(std::string name) : MinimalController(std::move(name)) {}
+
+  std::vector<std::string> staged_state_ports() const override
+  {
+    // "state_typo" instead of "state": same owner, same length, different name.
+    return {"neg_b/state_typo"};
+  }
+  std::vector<std::string> staged_reference_ports() const override {return {"neg_b/target"};}
+
+  controller_interface::return_type update_state_stage(
+    const rclcpp::Time &, const rclcpp::Duration &, const hierarchical_control::StagedContext &,
+    const hierarchical_control::StagedInputView &,
+    hierarchical_control::StagedValueWriter) noexcept override
+  {
+    return controller_interface::return_type::OK;
+  }
+  controller_interface::return_type update_command_stage(
+    const rclcpp::Time &, const rclcpp::Duration &, const hierarchical_control::StagedContext &,
+    const hierarchical_control::StagedValueView &, const hierarchical_control::StagedValueView &,
+    const hierarchical_control::StagedReferenceWriter &,
+    hierarchical_control::StagedValueWriter) noexcept override
+  {
+    return controller_interface::return_type::OK;
+  }
+};
+
+// ---------------------------------------------------------------------------------------------
 // One controller class, instantiated with each node's declaration
 // ---------------------------------------------------------------------------------------------
 
@@ -518,4 +582,40 @@ TEST(TypedTree, sibling_order_is_a_declaration_not_a_lucky_position)
   EXPECT_EQ(kReference, tree.left_b.sink_.last);
   EXPECT_EQ(kReference, tree.right_a.sink_.last);
   EXPECT_EQ(kReference, tree.right_b.sink_.last);
+}
+
+/// The checked build entry verifies EVERY node's runtime port strings, not just the first child.
+///
+/// `neg_a` is honest and typed, `neg_b` hand-writes its strings and reports "neg_b/state_typo". The
+/// compile-time checks cannot see this (a hand-written controller has no `typed_ports` declaration to
+/// compare against), so only the runtime walk of the tree can catch it -- and it must be the walk
+/// INTO THE SECOND CHILD that does, which is what the message asserts.
+TEST(TypedTree, the_checked_build_verifies_every_child_not_only_the_first)
+{
+  TreeController<neg_a_ports> neg_a{"neg_a", 1.0};
+  LyingController neg_b{"neg_b"};
+  TreeController<neg_root_ports> root{"neg_root", 0.0};
+
+  const auto a_leaf = tc::make_leaf<neg_a_node, tp::contract_of_t<neg_a_ports>>(&neg_a);
+  const auto b_leaf = tc::make_leaf<neg_b_node, tp::contract_of_t<neg_b_ports>>(&neg_b);
+  const auto binding =
+    tc::compose<neg_root_node, tp::contract_of_t<neg_root_ports>>(&root, a_leaf, b_leaf);
+
+  // The declaration itself is coherent, so the plan is well formed: the failure is the runtime
+  // disagreement, and it must be reported against `neg_b`.
+  const auto rows = tc::build_spec_rows(binding);
+  EXPECT_EQ(3u, rows.names.size());
+
+  try
+  {
+    tb::create_library_group(binding, 0);
+    FAIL() << "a hand-written controller that reports different port strings must be rejected";
+  }
+  catch (const std::invalid_argument & error)
+  {
+    const std::string message = error.what();
+    EXPECT_NE(std::string::npos, message.find("neg_b"))
+      << "the failure must be attributed to the second child: " << message;
+    EXPECT_NE(std::string::npos, message.find("state_typo")) << message;
+  }
 }

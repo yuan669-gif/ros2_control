@@ -415,6 +415,10 @@ TEST(HierarchicalControlKernel, configuration_errors_are_rejected)
   rejects([&] {hc::StagedExecutionGroup::create_library(Spec{{"a", "b"}, {&a, &b}, {"b", "a"}});});
   // node is its own parent
   rejects([&] {hc::StagedExecutionGroup::create_library(Spec{{"a", "b"}, {&a, &b}, {"", "b"}});});
+  // the SAME instance bound to two node names. Nothing else rejects this (the names differ, so a
+  // name check passes), yet the kernel would advance that controller twice per phase in one cycle,
+  // so the kernel enforces it where the "once per stage per controller" guarantee lives.
+  rejects([&] {hc::StagedExecutionGroup::create_library(Spec{{"a", "b"}, {&a, &a}, {"", "a"}});});
 }
 
 TEST(HierarchicalControlKernel, structural_errors_are_rejected)

@@ -120,6 +120,27 @@ marginal = (T(N) - T(N-1)) / 1
   现行头文件未改动）。注意上面的数字来自这条单链测量；§2 的 `measure_compile_cost.py`
   用的是多链形状，两者不可直接相减。
 
+### 3.1 绑定层：分叉树 vs 深链（2026-09-24，评审 B 之后新增）
+
+`BoundNode` 从一个 `Next` 槽改成变参 `Children...`（`std::tuple`）后，需要回答：
+**描述一棵树是不是比描述同规模的链更贵？** 实测（`hierarchical_control/test/measure_binding_cost.py`，
+同节点数比较：链 N = 根→…→叶；树 N = 根 → M 个模块 → 每模块 K 个叶，`1 + M + K·M = N`）：
+
+| 运行 | N=41 链 | N=85 链 | N=41 树 | N=85 树 | 链 边际 | 树 边际 |
+|---|---|---|---|---|---|---|
+| 1 | 12.945 s | 18.687 s | 12.200 s | 13.309 s | 130.5 ms/节点 | 25.2 ms/节点 |
+| 2 | 13.659 s | 20.399 s | 12.651 s | 12.748 s | 153.2 ms/节点 | **2.2 ms/节点** |
+| 3 | 12.195 s | 19.768 s | 12.895 s | 12.998 s | 172.1 ms/节点 | **2.3 ms/节点** |
+
+- **结论**：**深链才是贵的那一边**（130–172 ms/节点，稳定），分叉树的边际成本低一个量级
+  （2–25 ms/节点，噪声较大）。与 §2 的 `static_topology` 结论一致（深链 ~9.7 ms/节点@深度 64
+  vs 宽扇出 ~1.1 ms/子节点）；
+- **不能声称**精确倍数：树的数字 2–25 ms/节点 在三次运行里变化很大（宿主负载 ≈5/2 核），
+  能站住的是**方向与量级**："树不比同规模链贵，链的深度才是成本来源"；
+- 绝对时间 ≈11–20 s 里绝大部分是 `controller_interface`/`rclcpp` 的固定解析成本，
+  两边都包含，因而在边际量里被消掉；`tree/chain` 比值只在边际量上有意义。
+
+
 ---
 
 ## 4. 真实翻译单元中的增量（**测量局限在此**）
@@ -153,11 +174,12 @@ marginal = (T(N) - T(N-1)) / 1
 ---
 
 ## 5. 复现
-
 ```bash
 cd ~/Desktop/ros2_control-humble
 source /opt/ros/humble/setup.bash
 python3 hierarchical_control/test/measure_compile_cost.py --runs 3
+# §3.1 的绑定层对比（链 vs 分叉树，同节点数）
+python3 hierarchical_control/test/measure_binding_cost.py --runs 5
 ```
 
 真实 TU 测量（复用构建系统已解析的 include 路径）：

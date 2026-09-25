@@ -115,7 +115,7 @@ constexpr bool declarations_are_compatible() noexcept;
 |---|---|
 | 静态声明的端口、经 mixin 生成字符串 | ✅ |
 | 父子端口的**名字 + 顺序 + 量纲**一致性 | ✅ |
-| 控制器自报端口与声明不一致（绕过 mixin） | ✅ `verify_ports_match_interface`（三张表全查，含状态端口）、`verify_ports_match_contract`（与绑定的 `Contract` 对齐）、`topology_binding::verify_binding_ports`（沿类型链整棵树一次查完）。都是**运行期**调用，不是编译期（构造控制器不是常量表达式） |
+| 控制器自报端口与声明不一致（绕过 mixin） | ✅ `verify_ports_match_interface`（三张表全查，含状态端口）、`verify_ports_match_contract`（与绑定的 `Contract` 对齐）、`topology_binding::verify_binding_ports`（沿绑定树**递归查完每个孩子**）。都是**运行期**调用，不是编译期（构造控制器不是常量表达式） |
 | **执行器端口**与 `Contract` 的一致性 | ❌ **查不了**：`Contract` 有意不含硬件执行器端口，没有可比对象。用 `verify_ports_match_interface` 才能查它 |
 | **父子状态边**（父读子状态）的静态检查 | ✅ 2026-09-24 补齐：`ChildState`（父声明读子节点的哪些状态）对 `State`（子声明发布哪些状态），`state_declarations_agree<Parent,Child>()` 按**名字+顺序+量纲**检查；两条边可分别断言。只对**链**精确（编译期 binding 只能表达链，每个节点恰好一个子节点） |
 | 单位（米/毫米） | ❌ 量纲相同，不检查 |

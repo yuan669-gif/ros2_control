@@ -456,6 +456,13 @@ private:
 
     std::unordered_map<std::string, std::size_t> index;
     index.reserve(spec.names.size());
+    // The kernel's central guarantee is "at most one call per stage per controller per cycle". That
+    // is a statement about INSTANCES, not names: the same controller object bound under two node
+    // names would be advanced twice per phase, and its two storage slots would fight over one
+    // object's state. Nothing else rejects it -- the names differ, so every name-based check passes
+    // -- so the kernel enforces it where the guarantee lives.
+    std::unordered_map<const StagedControllerInterface *, std::string> instance_owner;
+    instance_owner.reserve(spec.names.size());
     for (std::size_t i = 0; i < spec.names.size(); ++i)
     {
       if (spec.names[i].empty() || spec.instances[i] == nullptr)
@@ -465,6 +472,15 @@ private:
       if (!index.emplace(spec.names[i], i).second)
       {
         throw std::invalid_argument("duplicate staged group member: " + spec.names[i]);
+      }
+      const auto inserted = instance_owner.emplace(spec.instances[i], spec.names[i]);
+      if (!inserted.second)
+      {
+        throw std::invalid_argument(
+          "the same controller instance is bound to both '" + inserted.first->second + "' and '" +
+          spec.names[i] +
+          "'; one controller may appear only once in a group, otherwise it would be advanced twice "
+          "per stage in the same cycle");
       }
       names_.push_back(spec.names[i]);
       staged_.push_back(spec.instances[i]);
