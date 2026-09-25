@@ -596,7 +596,13 @@ private:
     /// the parent before the child (or the child before the parent) and the edge would silently use
     /// the previous cycle's value. Measured case: upstream `controller_sorting()` places a chainable
     /// controller that claims NO command interface BEFORE the parent that claims its reference.
-    unschedulable_order
+    unschedulable_order,
+    /// Two names in the controller list refer to ONE controller object. `add_controller()` only
+    /// rejects duplicate NAMES, so this is accepted upstream, and then a pass advances that single
+    /// object once per name in the same cycle (measured: 2 `update_phase` + 2 `handle_phase` calls
+    /// per cycle). The staged/library path is protected by the kernel's own instance check; the
+    /// two-phase path does not go through the kernel, so it checks here.
+    duplicate_instance
   };
   /// Read by `update()` every cycle and written by the non-real-time setter, so it is atomic.
   /// An earlier revision used a plain bool, which is a data race on its own -- making the entry

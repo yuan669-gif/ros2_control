@@ -2273,6 +2273,10 @@ std::string ControllerManager::two_phase_admission_reason(
              "first and the forwards command pass the child first), silently using the previous "
              "cycle's value. Upstream `controller_sorting()` places a chainable controller that "
              "claims NO command interface BEFORE its parent, which is the usual cause";
+    case TwoPhaseAdmission::duplicate_instance:
+      return "shares ONE controller object with '" + detail +
+             "' (the manager only rejects duplicate names, so the same instance can be added under "
+             "two names), and a pass would then advance that object once per name in the same cycle";
   }
   return "is rejected";
 }
@@ -2389,6 +2393,34 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
           controllers[i].info.name,
           two_phase_admission_reason(TwoPhaseAdmission::cross_mode_dependency, owner)});
       break;
+    }
+  }
+
+  // Two names for ONE controller object. `add_controller()` checks names only, so this configuration
+  // is accepted upstream, and a pass would then advance that object once per name in the same cycle
+  // -- the per-name call counts still look perfect while the controller's state advances twice
+  // (measured: 6 update_phase and 6 handle_phase calls in 3 cycles for one object listed twice).
+  {
+    std::unordered_map<const controller_interface::ControllerInterfaceBase *, std::string> owners;
+    owners.reserve(controllers.size());
+    for (std::size_t i = 0; i < controllers.size(); ++i)
+    {
+      if (!implements[i]) {continue;}
+      if (only_active && !is_controller_active(controllers[i].c)) {continue;}
+      const auto inserted = owners.emplace(controllers[i].c.get(), controllers[i].info.name);
+      if (!inserted.second)
+      {
+        // Both names are reported, so excluding one still leaves no half of the pair scheduled.
+        rejections.push_back(
+          TwoPhaseRejection{
+            inserted.first->second,
+            two_phase_admission_reason(
+              TwoPhaseAdmission::duplicate_instance, controllers[i].info.name)});
+        rejections.push_back(
+          TwoPhaseRejection{
+            controllers[i].info.name,
+            two_phase_admission_reason(TwoPhaseAdmission::duplicate_instance, inserted.first->second)});
+      }
     }
   }
 

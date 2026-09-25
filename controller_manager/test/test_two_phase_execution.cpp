@@ -1009,3 +1009,34 @@ TEST_F(TestTwoPhaseExecution, a_member_is_never_run_by_the_native_loop_during_a_
 }
 
 }  // namespace
+
+/// The same controller OBJECT added under two names. Measured upstream behaviour: `add_controller()`
+/// rejects duplicate NAMES only, so the second add succeeds and both specs carry the same pointer; the
+/// manager then runs that one object once per name, i.e. twice per stage in one cycle (measured: 6
+/// `update_phase` and 6 `handle_phase` calls in 3 cycles), while every per-name counter still looks
+/// correct. The staged/library path is protected by the kernel's own instance check; the two-phase
+/// path does not go through the kernel, so it must refuse the mode.
+TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_when_one_object_has_two_names)
+{
+  auto shared = std::make_shared<TestStagedController>();
+  MakeChainController(shared, "dup_a", "target", {}, {"joint2/velocity"}, {});
+  ASSERT_NE(nullptr, cm_->add_controller(shared, "dup_b", "two_phase_test"))
+    << "upstream accepts a second name for the same instance; the mode must catch it";
+
+  // Both names refer to one object, so configuring either configures both.
+  EXPECT_EQ(Return::OK, cm_->configure_controller("dup_a"));
+  EXPECT_EQ(Return::OK, cm_->configure_controller("dup_b"));
+
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
+  EXPECT_FALSE(cm_->two_phase_execution());
+
+  const auto rejections = cm_->two_phase_rejected_controllers();
+  ASSERT_EQ(2u, rejections.size()) << "both names of the shared object must be reported";
+  bool mentions_sharing = false;
+  for (const auto & rejection : rejections)
+  {
+    mentions_sharing |= rejection.reason.find("shares ONE controller object") != std::string::npos;
+  }
+  EXPECT_TRUE(mentions_sharing) << "expected a duplicate-instance rejection, got: "
+                                << rejections.front().reason;
+}

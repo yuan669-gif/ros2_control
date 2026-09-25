@@ -335,9 +335,22 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
    新增用例 `TypedTree.the_checked_build_verifies_every_child_not_only_the_first`：
    把"手写错误端口"的控制器放在**第二个孩子**位置，断言报错**点名第二个孩子**且含错误端口名——
    这条同时证明了运行时端口校验确实**递归到每一个孩子**，而不只是第一个。
+4. **同一个对象被 `add_controller` 两次登记**（**实测确认的真实缺陷，属两趟路径**）：
+   上游 `add_controller()` 只查**名字**重复，因此
+   `add_controller(shared, "a"); add_controller(shared, "b")` 会成功，两个 spec 携带**同一个指针**
+   （探针实测：`ptr=0x...240` 两次相同，configure 两次都返回 OK）。
+   此时 `set_two_phase_execution(true)` 返回 **OK 且 0 条拒绝**，随后两趟 pass
+   对**同一个对象**每个阶段调用两次：**3 个周期内 `update_phase_calls=6`、`handle_phase_calls=6`**
+   ——而"每个名字各一次"的计数完全正常，属于最难发现的一类。
+   注意：staged/库路径不受影响（内核的实例唯一性检查已经拦住），**两趟路径不经过内核**，
+   所以必须在准入层拦住。修复：新增 `TwoPhaseAdmission::duplicate_instance`，
+   检出"两个名字一个对象"时**两个名字都记为拒绝**（这样即使调用方选择只排除一个，
+   也不会留下这条边的一半），启用/配置/激活整体失败。
+   用例 `two_phase_enable_is_refused_when_one_object_has_two_names`：
+   断言第二次 `add_controller` 成功（记录上游事实）、启用返回 ERROR、两条拒绝原因含
+   "shares ONE controller object"。
 
 ### B.2 编译成本：分叉树不比同规模深链贵（新增测量）
-
 `BoundNode` 从单槽改成变参包后，专门测了"同节点数下链 vs 树"
 （`hierarchical_control/test/measure_binding_cost.py`，三次运行）：
 链 **130–172 ms/节点**，树 **2–25 ms/节点**。方向稳定、倍数不稳定（宿主 load≈5/2 核），
@@ -353,7 +366,7 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 | `hierarchical_control` | **12 个 ctest 程序全通过**：11 个 gtest 程序 / **76 用例** + 编译语料脚本 |
 | `test_typed_tree`（新） | **3 用例**：七节点分叉树（库路径）、兄弟顺序对调变体、运行时端口校验递归到第二个孩子 |
 | 编译语料 | **15/15**（13 必须失败 + 2 必须编译的对照） |
-| `controller_manager` | **18 个 gtest 程序逐个直接运行全部通过**（19 个程序 / **162 用例**，其中 `test_cycle_tree_contract` 不是 gtest 二进制）：`test_two_phase_execution` 18、`test_load_controller` 39、`test_controller_manager` 18、`test_controller_manager_srvs` 14、`test_spawner_unspawner` **22/22** |
+| `controller_manager` | **18 个 gtest 程序逐个直接运行全部通过**（19 个程序 / **162 用例**，其中 `test_cycle_tree_contract` 不是 gtest 二进制）：`test_two_phase_execution` **19**、`test_load_controller` 39、`test_controller_manager` 18、`test_controller_manager_srvs` 14、`test_spawner_unspawner` 22/22（第二轮）|
 | TSan harness | `[tsan] RESULT: PASS (racy reported, atomic clean)` |
 | 阶段图穷举 | 465/465；一个状态阶段/顶点的调度数 **0** |
 | 绑定层编译成本 | 链 **130–172 ms/节点** vs 同规模分叉树 **2–25 ms/节点**（3 次运行，方向稳定、倍数不稳定）→ 见 §B.2 与 `COMPILE_COST.md` §3.1 |
@@ -365,12 +378,14 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 
 1. `test_controller_manager_srvs`：ctest 的 `TIMEOUT 120` 不够——直接运行该二进制
    **14/14 通过，用时 234 s**。与调度实现无关。
-2. `test_spawner_unspawner`：`TestLoadController.spawner_test_failed_activation_of_controllers`
-   曾间歇失败，失败信息是 spawner 进程
-   `Could not contact service /test_controller_manager/list_controllers`（服务发现超时）；
-   3 次单独运行 1 通过 2 失败，**第二轮全量运行 22/22 通过**。
-   本轮改动只在 `two_phase_enabled_ == true` 时执行任何新代码（默认 false，该测试从不启用），
-   失败模式发生在服务发现阶段，早于任何准入逻辑。
+2. `test_spawner_unspawner`：`TestLoadController` 的 spawner 用例
+   （`spawner_test_failed_activation_of_controllers`、`..._with_no_ctrl_name`）
+   **随宿主负载翻转**：load≈5.1 时 22/22 通过，load≈5.6 时稳定失败 2 例，
+   失败信息是 spawner 子进程
+   `Could not contact service /test_controller_manager/list_controllers`（服务发现超时，
+   该用例用 `--controller-manager-timeout 1.0`），断言随之看到 2 个控制器而非 3 个。
+   该文件与 `test_load_controller.cpp` 里 **`two_phase` 出现 0 次**，
+   本轮改动只在 `two_phase_enabled_ == true` 时执行新代码，失败发生在服务发现阶段。
 3. `test_hardware_spawner`：`spawner_with_later_load_of_robot_description` 在第二轮全量运行中
    失败一次，随后 **3/3 次直接运行全部通过（8/8 用例）**；该用例本身就会断言
    "服务不可达"，在超载宿主上两边都容易翻转。
