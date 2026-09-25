@@ -1338,6 +1338,48 @@ controller_interface::return_type ControllerManager::switch_controller(
     return controller_interface::return_type::OK;
   }
 
+  // Item E, FIRST LINE: validate the PROSPECTIVE active set BEFORE the switch is requested.
+  //
+  // The controller list is not re-sorted by a switch, so a violation that was invisible while the
+  // controllers were inactive only becomes real when they activate. Two ways that happens:
+  //   * a reference edge appears between two controllers that were never active together before;
+  //   * a controller whose declaration is "claim everything" gains a reference interface that was
+  //     imported after the last snapshot of its claims was taken.
+  // Judging here means such a switch is refused while nothing has happened yet: no lifecycle
+  // transition, no published list, no republished membership. The check after the switch remains as
+  // a second line for a controller whose claims only become visible once it is ACTIVE.
+  if (two_phase_enabled_.load(std::memory_order_relaxed))
+  {
+    std::vector<char> prospective = controller_active_mask(controllers);
+    for (std::size_t i = 0; i < controllers.size(); ++i)
+    {
+      const bool will_activate =
+        std::find(
+          activate_request_.begin(), activate_request_.end(), controllers[i].info.name) !=
+        activate_request_.end();
+      const bool will_deactivate =
+        std::find(
+          deactivate_request_.begin(), deactivate_request_.end(), controllers[i].info.name) !=
+        deactivate_request_.end();
+      if (will_activate) {prospective[i] = 1;}        // activation wins a chained-mode restart
+      else if (will_deactivate) {prospective[i] = 0;}
+    }
+
+    const auto rejections = two_phase_rejections(controllers, &prospective);
+    if (!rejections.empty())
+    {
+      for (const auto & rejection : rejections)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Refusing the switch before it is applied: controller '%s' %s.",
+          rejection.name.c_str(), rejection.reason.c_str());
+      }
+      clear_requests();
+      return controller_interface::return_type::ERROR;
+    }
+  }
+
   if (
     !activate_command_interface_request_.empty() || !deactivate_command_interface_request_.empty())
   {
@@ -1431,15 +1473,18 @@ controller_interface::return_type ControllerManager::switch_controller(
     }
   }
 
-  // Item E: an activation must not create a reference edge whose two ends are ordered by different
-  // schedules. Only ACTIVE controllers are judged here: the two-phase passes skip inactive members,
-  // so a deactivated non-conforming controller cannot break an edge yet. The switch itself has
-  // already been applied by the control loop (this runs after `do_switch` cleared), so returning
-  // ERROR reports the misconfiguration rather than undoing it -- the same shape as the existing
-  // "could not activate" failures above.
-  if (switch_result == controller_interface::return_type::OK && two_phase_enabled_.load(std::memory_order_relaxed))
+  // Item E, SECOND LINE: the pre-flight below already refuses every scheduling violation known
+  // before the switch is requested. This judges the state the switch actually produced, so it also
+  // covers a controller whose claims only become visible once it is ACTIVE. By this point the
+  // lifecycle transitions have already happened (the control loop applied the switch), so a failure
+  // here reports the misconfiguration rather than undoing it -- the same shape as the "could not
+  // activate" failures above.
+  if (
+    switch_result == controller_interface::return_type::OK &&
+    two_phase_enabled_.load(std::memory_order_relaxed))
   {
-    const auto rejections = two_phase_rejections(to, /*only_active=*/true);
+    const auto active_now = controller_active_mask(to);
+    const auto rejections = two_phase_rejections(to, &active_now);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -2301,12 +2346,23 @@ ControllerManager::TwoPhaseAdmission ControllerManager::two_phase_admission(
 std::vector<std::string> ControllerManager::claimed_command_interfaces(
   const ControllerSpec & controller) const
 {
-  if (!controller.info.claimed_interfaces.empty())
+  // WHICH set is authoritative depends on the lifecycle state, because the two answer different
+  // questions:
+  //
+  //   * ACTIVE   : which interfaces does this controller ACTUALLY write right now? It holds a loan
+  //                for each one, and it cannot acquire a loan for an interface that was imported
+  //                after it was activated. `ControllerSpec::info::claimed_interfaces`, refreshed by
+  //                `switch_controller()` for every active controller, is that set. Reading the
+  //                declaration instead would invent edges to interfaces the controller does not hold
+  //                -- e.g. a controller declaring `ALL` would appear to write a reference interface
+  //                that a later-configured controller exported, although it can never have claimed it.
+  //   * INACTIVE : which interfaces WOULD it write once activated? The declaration answers that, and
+  //                the snapshot is empty because deactivation clears it.
+  //   * neither  : unconfigured, so nothing is known and the declaration may not even be callable.
+  if (is_controller_active(controller.c) && !controller.info.claimed_interfaces.empty())
   {
     return controller.info.claimed_interfaces;
   }
-  // Reading the controller's own declaration is only defined once it is configured; before that
-  // the interface set it will claim is not known yet, and asking can throw.
   if (!is_controller_active(controller.c) && !is_controller_inactive(controller.c)) {return {};}
 
   const auto configuration = controller.c->command_interface_configuration();
@@ -2321,9 +2377,26 @@ std::vector<std::string> ControllerManager::claimed_command_interfaces(
   return {};
 }
 
-std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_rejections(
-  const std::vector<ControllerSpec> & controllers, bool only_active) const
+std::vector<char> ControllerManager::controller_active_mask(
+  const std::vector<ControllerSpec> & controllers) const
 {
+  std::vector<char> mask(controllers.size(), 0);
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    mask[i] = is_controller_active(controllers[i].c) ? 1 : 0;
+  }
+  return mask;
+}
+
+std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_rejections(
+  const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask) const
+{
+  // `judged(i)`: is controller i in the set this verdict is about?
+  const auto judged = [&](const std::size_t i)
+  {
+    if (active_mask == nullptr) {return true;}
+    return (*active_mask)[i] != 0;
+  };
   // Which loaded controller owns a "<owner>/..." port, and whether that owner implements the
   // interface. An edge between a two-phase member and a non-member cannot be ordered by either
   // schedule, so BOTH ends of such an edge are reported -- excluding only the member would leave
@@ -2347,7 +2420,7 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
   for (std::size_t i = 0; i < controllers.size(); ++i)
   {
     if (!implements[i]) {continue;}
-    if (only_active && !is_controller_active(controllers[i].c)) {continue;}
+    if (!judged(i)) {continue;}
 
     auto admission = two_phase_admission(controllers[i]);
     std::string detail;
@@ -2380,7 +2453,7 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
   for (std::size_t i = 0; i < controllers.size(); ++i)
   {
     if (implements[i]) {continue;}
-    if (only_active && !is_controller_active(controllers[i].c)) {continue;}
+    if (!judged(i)) {continue;}
     for (const auto & port : claimed_command_interfaces(controllers[i]))
     {
       const auto split = port.find_first_of('/');
@@ -2406,7 +2479,7 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
     for (std::size_t i = 0; i < controllers.size(); ++i)
     {
       if (!implements[i]) {continue;}
-      if (only_active && !is_controller_active(controllers[i].c)) {continue;}
+      if (!judged(i)) {continue;}
       const auto inserted = owners.emplace(controllers[i].c.get(), controllers[i].info.name);
       if (!inserted.second)
       {
@@ -2448,7 +2521,7 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
     {
       is_member[i] = implements[i] && rejected_index.find(controllers[i].info.name) ==
                                        rejected_index.end();
-      if (only_active && !is_controller_active(controllers[i].c)) {is_member[i] = 0;}
+      if (!judged(i)) {is_member[i] = 0;}
     }
 
     bool order_broken = false;

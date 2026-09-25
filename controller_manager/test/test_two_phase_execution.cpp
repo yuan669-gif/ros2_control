@@ -37,6 +37,13 @@ constexpr char kMid[] = "tp_mid";
 constexpr char kLeaf[] = "tp_leaf";
 constexpr char kType[] = "two_phase_test";
 
+/// `is_controller_active()` lives in the manager's own anonymous namespace, so the test reads the
+/// lifecycle state directly, exactly as the other manager tests do.
+bool ControllerIsActive(const controller_interface::ControllerInterfaceBase & controller)
+{
+  return controller.get_state().id() == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+}
+
 controller_interface::InterfaceConfiguration individual(const std::vector<std::string> & names)
 {
   controller_interface::InterfaceConfiguration cfg;
@@ -211,6 +218,48 @@ public:
     ASSERT_TRUE(mid_->set_chained_mode(true));
   }
 
+  /// Configure a controller while driving the control loop.
+  /**
+   * `configure_controller()` (and `add_controller()`/`unload_controller()`) replaces the controller
+   * list, and `RTControllerListWrapper::switch_updated_list()` waits in `wait_until_rt_not_using()`
+   * for the real-time loop to stop using the list being replaced. In a running system `update()` does
+   * that within microseconds; a test that pumps the loop by hand must keep pumping, exactly as
+   * `SwitchNow()` does, or the call sleeps forever (measured: the main thread sits in
+   * `hrtimer_nanosleep`). That is a harness property, not a feature property.
+   */
+  Return ConfigureWithPump(const std::string & name)
+  {
+    auto future = std::async(
+      std::launch::async, &controller_manager::ControllerManager::configure_controller, cm_.get(),
+      name);
+    for (int i = 0;
+         i < 400 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
+    {
+      cm_->update(TIME, PERIOD);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_EQ(std::future_status::ready, future.wait_for(std::chrono::milliseconds(0)));
+    return future.get();
+  }
+
+  /// Attempt a switch that must be REFUSED, and return the result. Used to check that a refused
+  /// switch did not apply anything: the caller asserts the lifecycle states afterwards.
+  Return SwitchExpectingRefusal(
+    const std::vector<std::string> & start, const std::vector<std::string> & stop)
+  {
+    auto future = std::async(
+      std::launch::async, &controller_manager::ControllerManager::switch_controller, cm_.get(),
+      start, stop, STRICT, true, rclcpp::Duration(0, 0));
+    for (int i = 0;
+         i < 400 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
+    {
+      cm_->update(TIME, PERIOD);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_EQ(std::future_status::ready, future.wait_for(std::chrono::milliseconds(0)));
+    return future.get();
+  }
+
   void Cycle(int count)
   {
     for (int i = 0; i < count; ++i)
@@ -236,6 +285,22 @@ public:
       controller_interface::interface_configuration_type::INDIVIDUAL;
     state_interface_configuration_.type =
       controller_interface::interface_configuration_type::INDIVIDUAL;
+  }
+
+  /// Change the declared command interfaces at runtime.
+  /**
+   * This models how a controller's claims can differ from the snapshot `switch_controller()` caches
+   * for active controllers. The realistic instance is a controller declaring `ALL`: that set is
+   * resolved against the resource manager each time it is asked, so it grows on its own as soon as
+   * another controller imports a reference interface. (The test uses an explicit list instead of
+   * `ALL` only because upstream `controller_sorting()` reads `command_interface_configuration().names`
+   * alone, so an `ALL` declaration looks like "no command interfaces" to the sort.)
+   */
+  void set_command_ports(std::vector<std::string> names)
+  {
+    command_interface_configuration_.type =
+      controller_interface::interface_configuration_type::INDIVIDUAL;
+    command_interface_configuration_.names = std::move(names);
   }
 
   controller_interface::InterfaceConfiguration command_interface_configuration() const override
@@ -655,6 +720,65 @@ TEST_F(TestExecutionPathAdmission, two_pass_runs_a_branching_tree_and_propagates
   EXPECT_DOUBLE_EQ(-0.875, rb->two_phase_command());
 }
 
+/// A switch that would put a legacy claimant next to a two-phase member is refused BEFORE it is
+/// applied -- the case where the activation itself creates the cross-mode edge.
+///
+/// The declaration/loan split is what makes this reachable: while the legacy controller is ACTIVE it
+/// only holds the interfaces it claimed at activation, so a reference interface that appeared
+/// afterwards is NOT an edge (and must not be treated as one). The moment the controller is
+/// REACTIVATED it claims the whole declared set, including that interface -- and then the edge is
+/// real. Checking the prospective active set before the switch is the only place that can refuse it
+/// while nothing has happened: the old code activated the controller, published the new list, and
+/// only then reported an error.
+TEST_F(TestExecutionPathAdmission, reactivating_a_legacy_claimant_is_refused_before_it_is_applied)
+{
+  auto member = std::make_shared<TestStagedController>();
+  MakeChainController(member, kRoot, "command", {}, {"joint2/velocity"}, {});
+
+  auto legacy = std::make_shared<TestLegacyChainableController>();
+  legacy->set_command_ports({"joint2/velocity"});
+  cm_->add_controller(legacy, kLeaf, kType);
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+
+  // Activate the legacy controller while the member's reference interface does not exist yet: it
+  // holds no loan for it, so there is no edge and the mode can be enabled.
+  SwitchNow({kLeaf}, {});
+  ASSERT_TRUE(ControllerIsActive(*legacy));
+  ASSERT_EQ(Return::OK, ConfigureWithPump(kRoot));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true))
+    << "no edge exists yet, so the mode must be admitted";
+
+  // Deactivate while the declaration is still the old one: the resource manager refuses to release
+  // an interface combination it does not accept, and a controller-reference interface in the
+  // deactivate list is not one it accepts.
+  SwitchNow({}, {kLeaf});
+  ASSERT_FALSE(ControllerIsActive(*legacy));
+
+  // From now on the declaration covers the member's reference interface, so a reactivation WOULD
+  // claim it -- and write a reference the member consumes on a different schedule.
+  legacy->set_command_ports({"joint2/velocity", std::string(kRoot) + "/command"});
+
+  // Reactivate the legacy claimant TOGETHER with the member. Both are requested on purpose: the
+  // manager's own chained-controller validation requires a chain neighbour to be activated in the
+  // same switch, so this request would otherwise be applied -- which makes the refusal below
+  // attributable to the two-phase pre-flight rather than to upstream's checks.
+  const auto result = SwitchExpectingRefusal({kLeaf, kRoot}, {});
+  EXPECT_EQ(Return::ERROR, result) << "the switch must be refused";
+  EXPECT_FALSE(ControllerIsActive(*legacy))
+    << "a refused switch must not activate anything, and must not publish a new list";
+  EXPECT_FALSE(ControllerIsActive(*member))
+    << "the member must not be activated either";
+
+  const auto rejections = cm_->two_phase_rejected_controllers();
+  bool mentions_cross_mode = false;
+  for (const auto & rejection : rejections)
+  {
+    mentions_cross_mode |=
+      rejection.reason.find("crosses the two-phase/legacy boundary") != std::string::npos;
+  }
+  EXPECT_TRUE(mentions_cross_mode) << "the edge must be reported as cross-mode";
+}
+
 /// The order validation above is NOT vacuous, and this is the configuration that motivated it: a
 /// chainable child that keeps its exported reference but claims NO command interface at all. Upstream
 /// `controller_sorting()` sorts such a controller ahead of one that has command interfaces, so the
@@ -984,6 +1108,12 @@ TEST_F(TestTwoPhaseExecution, a_member_is_never_run_by_the_native_loop_during_a_
     std::launch::async, &controller_manager::ControllerManager::switch_controller, cm_.get(),
     std::vector<std::string>{kSecond}, std::vector<std::string>{}, STRICT, true,
     rclcpp::Duration(0, 0));
+  // Give the asynchronous request time to be registered BEFORE the first driven cycle. The pause
+  // window exists only until the loop applies the switch, so without this head start the very first
+  // `update()` can consume it and the assertion below would fail for a scheduling reason rather than
+  // for the behaviour it checks. (Adding the two-phase pre-flight lengthened the request path, which
+  // is what made this race show up.)
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   for (int i = 0;
        i < 400 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
   {
@@ -1040,3 +1170,4 @@ TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_when_one_object_h
   EXPECT_TRUE(mentions_sharing) << "expected a duplicate-instance rejection, got: "
                                 << rejections.front().reason;
 }
+

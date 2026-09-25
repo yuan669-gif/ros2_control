@@ -350,6 +350,51 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
    断言第二次 `add_controller` 成功（记录上游事实）、启用返回 ERROR、两条拒绝原因含
    "shares ONE controller object"。
 
+### E.1.7 开关失败后仍发布新控制器列表——**已修**（用户指出）
+
+**问题**：`switch_controller()` 先让实时循环执行切换（生命周期状态已改），再刷新 `claimed_interfaces`
+并发布新列表。因此任何"切换后发现不合格"的判定都是**事后报告**：调用方看到 ERROR，
+控制器却已经激活、新列表也已经发布——正是"看起来失败、实际生效"。
+
+**修复**：把两趟的调度判定**前移**到请求下发之前。
+
+1. `two_phase_rejections()` 的 `bool only_active` 改为 `const std::vector<char> * active_mask`：
+   `nullptr` 表示判定整个已配置集合（启用/配置路径的语义不变），
+   掩码表示"只判定这些控制器"。新增 `controller_active_mask()`（按当前激活态生成掩码）。
+2. `switch_controller()` 在**请求列表定稿之后、`do_switch` 之前**用**预期激活集**
+   （当前激活态 + `activate_request_` − `deactivate_request_`，同一切换里既停又启的按激活算）
+   调用一次 `two_phase_rejections()`；有拒绝就 `clear_requests()` + ERROR：
+   **没有生命周期切换、没有发布新列表、没有重建成员表**。
+3. 切换后的判定保留为**第二道线**（覆盖"声明只在激活后才可见"的控制器），
+   仍按**实际**激活态掩码判定；此时若失败，语义与上游既有的"未能激活"错误一致（已应用、报错）。
+
+**能证明前移生效的用例**：`reactivating_a_legacy_claimant_is_refused_before_it_is_applied`。
+构造（先测后写）：
+- legacy 控制器（`ChainableControllerInterface`，**不**实现两趟接口）先激活，此时只持有它激活时
+  认领的接口；随后一个两趟成员被配置并导入新的 reference 接口 —— 此刻**没有边**（legacy 不可能
+  持有后导入的 loan），因此两趟启用被正确接受；
+- 把 legacy 的声明改成包含那个 reference 接口，然后**同时请求激活 legacy 与成员**。
+  这个请求是**上游本来会接受**的（链式校验要求邻居一起激活，所以两者都放进请求；
+  运行日志里只有下面这一条错误，没有上游的校验告警）：
+  `Refusing the switch before it is applied: controller 'tp_leaf' takes part in a reference edge
+  that crosses the two-phase/legacy boundary with 'tp_root' ...`
+- 断言：返回 ERROR、**legacy 与成员都仍未激活**（即"什么都没做"）。
+  若只有事后判定，两者会变成 ACTIVE 并返回 ERROR——这正是本条要修的旧行为。
+
+**顺带纠正一处设计错误（自己先改错再改回）**：为了让"派生的 ALL 集合变新"，我一度把
+`claimed_command_interfaces()` 改成**永远读声明**。分析后发现那是**假阳性**：
+激活态的控制器**不可能**持有"激活之后才导入"的接口的 loan，读声明会凭空造出一条边。
+最终语义按生命周期区分（已写入注释）：
+**ACTIVE → `claimed_interfaces` 快照（它真正持有的写接口），配置但 INACTIVE → 声明（将要认领的），
+未配置 → 空**。前移的那次判定用的是"将要激活"的控制器声明 + 仍在激活的控制器快照，两者都对。
+
+**测量到的测试环境事实（不是上游 bug，也不是本特性问题）**：
+`configure_controller()` / `add_controller()` / `unload_controller()` 会替换控制器列表，而
+`RTControllerListWrapper::switch_updated_list()` 在 `wait_until_rt_not_using()` 里等待**实时循环**
+用完被替换的列表。真实系统里 `update()` 一直在跑，微秒级就满足；**手工泵 `update()` 的测试**
+必须在这类调用期间继续泵，否则主线程会停在 `hrtimer_nanosleep`（实测：20 s 后用
+`/proc/<pid>/task/*/wchan` 看到 `hrtimer_nanosleep`）。已加 `ConfigureWithPump()` 辅助函数并写明原因。
+
 ### B.2 编译成本：分叉树不比同规模深链贵（新增测量）
 `BoundNode` 从单槽改成变参包后，专门测了"同节点数下链 vs 树"
 （`hierarchical_control/test/measure_binding_cost.py`，三次运行）：

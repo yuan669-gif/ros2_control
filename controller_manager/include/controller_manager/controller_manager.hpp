@@ -620,24 +620,35 @@ private:
   std::string two_phase_admission_reason(TwoPhaseAdmission admission, const std::string & detail)
     const;
   TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
-  /// The command interfaces a controller would claim, WITHOUT trusting the cached copy.
+  /// The command interfaces a controller claims, for the scheduling checks.
   /**
-   * `ControllerSpec::info::claimed_interfaces` is filled by `switch_controller()` for ACTIVE
-   * controllers only, so a freshly configured one has it empty. The cross-mode check has to work
-   * before that, so fall back to the controller's own declaration -- which is only legal once it is
-   * configured (`TestStagedController` throws otherwise) -- and to the resource manager for the
-   * "claim everything" case.
+   * For an ACTIVE controller this is the set it actually holds a loan for
+   * (`ControllerSpec::info::claimed_interfaces`, kept up to date by `switch_controller()`), because
+   * that is what it really writes; its declaration is used only when the snapshot is empty. Reading
+   * the declaration for an active controller would invent edges, since a controller cannot claim an
+   * interface that was imported after its activation -- a controller declaring `ALL` is the visible
+   * case. For a configured-but-INACTIVE controller the declaration is the right answer: it is what
+   * the controller would claim once activated, and that is the prospect the checks have to judge.
+   *
+   * Reading the declaration is only defined once the controller is configured (some controllers
+   * throw before that), so an unconfigured controller reports nothing.
    */
   std::vector<std::string> claimed_command_interfaces(const ControllerSpec & controller) const;
   /// Every controller that implements the interface but is not admitted, in list order.
   /**
-   * `only_active` restricts the verdict to controllers that are ACTIVE, which is what a switch has
-   * to judge: the two-phase passes skip inactive members, so a non-conforming but deactivated
-   * controller cannot break an edge yet. The enable path deliberately checks the WHOLE configured
-   * set instead, because the flag describes the mode the set is in.
+   * `active_mask` restricts the verdict to the controllers that will actually run: index i is judged
+   * only when `(*active_mask)[i] != 0`. `nullptr` judges the WHOLE list, which is what the enable and
+   * configure paths want, because the flag describes the mode the configured set is in.
+   *
+   * A mask (rather than a "currently active" flag) is what lets `switch_controller()` judge the
+   * PROSPECTIVE active set before it applies anything, so a switch that would create a scheduling
+   * violation is refused instead of activating the controllers and then reporting an error.
    */
   std::vector<TwoPhaseRejection> two_phase_rejections(
-    const std::vector<ControllerSpec> & controllers, bool only_active = false) const;
+    const std::vector<ControllerSpec> & controllers,
+    const std::vector<char> * active_mask = nullptr) const;
+  /// The mask accepted by `two_phase_rejections`: 1 where `is_controller_active()` holds.
+  std::vector<char> controller_active_mask(const std::vector<ControllerSpec> & controllers) const;
   /// The published entry set, BY VALUE: the caller must own the snapshot for as long as it uses it.
   /**
    * An earlier revision returned a reference into a snapshot held only by a local `shared_ptr`, so
