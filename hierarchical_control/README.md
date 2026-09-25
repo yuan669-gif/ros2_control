@@ -93,7 +93,8 @@ using wheel_ports = TypedPorts<
   PortList<wheel_travel>,    // state this node publishes (its parent's state stage reads it)
   PortList<wheel_target>,    // reference this node receives (its parent's command stage writes it)
   PortList<wheel_torque>,    // actuator ports this node writes
-  PortList<tire_target>>;    // (optional) reference this node writes into its children
+  PortList<tire_target>,     // reference this node writes into its children  (reference edge)
+  PortList<tire_travel>>;    // state this node reads from its children       (state edge)
 
 class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { ... };
 ```
@@ -101,9 +102,15 @@ class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { .
 The kernel only uses the **lengths** of those three lists (it sizes per-node buffers from them); the
 names are checked separately by `verify_ports_match_interface()` / `verify_ports_match_contract()`,
 and `topology_binding::verify_binding_ports()` walks a whole checked binding at start-up.
-`declarations_are_compatible<Parent, Child>()` compares the reference ports the parent writes into
-its child against the ones the child declares it receives -- by name, order **and physical
-dimension**. See `doc/PORT_DIMENSIONS.md` and `doc/TOPOLOGY_CONTRACT_JOIN.md`.
+Both edges of a parent/child pair are checked -- by name, order **and physical dimension**:
+
+```cpp
+reference_declarations_agree<Parent, Child>()   // Parent::for_children vs Child::reference
+state_declarations_agree<Parent, Child>()       // Parent::child_state  vs Child::state
+declarations_are_compatible<Parent, Child>()    // both, and each can be asserted separately
+```
+
+See `doc/PORT_DIMENSIONS.md` and `doc/TOPOLOGY_CONTRACT_JOIN.md`.
 
 ## Configuration-time validation
 

@@ -49,25 +49,39 @@ struct tire_target_n
 {
   static constexpr auto value = st::NameOf("tire/target");
 };
+struct tire_travel_n
+{
+  static constexpr auto value = st::NameOf("tire/travel");
+};
 
 // ---- typed ports ---------------------------------------------------------------------------
 using wheel_target = tc::Port<wheel_target_n, dm::LinearVelocity>;
 using wheel_torque = tc::Port<wheel_torque_n, dm::Torque>;
 using wheel_travel = tc::Port<wheel_travel_n, dm::Position>;
 using tire_target = tc::Port<tire_target_n, dm::LinearVelocity>;
+using tire_travel = tc::Port<tire_travel_n, dm::Position>;
+using tire_travel_wrong = tc::Port<tire_travel_n, dm::LinearVelocity>;
 
-// Four separate facts, each matching what the kernel does with it:
-//   state     = the wheel's OWN state (its parent's state stage reads it out of the wheel's slots)
-//   reference = the reference the wheel RECEIVES (its parent's command stage writes it)
-//   actuators = the hardware port the wheel writes
-//   for_children = the reference the wheel writes INTO its tire (static parent/child check only)
+// Five separate facts. The first three are what the kernel uses; the last two exist so BOTH edges
+// of the parent/child pair can be checked statically:
+//   state        = the wheel's OWN state (its parent's state stage reads it out of the wheel's slots)
+//   reference    = the reference the wheel RECEIVES (its parent's command stage writes it)
+//   actuators    = the hardware port the wheel writes
+//   for_children = the reference the wheel writes INTO its tire   (reference edge)
+//   child_state  = the state the wheel READS FROM its tire        (state edge)
 using wheel_ports = tp::TypedPorts<
   tc::PortList<wheel_travel>, tc::PortList<wheel_target>, tc::PortList<wheel_torque>,
-  tc::PortList<tire_target>>;
+  tc::PortList<tire_target>, tc::PortList<tire_travel>>;
 
-// The tire receives what the wheel writes into it, and publishes no state of its own.
-using tire_ports =
-  tp::TypedPorts<tc::PortList<>, tc::PortList<tire_target>, tc::PortList<>, tc::PortList<>>;
+// The tire publishes its own state and receives what the wheel writes into it.
+using tire_ports = tp::TypedPorts<
+  tc::PortList<tire_travel>, tc::PortList<tire_target>, tc::PortList<>, tc::PortList<>,
+  tc::PortList<>>;
+
+// The same parent, but declaring the WRONG DIMENSION for the state it reads from its child.
+using wheel_ports_wrong_child_state = tp::TypedPorts<
+  tc::PortList<wheel_travel>, tc::PortList<wheel_target>, tc::PortList<wheel_torque>,
+  tc::PortList<tire_target>, tc::PortList<tire_travel_wrong>>;
 
 // ---- controllers ---------------------------------------------------------------------------
 
@@ -165,6 +179,8 @@ public:
     for (std::size_t i = 0; i < state.size(); ++i) {state[i] = 2.0;}
     return Return::OK;
   }
+
+  int state_calls = 0;
 
   Return update_command_stage(
     const rclcpp::Time &, const rclcpp::Duration &,
@@ -343,12 +359,14 @@ TEST(TypedPorts, the_derived_contract_matches_the_declaration)
 {
   static_assert(wheel_contract::produced_count == 1, "the wheel's own state");
   static_assert(wheel_contract::consumed_count == 1, "the reference the wheel receives");
-  static_assert(tire_contract::produced_count == 0);
+  static_assert(tire_contract::produced_count == 1, "the tire's own state");
   static_assert(tire_contract::consumed_count == 1, "the reference the tire receives");
   SUCCEED();
 }
 
-/// A parent's exported ports must be exactly what its child consumes, in name, order and dimension.
+/// Both edges of a parent/child pair are checked: the reference the parent writes into its child
+/// against what the child receives, and the child state the parent consumes against what the child
+/// publishes -- each in name, order and dimension, and independently of the other.
 TEST(TypedPorts, declarations_of_a_parent_and_child_are_checked)
 {
   // The wheel declares that it writes `tire/target` into its child, and the tire declares that it
@@ -356,7 +374,21 @@ TEST(TypedPorts, declarations_of_a_parent_and_child_are_checked)
   // exported list (which mixed its own state with the child-facing reference) against the child's
   // reference list, so it reported this correct pair as incompatible and this test encoded that
   // false positive as expected behaviour.
+  static_assert(tp::reference_declarations_agree<wheel_ports, tire_ports>());
+
+  // The state edge, which no earlier revision checked at all: the wheel declares it consumes
+  // `tire/travel` and the tire declares it publishes `tire/travel`.
+  static_assert(tp::state_declarations_agree<wheel_ports, tire_ports>());
+
   static_assert(tp::declarations_are_compatible<wheel_ports, tire_ports>());
+
+  // The two edges are checked INDEPENDENTLY: a parent that declares the wrong dimension for the
+  // state it reads from its child fails only the state check, while the reference edge still agrees.
+  // This is the failure the runtime kernel would otherwise report as an unexplained `state_failed`
+  // in the parent, far from the declaration that caused it.
+  static_assert(tp::reference_declarations_agree<wheel_ports_wrong_child_state, tire_ports>());
+  static_assert(!tp::state_declarations_agree<wheel_ports_wrong_child_state, tire_ports>());
+  static_assert(!tp::declarations_are_compatible<wheel_ports_wrong_child_state, tire_ports>());
 
   // A pair that does agree.
   static_assert(tp::declarations_are_compatible<agreeing_parent, agreeing_child>());

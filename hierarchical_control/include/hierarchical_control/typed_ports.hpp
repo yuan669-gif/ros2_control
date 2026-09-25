@@ -24,7 +24,8 @@
 //       /* state ports it publishes (its parent's state stage reads them) */ tc::PortList<wheel_travel>,
 //       /* reference ports it receives (its parent's command stage writes them) */ tc::PortList<wheel_target>,
 //       /* actuator ports it writes */ tc::PortList<wheel_torque>,
-//       /* reference ports it writes INTO its children (static check only) */ tc::PortList<tire_target>>;
+//       /* reference ports it writes INTO its children (static check only) */ tc::PortList<tire_target>,
+//       /* state ports it READS FROM its children (static check only) */ tc::PortList<tire_travel>>;
 //
 //     class WheelController : public TypedPortsMixin<WheelController, ports> { ... };
 //
@@ -66,12 +67,16 @@
 // its real state would have failed EVERY cycle with `state_failed`; and its parent received a
 // child-state view padded with slots that are not states at all.
 //
-// The lists are now separate and mean exactly what the kernel needs. The fourth list is optional and
-// exists only to make the static parent/child dimension check meaningful: the parent declares what
-// it writes into its children, and that is compared against the child's declared reference ports.
+// The lists are now separate and mean exactly what the kernel needs. The last two are optional and
+// exist only to make the static parent/child checks meaningful, one per edge direction:
+//
+//     reference edge : Parent::for_children  vs  Child::reference
+//     state edge     : Parent::child_state   vs  Child::state
+//
 // (The previous check compared the parent's whole exported list against the child's reference list,
 // so it reported a CORRECT wheel/tire pair as incompatible -- a false positive that
-// `test_typed_ports` had encoded as expected behaviour.)
+// `test_typed_ports` had encoded as expected behaviour -- and it never checked the state edge at
+// all.)
 //
 // See doc/PORT_DIMENSIONS.md.
 
@@ -112,23 +117,27 @@ namespace dim = dimensions;
 ///                   order and physical dimension.
 template <
   typename State, typename Reference, typename Actuators,
-  typename ForChildren = topology_contract::PortList<>>
+  typename ForChildren = topology_contract::PortList<>,
+  typename ChildState = topology_contract::PortList<>>
 struct TypedPorts
 {
   static_assert(std::is_class_v<State>, "typed_ports: State must be a PortList");
   static_assert(std::is_class_v<Reference>, "typed_ports: Reference must be a PortList");
   static_assert(std::is_class_v<Actuators>, "typed_ports: Actuators must be a PortList");
   static_assert(std::is_class_v<ForChildren>, "typed_ports: ForChildren must be a PortList");
+  static_assert(std::is_class_v<ChildState>, "typed_ports: ChildState must be a PortList");
 
   using state = State;
   using reference = Reference;
   using actuators = Actuators;
   using for_children = ForChildren;
+  using child_state = ChildState;
 
   static constexpr std::size_t state_count = State::count;
   static constexpr std::size_t reference_count = Reference::count;
   static constexpr std::size_t actuator_count = Actuators::count;
   static constexpr std::size_t for_children_count = ForChildren::count;
+  static constexpr std::size_t child_state_count = ChildState::count;
 
   /// How many slots the kernel will allocate for each stage. These are the numbers the kernel
   /// actually reads, so they are named once and used by the mixin, the verifier and the tests.
@@ -146,8 +155,9 @@ struct TypedPorts
 template <typename Ports>
 struct contract_of;
 
-template <typename State, typename Reference, typename Actuators, typename ForChildren>
-struct contract_of<TypedPorts<State, Reference, Actuators, ForChildren>>
+template <
+  typename State, typename Reference, typename Actuators, typename ForChildren, typename ChildState>
+struct contract_of<TypedPorts<State, Reference, Actuators, ForChildren, ChildState>>
 {
   using type = tc::Contract<State, Reference>;
 };
@@ -171,10 +181,11 @@ template <typename Ports>
 struct name_lists;
 
 template <
-  typename... State, typename... Reference, typename... Actuators, typename... ForChildren>
+  typename... State, typename... Reference, typename... Actuators, typename... ForChildren,
+  typename... ChildState>
 struct name_lists<TypedPorts<
   tc::PortList<State...>, tc::PortList<Reference...>, tc::PortList<Actuators...>,
-  tc::PortList<ForChildren...>>>
+  tc::PortList<ForChildren...>, tc::PortList<ChildState...>>>
 {
   static constexpr std::array<std::string_view, sizeof...(State)> state = {State::name()...};
   static constexpr std::array<std::string_view, sizeof...(Reference)> reference = {
@@ -183,6 +194,8 @@ struct name_lists<TypedPorts<
     Actuators::name()...};
   static constexpr std::array<std::string_view, sizeof...(ForChildren)> for_children = {
     ForChildren::name()...};
+  static constexpr std::array<std::string_view, sizeof...(ChildState)> child_state = {
+    ChildState::name()...};
 };
 
 /// Compare a runtime list of names against a compile-time list, order-sensitively.
@@ -293,28 +306,75 @@ struct port_lists_agree<tc::PortList<A0, A...>, tc::PortList<B0, B...>>
 {
 };
 
-/// Compile-time check that a PARENT's child-facing reference ports are exactly the reference ports
-/// its CHILD declares -- in NAME, in ORDER, and in DIMENSION.
+/// The REFERENCE edge of a parent/child pair: the ports the parent declares it writes into its
+/// child must be exactly the ports the child declares it receives -- in NAME, in ORDER and in
+/// DIMENSION.
 ///
 /// This is the dimension-carrying counterpart of the kernel's name matching: the kernel compares
 /// strings only, so it accepts a position port wired to a velocity port. Comparing dimensions as
 /// well is the point of this header.
 template <typename ParentPorts, typename ChildPorts>
-constexpr bool declarations_are_compatible() noexcept
+constexpr bool reference_declarations_agree() noexcept
 {
   return port_lists_agree<
     typename ParentPorts::for_children, typename ChildPorts::reference>::value;
 }
 
-/// Halt compilation unless a parent/child pair's declarations agree.
+/// The STATE edge of a parent/child pair: the child state ports the parent declares it consumes
+/// must be exactly the state ports the child declares it publishes -- in NAME, in ORDER and in
+/// DIMENSION.
+///
+/// This is the edge the earlier revisions of this header did NOT check at all (see
+/// doc/PORT_DIMENSIONS.md section 3). The kernel hands the parent a view straight into the child's
+/// state slots, so a mismatch here is a parent indexing a slot the child never wrote -- which the
+/// NaN/`all_finite` completeness check then reports as `state_failed`, far from the cause.
+///
+/// It is exact for a CHAIN, which is what a compile-time binding expresses (see
+/// topology_binding.hpp): each node has exactly one child, so one flat list per node matches one
+/// child's declaration. A branching binding is not expressible in this layer at all.
+template <typename ParentPorts, typename ChildPorts>
+constexpr bool state_declarations_agree() noexcept
+{
+  return port_lists_agree<typename ParentPorts::child_state, typename ChildPorts::state>::value;
+}
+
+/// Both edges of a parent/child pair agree. Compile-time only; see the two predicates above for
+/// which one failed.
+template <typename ParentPorts, typename ChildPorts>
+constexpr bool declarations_are_compatible() noexcept
+{
+  return reference_declarations_agree<ParentPorts, ChildPorts>() &&
+         state_declarations_agree<ParentPorts, ChildPorts>();
+}
+
+/// Halt compilation unless a parent/child pair's REFERENCE edge agrees.
+template <typename ParentPorts, typename ChildPorts>
+constexpr void require_reference_declarations_compatible()
+{
+  static_assert(
+    reference_declarations_agree<ParentPorts, ChildPorts>(),
+    "typed_ports: REFERENCE EDGE MISMATCH -- the reference ports the parent declares it writes into "
+    "its child differ from the reference ports the child declares it receives, in name, order, or "
+    "physical dimension");
+}
+
+/// Halt compilation unless a parent/child pair's STATE edge agrees.
+template <typename ParentPorts, typename ChildPorts>
+constexpr void require_state_declarations_compatible()
+{
+  static_assert(
+    state_declarations_agree<ParentPorts, ChildPorts>(),
+    "typed_ports: STATE EDGE MISMATCH -- the child state ports the parent declares it consumes "
+    "differ from the state ports the child declares it publishes, in name, order, or physical "
+    "dimension");
+}
+
+/// Halt compilation unless BOTH edges of a parent/child pair agree.
 template <typename ParentPorts, typename ChildPorts>
 constexpr void require_declarations_compatible()
 {
-  static_assert(
-    declarations_are_compatible<ParentPorts, ChildPorts>(),
-    "typed_ports: PORT DECLARATION MISMATCH -- the reference ports the parent declares it writes "
-    "into its child differ from the reference ports the child declares it receives, in name, order, "
-    "or physical dimension");
+  require_reference_declarations_compatible<ParentPorts, ChildPorts>();
+  require_state_declarations_compatible<ParentPorts, ChildPorts>();
 }
 
 /// Runtime verification (returns a reason when it fails) that a controller's declared port strings
