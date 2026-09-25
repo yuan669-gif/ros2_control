@@ -189,9 +189,14 @@ public:
    * running through the native single-pass loop, which means the parent-before-child order it relies
    * on is NOT the one its neighbours see, so a caller has to be able to observe it (review item E).
    *
-   * Empty when the feature is off and every implementing controller was admitted. Returns BY VALUE:
-   * the set is rebuilt by the non-real-time thread whenever membership changes, so a reference could
-   * race with a concurrent republish. Call it from the non-real-time thread.
+   * The verdict is computed on demand from the CURRENT controller list and does NOT depend on the
+   * flag: it answers "as the configuration stands, which controllers could not join the two-phase
+   * path", so a caller can ask before enabling. Empty means every implementing controller was
+   * admitted (or none implements the interface).
+   *
+   * Returns BY VALUE: the set is derived from the controller list, which the non-real-time thread
+   * replaces whenever membership changes, so a reference could race with that replacement. Call it
+   * from the non-real-time thread.
    */
   CONTROLLER_MANAGER_PUBLIC
   std::vector<TwoPhaseRejection> two_phase_rejected_controllers() const;

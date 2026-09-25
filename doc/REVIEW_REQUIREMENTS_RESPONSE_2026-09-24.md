@@ -399,3 +399,15 @@ pass 2 在原生循环**之后**执行，所以这条边的两端由**不同调�
 
 ---
 
+## 仍未做的事（明确列出，避免"看起来全做完了"）
+
+| # | 未做项 | 现状 |
+|---|---|---|
+| 1 | **把 typed 分叉树放进一个普通 composite 插件**（评审"推荐下一步"第 5 条的后半句） | typed 七节点树已经在**库内核**上验证（`test_typed_tree` 用 `create_library_group` 真的建组并跑周期），分叉树也在**manager 路径**验证；但"一个 ROS controller 插件内部持有 typed 绑定 + 硬件接口槽 + 由它 `update()` 驱动"这一组合尚未写。现有 `GenericCompositeController` 从**运行期 spec** 建内核，与编译期绑定是两条入口 |
+| 2 | 模式/成员/计划的**统一 generation**（评审 D 的第二半） | 未做；首版约束是"控制循环停止时配置"，已写进 API 注释与 `REVIEW_RESPONSE_2026-09-23.md` |
+| 3 | 真实 `ControllerManager` 的 **TSan** | 磁盘不允许另开 GB 级构建树；只有发布协议 harness 做了 TSan |
+| 4 | 多频 / 异步 / 动态拓扑 / 生命周期回滚 | 明确不做（评审也建议不要扩） |
+| 5 | `Spec::parents` 的 YAML/参数入口 | 未做；两趟与 staged 都从 claimed interfaces 推导，该字段不是必需 |
+| 6 | 状态端口的**语义**区分下探到类型层 | 未做（会与内核"按拓扑而非名字区分"的规则重复） |
+| 7 | Gazebo 真值轨迹指标 | 仍不可靠（gzserver 约 1/3 启动失败，真值来源不足） |
+
