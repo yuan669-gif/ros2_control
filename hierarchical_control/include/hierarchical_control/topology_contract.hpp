@@ -127,6 +127,26 @@ struct PortList
   }
 };
 
+/// The `Index`-th port type of a `PortList`, so callers can compare a runtime list against a
+/// compile-time list POSITION BY POSITION (name and order, not just length).
+template <typename List, std::size_t Index>
+struct port_at;
+
+template <typename First, typename... Rest>
+struct port_at<PortList<First, Rest...>, 0>
+{
+  using type = First;
+};
+
+template <typename First, typename... Rest, std::size_t Index>
+struct port_at<PortList<First, Rest...>, Index>
+{
+  using type = typename port_at<PortList<Rest...>, Index - 1>::type;
+};
+
+template <typename List, std::size_t Index>
+using port_at_t = typename port_at<List, Index>::type;
+
 /// A controller's static interface contract, split by direction from ITS OWN point of view:
 ///   Produced -- ports it writes (its actuator commands, or the reference interfaces it exports)
 ///   Consumed -- ports it reads  (its reference from its parent, or state from its children)
@@ -258,6 +278,33 @@ struct BoundNode : next_storage<Next>
   static constexpr bool has_child = next_traits<Next>::present;
 };
 
+/// A binding's topology has TWO sources: the structural nesting of `BoundNode::next` and each
+/// node's own `static_topology::Node<Name, Parent>::parent_type`. They must agree.
+///
+/// The nesting decides the `parents` column of the emitted Spec (`fill_spec_rows` passes the
+/// enclosing node's name down), so before this check the nesting silently OVERRODE the type-level
+/// parent: with `A = Root<a>` and `B = Root<b>`, `compose<A>(a, make_leaf<B>(b))` compiled and
+/// emitted `B.parent = "a"`, turning two declared roots into a chain (reproduced by the review,
+/// item A). A node that declares itself a root can therefore never be bound as a child, and a child
+/// must declare exactly the node it is nested under.
+///
+/// Enforcing agreement -- rather than deleting one of the sources -- keeps both useful: the nesting
+/// carries the runtime instances, and `parent_type` is what `static_topology`'s cycle guarantee is
+/// stated over.
+template <typename ParentNode, typename ChildBinding>
+constexpr bool child_declares_this_parent()
+{
+  if constexpr (std::is_void_v<typename ChildBinding::node_type::parent_type>)
+  {
+    // The child declares itself a root, so it cannot be nested under anything.
+    return false;
+  }
+  else
+  {
+    return std::is_same_v<typename ChildBinding::node_type::parent_type, ParentNode>;
+  }
+}
+
 /// Compose a parent binding on top of an existing child binding.
 ///
 /// The controller type is deduced from the argument, so the binding keeps a correctly adjusted
@@ -269,6 +316,13 @@ BoundNode<ControllerT, Node, ContractT, ChildBinding> compose(
   static_assert(
     std::is_base_of_v<controller_interface::ControllerInterfaceBase, ControllerT>,
     "topology_contract: compose needs a controller deriving from ControllerInterfaceBase");
+  static_assert(
+    child_declares_this_parent<Node, ChildBinding>(),
+    "topology_contract: TOPOLOGY MISMATCH -- the child binding does not declare this node as its "
+    "parent. Either the child is declared a Root (a root cannot be nested under anything), or its "
+    "static_topology parent_type names a different node. The structural nesting and the type-level "
+    "parent must agree, otherwise the emitted plan would silently differ from the declared "
+    "topology.");
   BoundNode<ControllerT, Node, ContractT, ChildBinding> binding;
   binding.instance = static_cast<controller_interface::ControllerInterfaceBase *>(parent_instance);
   binding.next = child;
@@ -276,6 +330,10 @@ BoundNode<ControllerT, Node, ContractT, ChildBinding> compose(
 }
 
 /// Compose a leaf binding (no child).
+///
+/// "Leaf" here means "no child BINDING", not "a root": the last node of a chain is normally a
+/// `Descendant`, so its `parent_type` is its real parent. Whether that parent is the node it ends up
+/// nested under is checked by `compose`.
 template <typename Node, typename ContractT, typename ControllerT>
 BoundNode<ControllerT, Node, ContractT, void> make_leaf(ControllerT * instance)
 {

@@ -15,6 +15,7 @@
 #ifndef CONTROLLER_MANAGER__CONTROLLER_MANAGER_HPP_
 #define CONTROLLER_MANAGER__CONTROLLER_MANAGER_HPP_
 
+#include <atomic>
 #include <limits>
 #include <map>
 #include <memory>
@@ -553,7 +554,10 @@ private:
     /// Has a nonzero update_rate that the two-phase passes cannot honour.
     unsupported_update_rate
   };
-  bool two_phase_enabled_ = false;
+  /// Read by `update()` every cycle and written by the non-real-time setter, so it is atomic.
+  /// An earlier revision used a plain bool, which is a data race on its own -- making the entry
+  /// SNAPSHOT atomic does not make the flag that gates it atomic (review item D).
+  std::atomic<bool> two_phase_enabled_{false};
   /// Immutable once published, so a reader in `update()` may dereference it without locking.
   /// `mutable` because the atomic accessors take a non-const pointer.
   mutable std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries_;
@@ -561,11 +565,26 @@ private:
   std::size_t two_phase_rejected_ = 0;
   static const char * two_phase_admission_reason(TwoPhaseAdmission admission) noexcept;
   TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
-  const std::vector<TwoPhaseEntry> & two_phase_entries() const noexcept;
+  /// The published entry set, BY VALUE: the caller must own the snapshot for as long as it uses it.
+  /**
+   * An earlier revision returned a reference into a snapshot held only by a local `shared_ptr`, so
+   * a concurrent republish could destroy the vector while the returned reference was still in use
+   * (review item D). Returning the `shared_ptr` makes the caller share ownership and is the only
+   * shape that is safe against a concurrent retire.
+   */
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries() const noexcept;
   /// Build membership from a controller list the caller already owns, then publish it atomically.
   /// Never locks: it is only called from the non-real-time thread, which must not contend with
   /// switch_controller() while that holds the controllers lock waiting for the control loop.
   void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);
+  /// Same, but with admission applied regardless of the current flag.
+  /**
+   * `set_two_phase_execution(true)` needs this: the entry set must be published BEFORE the flag
+   * becomes true, otherwise a control cycle can observe "enabled but no entries" and hand a member
+   * to the native loop for that cycle.
+   */
+  void rebuild_two_phase_entries(
+    const std::vector<ControllerSpec> & controllers, bool admission_enabled);
   void refresh_two_phase_controllers();
   std::size_t two_phase_index(
     const std::vector<TwoPhaseEntry> & entries,

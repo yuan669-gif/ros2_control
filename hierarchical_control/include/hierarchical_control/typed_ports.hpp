@@ -88,6 +88,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "hierarchical_control/dimensional_interfaces.hpp"
@@ -209,6 +210,28 @@ inline bool same_names(
     if (actual[i] != expected[i]) {return false;}
   }
   return true;
+}
+
+/// Compare a runtime list against a `PortList` at compile-time indices.
+template <typename List, std::size_t... Index>
+bool same_names_by_index(
+  const std::vector<std::string> & actual, std::index_sequence<Index...>)
+{
+  return ((actual[Index] == tc::port_at_t<List, Index>::name()) && ...);
+}
+
+/// Compare a runtime list of names against a `PortList`, POSITION BY POSITION.
+///
+/// Comparing lengths alone is not a check: the same length with different ports, or the same ports
+/// in a different order, would pass. `verify_ports_match_contract` compares through this overload --
+/// an earlier revision compared only `.size()` while its comment claimed name-and-order checking
+/// (review item C).
+template <typename... Ports>
+bool same_names(const std::vector<std::string> & actual, tc::PortList<Ports...>)
+{
+  if (actual.size() != sizeof...(Ports)) {return false;}
+  return same_names_by_index<tc::PortList<Ports...>>(
+    actual, std::make_index_sequence<sizeof...(Ports)>{});
 }
 
 /// Compare a constexpr list of names against a compile-time list.
@@ -436,17 +459,19 @@ bool verify_ports_match_contract(
     return false;
   };
 
-  if (controller.staged_state_ports().size() != ContractT::produced_count)
+  if (!same_names(controller.staged_state_ports(), typename ContractT::produced{}))
   {
     return fail(
-      "staged_state_ports() has a different length than the contract's produced ports: the kernel "
-      "would size the state buffers differently from the checked topology");
+      "staged_state_ports() disagrees with the contract's produced ports (name, order or length): "
+      "the kernel would size the state buffers from a different declaration than the topology that "
+      "was checked");
   }
-  if (controller.staged_reference_ports().size() != ContractT::consumed_count)
+  if (!same_names(controller.staged_reference_ports(), typename ContractT::consumed{}))
   {
     return fail(
-      "staged_reference_ports() has a different length than the contract's consumed ports: the "
-      "kernel would size the reference buffers differently from the checked topology");
+      "staged_reference_ports() disagrees with the contract's consumed ports (name, order or "
+      "length): the kernel would size the reference buffers from a different declaration than the "
+      "topology that was checked");
   }
   return true;
 }

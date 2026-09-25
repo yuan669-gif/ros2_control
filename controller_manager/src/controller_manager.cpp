@@ -2237,18 +2237,24 @@ ControllerManager::TwoPhaseAdmission ControllerManager::two_phase_admission(
   return TwoPhaseAdmission::accepted;
 }
 
-const std::vector<ControllerManager::TwoPhaseEntry> & ControllerManager::two_phase_entries()
-  const noexcept
+std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
+ControllerManager::two_phase_entries() const noexcept
 {
-  static const std::vector<TwoPhaseEntry> empty;
-  const auto entries = std::atomic_load(&two_phase_entries_);
-  return entries ? *entries : empty;
+  // By value: the caller keeps the snapshot alive. Returning a reference into a snapshot owned only
+  // by this function's local `shared_ptr` would dangle as soon as another thread republishes.
+  return std::atomic_load(&two_phase_entries_);
 }
 
 void ControllerManager::rebuild_two_phase_entries(
   const std::vector<ControllerSpec> & controllers)
 {
-  if (!two_phase_enabled_)
+  rebuild_two_phase_entries(controllers, two_phase_enabled_.load(std::memory_order_relaxed));
+}
+
+void ControllerManager::rebuild_two_phase_entries(
+  const std::vector<ControllerSpec> & controllers, bool admission_enabled)
+{
+  if (!admission_enabled)
   {
     // Nothing consumes the entry set, so do not allocate, cast or sort on the configuration path.
     // This matters: `switch_controller()`, `add_controller_impl()` and `unload_controller()` call
@@ -2274,7 +2280,6 @@ void ControllerManager::rebuild_two_phase_entries(
       dynamic_cast<hierarchical_control::TwoPhaseControllerInterface *>(controller.c.get());
     if (instance == nullptr) {continue;}
 
-    if (two_phase_enabled_)
     {
       const auto admission = two_phase_admission(controller);
       if (admission != TwoPhaseAdmission::accepted)
@@ -2340,7 +2345,9 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
 {
   if (!enabled)
   {
-    two_phase_enabled_ = false;
+    // Disable first, then clear: with the flag already false no control cycle consults the entry
+    // set for the skip decision, so the members fall back to the native loop as intended.
+    two_phase_enabled_.store(false, std::memory_order_release);
     refresh_two_phase_controllers();
     RCLCPP_INFO(get_logger(), "Two-phase execution disabled.");
     return controller_interface::return_type::OK;
@@ -2371,11 +2378,19 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
     }
   }
 
-  two_phase_enabled_ = true;
-  refresh_two_phase_controllers();
+  // PUBLISH FIRST, THEN ENABLE. The other order leaves a window in which a control cycle sees
+  // `enabled == true` with an empty (or stale) entry set, and the native-loop skip -- which is
+  // gated on the flag -- would hand a member to the fused single-pass path for that cycle.
+  {
+    std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
+    rebuild_two_phase_entries(
+      rt_controllers_wrapper_.get_updated_list(guard), /*admission_enabled=*/true);
+  }
+  two_phase_enabled_.store(true, std::memory_order_release);
+  const auto entries = two_phase_entries();
   RCLCPP_INFO(
     get_logger(), "Two-phase execution enabled (%zu controller(s) implement the interface).",
-    two_phase_entries().size());
+    entries ? entries->size() : 0u);
   return controller_interface::return_type::OK;
 }
 
@@ -2416,9 +2431,10 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
     // The two-phase passes and the staged group must own disjoint controller sets, otherwise the
     // same controller would be executed twice in one cycle. The mirror-image check lives in
     // set_two_phase_execution(), so the two entry points can never both admit one controller.
-    if (
-      two_phase_enabled_ &&
-      two_phase_index(two_phase_entries(), it->c.get()) != no_two_phase)
+    static const std::vector<TwoPhaseEntry> no_two_phase_entries;
+    const auto current_entries = two_phase_entries();
+    const auto & entries_for_check = current_entries ? *current_entries : no_two_phase_entries;
+    if (two_phase_enabled_ && two_phase_index(entries_for_check, it->c.get()) != no_two_phase)
     {
       RCLCPP_ERROR(
         get_logger(),
@@ -2461,10 +2477,11 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
     return controller_interface::return_type::ERROR;
   }
 
-  // Publish with one atomic store: a cycle either sees the old group or the whole new one.
+  // Refresh the cached active flags BEFORE publishing: the published group is then never written
+  // again by this thread, so a control cycle that already loaded it cannot race with a refresh
+  // (review item D). Members are required to be inactive anyway; this only makes the cache exact.
+  group->refresh_member_active_state();
   std::atomic_store(&staged_group_, std::move(group));
-  // Members are required to be inactive, but refresh explicitly so the cached flag is consistent.
-  std::atomic_load(&staged_group_)->refresh_member_active_state();
   // Group membership feeds two-phase admission, so republish the entry set from the idle thread.
   rebuild_two_phase_entries(controllers);
   RCLCPP_INFO(

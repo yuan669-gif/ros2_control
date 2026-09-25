@@ -166,17 +166,6 @@ StagedExecutionGroup::Spec to_library_spec(const Binding & binding)
   return to_library_spec(tc::build_spec_rows(binding));
 }
 
-/// Create a library-hosted execution group directly from a compile-time binding.
-///
-/// The returned group is the same kernel object `create_library` produces; this only removes the
-/// hand-written Spec and the chance of it drifting from the checked topology.
-template <typename Binding>
-std::shared_ptr<StagedExecutionGroup> create_library_group(
-  const Binding & binding, std::int64_t max_age_ns = 0)
-{
-  return StagedExecutionGroup::create_library(to_library_spec(binding), max_age_ns);
-}
-
 /// Verify that every node's RUNTIME port lists agree with the contract it was bound with.
 ///
 /// This is the last hop of the metaprogramming chain, and it is deliberately NOT automatic. The
@@ -229,6 +218,44 @@ bool verify_binding_ports(const Binding & binding, std::string * reason = nullpt
   if (reason != nullptr) {reason->clear();}
   return true;
 }
+
+/// Build a library-hosted execution group from a compile-time binding, CHECKING THE PORTS.
+///
+/// This is the entry point to use. It runs, in order:
+///
+///   1. the compile-time checks (`require_ports_are_owned`, and in `compose` the nesting vs declared
+///      parent agreement) -- a violation does not compile;
+///   2. `verify_binding_ports` at run time: every node's OWN port strings must equal the contract it
+///      was bound with, in name and order;
+///   3. the kernel's own plan validation.
+///
+/// An earlier revision left step 2 to the caller, so the checked path was optional and a controller
+/// whose runtime port lists disagreed with its contract built a group whose buffers were sized from
+/// the wrong declaration (review item C: a stub that reported one state port against an empty
+/// contract still built and ran). Use `create_library_group_unchecked` only for a deliberately
+/// malformed debug stub, and say why at the call site.
+template <typename Binding>
+std::shared_ptr<StagedExecutionGroup> create_library_group(
+  const Binding & binding, std::int64_t max_age_ns = 0)
+{
+  std::string reason;
+  if (!verify_binding_ports(binding, &reason))
+  {
+    throw std::invalid_argument(
+      "topology_binding: refusing to build a group whose runtime ports disagree with the checked "
+      "topology -- " + reason);
+  }
+  return StagedExecutionGroup::create_library(to_library_spec(binding), max_age_ns);
+}
+
+/// Build without the runtime port check. For debug stubs that intentionally disagree.
+template <typename Binding>
+std::shared_ptr<StagedExecutionGroup> create_library_group_unchecked(
+  const Binding & binding, std::int64_t max_age_ns = 0)
+{
+  return StagedExecutionGroup::create_library(to_library_spec(binding), max_age_ns);
+}
+
 }  // namespace topology_binding
 }  // namespace hierarchical_control
 

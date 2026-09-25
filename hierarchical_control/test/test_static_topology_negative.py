@@ -8,6 +8,9 @@ Two static guarantees are claimed, and both can only be tested by COMPILING file
      command and a reference, or between an exported and a consumed state, is rejected.
   C. port ownership (topology_contract.hpp) -- a port whose "<owner>/" prefix is not a controller
      in the topology is rejected, which is the defect class upstream accepts silently.
+  D. nesting vs declared parent (topology_contract.hpp) -- the structural nesting of `compose` and
+     the child's `static_topology` parent_type must agree; before that check, the nesting silently
+     overrode the type and a binding could emit a plan different from the topology it declared.
 
 This script compiles a small corpus and asserts each file's outcome:
 
@@ -19,6 +22,8 @@ This script compiles a small corpus and asserts each file's outcome:
     compile_fail_dimension_state.cpp      -> must FAIL (dimension)
     compile_fail_owner_unknown.cpp        -> must FAIL (ownership)
     compile_fail_port_unqualified.cpp     -> must FAIL (ownership)
+    compile_fail_child_declares_other_parent.cpp -> must FAIL (nesting vs declared parent)
+    compile_fail_root_as_child.cpp        -> must FAIL (a declared Root used as a child)
 
 If a "compile_fail" file ever starts compiling, a guarantee has regressed and this test fails.
 If the control file stops compiling, the test infrastructure is broken and this test also fails --
@@ -66,6 +71,8 @@ CORPUS = {
     "compile_fail_dimension_state.cpp": (False, "dimensional_interfaces: DIMENSION MISMATCH"),
     "compile_fail_owner_unknown.cpp": (False, "OWNERSHIP VIOLATION"),
     "compile_fail_port_unqualified.cpp": (False, "OWNERSHIP VIOLATION"),
+    "compile_fail_child_declares_other_parent.cpp": (False, "TOPOLOGY MISMATCH"),
+    "compile_fail_root_as_child.cpp": (False, "TOPOLOGY MISMATCH"),
 }
 
 

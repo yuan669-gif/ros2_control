@@ -33,14 +33,46 @@ using Return = controller_interface::return_type;
 namespace
 {
 /// A minimal staged controller: no ports, one state-stage call per cycle.
+/// Minimal external reference snapshot: a node that declares reference ports needs a source, or the
+/// kernel refuses to build the group. The earlier fixtures declared NO runtime reference ports (the
+/// default is an empty list) while their contracts declared one, which is exactly the mismatch the
+/// checked build entry now refuses.
+class ZeroSource : public hierarchical_control::StagedReferenceSource
+{
+public:
+  bool read(
+    std::uint64_t /*cycle*/, std::int64_t /*now_ns*/, double * values,
+    std::size_t size) noexcept override
+  {
+    for (std::size_t i = 0; i < size; ++i) {values[i] = 0.0;}
+    return true;
+  }
+};
+
 class StubController : public hierarchical_control_test::MinimalController,
                        public hierarchical_control::StagedControllerInterface
 {
 public:
-  explicit StubController(std::string name) : MinimalController(std::move(name)) {}
+  /// `state_ports` / `reference_ports` must be exactly what this node's Contract declares, or the
+  /// checked build entry rejects the binding. Pass empty lists for a contract with no ports.
+  explicit StubController(
+    std::string name, std::vector<std::string> state_ports = {"value"},
+    std::vector<std::string> reference_ports = {})
+  : MinimalController(std::move(name)),
+    state_ports_(std::move(state_ports)),
+    reference_ports_(std::move(reference_ports))
+  {
+  }
 
 public:
-  std::vector<std::string> staged_state_ports() const override { return {"value"}; }
+  std::vector<std::string> staged_state_ports() const override { return state_ports_; }
+
+  std::vector<std::string> staged_reference_ports() const override { return reference_ports_; }
+
+  hierarchical_control::StagedReferenceSource * staged_reference_source() noexcept override
+  {
+    return &source_;
+  }
 
   Return update_state_stage(
     const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/,
@@ -58,16 +90,28 @@ public:
     const hierarchical_control::StagedContext & /*context*/,
     const hierarchical_control::StagedValueView & /*state*/,
     const hierarchical_control::StagedValueView & /*reference*/,
-    const hierarchical_control::StagedReferenceWriter & /*children*/,
-    hierarchical_control::StagedValueWriter /*actuators*/) noexcept override
+    const hierarchical_control::StagedReferenceWriter & children,
+    hierarchical_control::StagedValueWriter actuators) noexcept override
   {
     ++command_calls;
+    // A node that DECLARES reference ports must write every one of them: the kernel pre-fills them
+    // with NaN and reports a completeness failure otherwise. Declaring a reference list (which these
+    // fixtures now do, so that they match their contracts) is what makes this necessary.
+    for (std::size_t c = 0; c < children.size(); ++c)
+    {
+      for (std::size_t p = 0; p < children[c].size(); ++p) {children[c][p] = 1.0;}
+    }
+    for (std::size_t i = 0; i < actuators.size(); ++i) {actuators[i] = 1.0;}
     return Return::OK;
   }
 
   int state_calls = 0;
   int command_calls = 0;
 
+private:
+  std::vector<std::string> state_ports_;
+  std::vector<std::string> reference_ports_;
+  ZeroSource source_;
 };
 
 // A three-level topology.
@@ -87,25 +131,49 @@ using root_t = st::Root<root_n>;
 using mid_t = st::Descendant<mid_n, root_t>;
 using leaf_t = st::Descendant<leaf_n, mid_t>;
 
-// Ports, named "<owner>/<local>".
+// Ports, named "<owner>/<local>". Each node declares its OWN state (produced) and its OWN reference
+// (consumed) -- the mapping `typed_ports::TypedPorts` uses, so a node's runtime strings can match
+// its contract exactly and the checked build entry accepts the binding.
+struct root_state_n
+{
+  static constexpr auto value = st::NameOf("root/state");
+};
+struct root_ref_n
+{
+  static constexpr auto value = st::NameOf("root/ref");
+};
 struct mid_state_n
 {
   static constexpr auto value = st::NameOf("mid/state");
+};
+struct mid_ref_n
+{
+  static constexpr auto value = st::NameOf("mid/ref");
 };
 struct leaf_state_n
 {
   static constexpr auto value = st::NameOf("leaf/state");
 };
+struct leaf_ref_n
+{
+  static constexpr auto value = st::NameOf("leaf/ref");
+};
+using root_state = tc::Port<root_state_n, dm::Position>;
+using root_ref = tc::Port<root_ref_n, dm::LinearVelocity>;
 using mid_state = tc::Port<mid_state_n, dm::Position>;
+using mid_ref = tc::Port<mid_ref_n, dm::LinearVelocity>;
 using leaf_state = tc::Port<leaf_state_n, dm::Position>;
+using leaf_ref = tc::Port<leaf_ref_n, dm::LinearVelocity>;
 
-using root_contract = tc::Contract<tc::PortList<>, tc::PortList<mid_state>>;
-using mid_contract = tc::Contract<tc::PortList<mid_state>, tc::PortList<leaf_state>>;
-using leaf_contract = tc::Contract<tc::PortList<leaf_state>, tc::PortList<>>;
+using root_contract = tc::Contract<tc::PortList<root_state>, tc::PortList<root_ref>>;
+using mid_contract = tc::Contract<tc::PortList<mid_state>, tc::PortList<mid_ref>>;
+using leaf_contract = tc::Contract<tc::PortList<leaf_state>, tc::PortList<leaf_ref>>;
 
-StubController g_root{"root"};
-StubController g_mid{"mid"};
-StubController g_leaf{"leaf"};
+StubController g_root{"root", {"root/state"}, {"root/ref"}};
+StubController g_mid{"mid", {"mid/state"}, {"mid/ref"}};
+StubController g_leaf{"leaf", {"leaf/state"}, {"leaf/ref"}};
+// A node with no ports at all, for the single-node binding below.
+StubController g_lone{"lone", {}, {}};
 
 const auto g_leaf_binding = tc::make_leaf<leaf_t, leaf_contract>(&g_leaf);
 const auto g_mid_binding = tc::compose<mid_t, mid_contract>(&g_mid, g_leaf_binding);
@@ -114,24 +182,14 @@ const auto g_root_binding = tc::compose<root_t, root_contract>(&g_root, g_mid_bi
 // ---- a controller whose runtime port strings MATCH its contract ------------------------------
 // `Contract::produced` is the state this node publishes and `consumed` is the reference it
 // receives; `typed_ports::TypedPorts` maps State -> produced and Reference -> consumed the same way.
-struct c_state_n
-{
-  static constexpr auto value = st::NameOf("coherent/state");
-};
-struct c_ref_n
-{
-  static constexpr auto value = st::NameOf("coherent/ref");
-};
-using c_state = tc::Port<c_state_n, dm::Position>;
-using c_ref = tc::Port<c_ref_n, dm::LinearVelocity>;
-using coherent_contract = tc::Contract<tc::PortList<c_state>, tc::PortList<c_ref>>;
+// The ports are owned by `leaf`, which is the node this binding contains: the ownership check
+// requires every port's "<owner>/" prefix to name a controller in the topology.
+using coherent_contract = tc::Contract<tc::PortList<leaf_state>, tc::PortList<leaf_ref>>;
 
 class CoherentController : public StubController
 {
 public:
-  CoherentController() : StubController("coherent") {}
-  std::vector<std::string> staged_state_ports() const override {return {"coherent/state"};}
-  std::vector<std::string> staged_reference_ports() const override {return {"coherent/ref"};}
+  CoherentController() : StubController("leaf", {"leaf/state"}, {"leaf/ref"}) {}
 };
 
 CoherentController g_coherent;
@@ -250,35 +308,46 @@ TEST(TopologyBinding, malformed_plans_are_rejected_with_a_reason)
 TEST(TopologyBinding, a_single_node_binding_builds_a_one_member_group)
 {
   using lone = tc::Contract<tc::PortList<>, tc::PortList<>>;
-  const auto only = tc::make_leaf<root_t, lone>(&g_root);
+  const auto only = tc::make_leaf<root_t, lone>(&g_lone);
   auto group = tb::create_library_group(only);
   ASSERT_NE(nullptr, group);
   EXPECT_EQ(1u, group->size());
 }
 
-/// The binding-level port verifier ties the CHECKED topology to the RUNTIME port lists the kernel
-/// sizes its buffers from. Building a controller instance is not a constant expression, so this
-/// cannot be a compile-time check; it is a start-up call.
+/// The checked build entry refuses a binding whose runtime port lists disagree with the contracts
+/// it was bound with; the unchecked entry still builds it, so debug stubs remain possible.
 ///
-/// It is also where the two conventions in this repository meet, so the test states them:
-///   * `Contract::produced` = the state ports this node PUBLISHES (its parent's state stage reads
-///     them);
-///   * `Contract::consumed` = the reference ports this node RECEIVES (its parent's command stage
-///     writes them).
-/// `typed_ports::TypedPorts` uses exactly that mapping (State -> produced, Reference -> consumed).
-TEST(TopologyBinding, binding_level_port_verification)
+/// This is review item C: the check used to be an optional free function, so a stub whose ports did
+/// not match its contract still produced a running group whose buffers were sized from the wrong
+/// declaration.
+TEST(TopologyBinding, the_checked_build_entry_enforces_the_port_contract)
 {
+  // The matching fixture is accepted, and the check is not vacuous.
   std::string reason;
   EXPECT_TRUE(tb::verify_binding_ports(g_coherent_binding, &reason)) << reason;
   EXPECT_TRUE(reason.empty());
+  EXPECT_NE(nullptr, tb::create_library_group(g_coherent_binding));
 
-  // The minimal `StubController` used by the rest of this file reports ONE state port and no
-  // reference port whatever contract it is bound with. The verifier reports it, and the message
-  // names the node and the list that disagrees -- this is the check that keeps a hand-written port
-  // list from silently disagreeing with the topology that was checked for it.
-  EXPECT_FALSE(tb::verify_binding_ports(g_root_binding, &reason));
-  EXPECT_NE(std::string::npos, reason.find("root")) << reason;
-  // `root_contract` declares no produced ports, while the minimal stub always reports one state
-  // port: the verifier names the node and the list that disagrees.
+  // A stub whose ports are OWNED by a node in the topology (so the compile-time ownership check
+  // passes) but whose names do not match the contract it is bound with, and which reports no
+  // reference port where the contract declares one. That is exactly the class of mistake the
+  // runtime verifier exists for: it cannot be a compile error, because a controller's port strings
+  // are a runtime property.
+  class SloppyController : public StubController
+  {
+  public:
+    SloppyController() : StubController("leaf", {"leaf/state_wrong"}, {}) {}
+  };
+  static SloppyController sloppy;
+  const auto sloppy_binding = tc::make_leaf<leaf_t, coherent_contract>(&sloppy);
+
+  EXPECT_FALSE(tb::verify_binding_ports(sloppy_binding, &reason));
+  // The message names the NODE (what the plan and the operator see), not the controller class.
+  EXPECT_NE(std::string::npos, reason.find("leaf")) << reason;
   EXPECT_NE(std::string::npos, reason.find("staged_state_ports")) << reason;
+
+  // The checked entry refuses it; the explicitly unchecked entry still builds it, which is what a
+  // deliberately malformed debug stub is supposed to use.
+  EXPECT_THROW(tb::create_library_group(sloppy_binding), std::invalid_argument);
+  EXPECT_NE(nullptr, tb::create_library_group_unchecked(sloppy_binding));
 }

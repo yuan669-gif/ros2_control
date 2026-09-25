@@ -405,7 +405,11 @@ struct mi_node_n
   static constexpr auto value = st::NameOf("mi_owner");
 };
 using mi_node = st::Root<mi_node_n>;
-using mi_contract = tc::Contract<tc::PortList<>, tc::PortList<mi_owner_port>>;
+// The controller reports ONE state port ("mi_owner/state") and no reference port, so the contract
+// declares exactly that: produced = the node's own state, consumed = the reference it receives.
+// The checked build entry used by this test compares the two, so an incoherent fixture would be
+// rejected before the pointer-offset assertion it exists for ever runs.
+using mi_contract = tc::Contract<tc::PortList<mi_owner_port>, tc::PortList<>>;
 
 /// A controller whose StagedControllerInterface base is NOT the first base.
 class MultiInheritController : public hierarchical_control_test::MinimalController,

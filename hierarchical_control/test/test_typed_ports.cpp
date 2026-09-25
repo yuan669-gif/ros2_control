@@ -200,13 +200,14 @@ class HandWrittenController : public hierarchical_control_test::MinimalControlle
                               public hierarchical_control::StagedControllerInterface
 {
 public:
-  explicit HandWrittenController(std::vector<std::string> state)
-  : MinimalController("hand_written"), state_(std::move(state))
+  explicit HandWrittenController(
+    std::vector<std::string> state, std::vector<std::string> reference = {"wheel/target"})
+  : MinimalController("hand_written"), state_(std::move(state)), reference_(std::move(reference))
   {
   }
 
   std::vector<std::string> staged_state_ports() const override {return state_;}
-  std::vector<std::string> staged_reference_ports() const override {return {"wheel/target"};}
+  std::vector<std::string> staged_reference_ports() const override {return reference_;}
   std::vector<std::string> staged_actuator_ports() const override {return {"wheel/torque"};}
 
   Return update_state_stage(
@@ -229,7 +230,21 @@ public:
 
 private:
   std::vector<std::string> state_;
+  std::vector<std::string> reference_;
 };
+
+// Two same-length ports used only to show that ORDER is compared, not just membership.
+struct a_n
+{
+  static constexpr auto value = st::NameOf("p/a");
+};
+struct b_n
+{
+  static constexpr auto value = st::NameOf("p/b");
+};
+using a_port = tc::Port<a_n, dm::Position>;
+using b_port = tc::Port<b_n, dm::LinearVelocity>;
+using two_state = tc::Contract<tc::PortList<a_port, b_port>, tc::PortList<>>;
 
 // ---- fixtures for the parent/child declaration check ----------------------------------------
 struct parent_out_n
@@ -301,6 +316,23 @@ TEST(TypedPorts, interface_verification_succeeds_for_a_mixin_controller)
   EXPECT_TRUE(matches) << (reason ? reason : "");
 }
 
+/// Order matters, not just membership: a controller that reports the RIGHT ports in the WRONG order
+/// must be rejected.
+TEST(TypedPorts, contract_verification_checks_order_not_just_membership)
+{
+  HandWrittenController in_order({"p/a", "p/b"}, {});
+  const char * reason = nullptr;
+  EXPECT_TRUE(tp::verify_ports_match_contract<two_state>(in_order, &reason))
+    << (reason ? reason : "");
+
+  HandWrittenController swapped({"p/b", "p/a"}, {});
+  const char * swapped_reason = nullptr;
+  EXPECT_FALSE(tp::verify_ports_match_contract<two_state>(swapped, &swapped_reason));
+  ASSERT_NE(nullptr, swapped_reason);
+  EXPECT_NE(std::string::npos, std::string(swapped_reason).find("staged_state_ports"))
+    << "got: " << swapped_reason;
+}
+
 /// The non-vacuous counterpart: the state list IS verified now. A controller whose state ports
 /// disagree with its declaration must be reported, with a reason that names the list.
 TEST(TypedPorts, interface_verification_rejects_a_state_port_mismatch)
@@ -338,6 +370,15 @@ TEST(TypedPorts, a_controller_can_be_verified_against_its_contract)
   ASSERT_NE(nullptr, extra_reason);
   EXPECT_NE(std::string::npos, std::string(extra_reason).find("staged_state_ports"))
     << "got: " << extra_reason;
+
+  // SAME LENGTH, WRONG NAME: the check must compare names, not just counts (review item C: the
+  // earlier revision compared only `.size()` while its comment claimed name-and-order checking).
+  HandWrittenController wrong_name({"wheel/travel_wrong"});
+  const char * name_reason = nullptr;
+  EXPECT_FALSE(tp::verify_ports_match_contract<wheel_contract>(wrong_name, &name_reason));
+  ASSERT_NE(nullptr, name_reason);
+  EXPECT_NE(std::string::npos, std::string(name_reason).find("staged_state_ports"))
+    << "got: " << name_reason;
 
   // And a wrong reference count is reported against the reference list.
   class WrongReference : public HandWrittenController
