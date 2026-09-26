@@ -639,7 +639,7 @@ rclcpp 装了 SIGTERM 处理器，**挂死时 `timeout` 默认杀不掉**，要�
 | `dimensional_interfaces.hpp` | 量纲代数 | `Dimension<L,M,T,A>`、`multiply_t`、`divide_t`、`same_dimension_v` |
 | `topology_contract.hpp` | 端口所有权 + 计划 | `Port<N,D>`、`PortList<...>`、`Contract<P,C>`、`BoundNode`、`compose`、`make_leaf`、`build_spec_rows`、`require_ports_are_owned` |
 | `topology_binding.hpp` | 绑定 → 执行组 | `to_library_spec(binding)`、`create_library_group(binding, max_age)` |
-| `typed_ports.hpp` | 端口单一声明 | `TypedPorts<State,Reference,Actuators,ForChildren>`、`TypedPortsMixin<C,P>`、`contract_of_t`、`declarations_are_compatible`、`verify_ports_match_interface`、`verify_ports_match_contract` |
+| `typed_ports.hpp` | 端口单一声明 | `TypedPorts<State,Reference,Actuators,ForChildren,ChildState,HardwareState>`（后三者可选，默认空）、`TypedPortsMixin<C,P>`、`contract_of_t`、`declarations_are_compatible`、`verify_ports_match_interface`、`verify_ports_match_contract` |
 
 **边界（务必记住）**：
 

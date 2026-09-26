@@ -46,7 +46,7 @@ class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { .
 
 ## 1. 设计要点
 
-### 1.1 四组端口与内核语义的对应
+### 1.1 端口声明与内核语义的对应
 
 | 声明中的位置 | 含义 | 映射到内核的 |
 |---|---|---|
@@ -55,6 +55,7 @@ class WheelController : public TypedPortsMixin<WheelController, wheel_ports> { .
 | `Actuators` | 写入的硬件命令端口 | `staged_actuator_ports()` |
 | `ForChildren`（可选） | 本节点**写进子节点**的 reference | 不进内核；reference 边的静态检查用 |
 | `ChildState`（可选） | 本节点**从子节点读**的状态 | 不进内核；state 边的静态检查用（内核把子节点的槽直接给父） |
+| `HardwareState`（可选，2026-09-26 新增） | 本节点**从硬件读**的状态接口（叶子的传感器输入） | 不进内核，也**不进 `Contract`**：它的另一端是 joint 而不是节点，所以不参与任何父子检查；它的用途是让**编译期 manifest**说清完整的接口需求（`command_interface_configuration()`/`state_interface_configuration()` 由它生成，见 `COMPILETIME_CONTROLLER_RESPONSE_2026-09-26.md`） |
 
 **内核到底用哪些信息**：`StagedExecutionGroup` 只用这三张表的 **长度** 来分配缓冲
 （`state_values_[i].assign(...size(), 0.0)` 等），**名字完全不参与**运行期逻辑——
