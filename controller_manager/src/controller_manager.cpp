@@ -290,9 +290,19 @@ ControllerManager::ControllerManager(
   bool two_phase = false;
   if (get_parameter("two_phase_execution", two_phase))
   {
-    two_phase_enabled_ = two_phase;
+    publish_generation(two_phase, nullptr, nullptr);
     RCLCPP_INFO(get_logger(), "Two-phase execution requested by parameter: %s",
       two_phase ? "enabled" : "disabled");
+  }
+
+  // Our extension; see set_atomic_activation(). Off by default, which keeps upstream semantics.
+  bool atomic_activation = false;
+  if (get_parameter("atomic_activation", atomic_activation))
+  {
+    atomic_activation_.store(atomic_activation, std::memory_order_relaxed);
+    RCLCPP_INFO(
+      get_logger(), "Atomic activation requested by parameter: %s",
+      atomic_activation ? "enabled" : "disabled");
   }
 
   std::string robot_description = "";
@@ -336,9 +346,19 @@ ControllerManager::ControllerManager(
   bool two_phase = false;
   if (get_parameter("two_phase_execution", two_phase))
   {
-    two_phase_enabled_ = two_phase;
+    publish_generation(two_phase, nullptr, nullptr);
     RCLCPP_INFO(get_logger(), "Two-phase execution requested by parameter: %s",
       two_phase ? "enabled" : "disabled");
+  }
+
+  // Our extension; see set_atomic_activation(). Off by default, which keeps upstream semantics.
+  bool atomic_activation = false;
+  if (get_parameter("atomic_activation", atomic_activation))
+  {
+    atomic_activation_.store(atomic_activation, std::memory_order_relaxed);
+    RCLCPP_INFO(
+      get_logger(), "Atomic activation requested by parameter: %s",
+      atomic_activation ? "enabled" : "disabled");
   }
 
   if (!resource_manager_->is_urdf_already_loaded())
@@ -976,9 +996,10 @@ controller_interface::return_type ControllerManager::configure_controller(
   // while the controller actually ran through the native loop -- with the wrong order relative to
   // its neighbours. Fail the configure instead, BEFORE the new list is published, so the caller
   // sees the misconfiguration at the last point where it can still react.
-  if (two_phase_enabled_.load(std::memory_order_relaxed))
+  if (current_generation()->two_phase_enabled)
   {
-    const auto rejections = two_phase_rejections(to);
+    const auto rejections =
+      two_phase_rejections(to, nullptr, current_generation()->staged_group);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -1380,7 +1401,7 @@ controller_interface::return_type ControllerManager::switch_controller(
   // Judging here means such a switch is refused while nothing has happened yet: no lifecycle
   // transition, no published list, no republished membership. The check after the switch remains as
   // a second line for a controller whose claims only become visible once it is ACTIVE.
-  if (two_phase_enabled_.load(std::memory_order_relaxed))
+  if (current_generation()->two_phase_enabled)
   {
     std::vector<char> prospective = controller_active_mask(controllers);
     for (std::size_t i = 0; i < controllers.size(); ++i)
@@ -1397,7 +1418,8 @@ controller_interface::return_type ControllerManager::switch_controller(
       else if (will_deactivate) {prospective[i] = 0;}
     }
 
-    const auto rejections = two_phase_rejections(controllers, &prospective);
+    const auto rejections = two_phase_rejections(
+      controllers, &prospective, current_generation()->staged_group);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -1516,10 +1538,11 @@ controller_interface::return_type ControllerManager::switch_controller(
   // activate" failures above.
   if (
     switch_result == controller_interface::return_type::OK &&
-    two_phase_enabled_.load(std::memory_order_relaxed))
+    current_generation()->two_phase_enabled)
   {
     const auto active_now = controller_active_mask(to);
-    const auto rejections = two_phase_rejections(to, &active_now);
+    const auto rejections = two_phase_rejections(
+      to, &active_now, current_generation()->staged_group);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -1621,20 +1644,60 @@ void ControllerManager::manage_switch()
   switch_chained_mode(from_chained_mode_request_, false);
 
   // activate controllers once the switch is fully complete
+  ActivationOutcome outcome;
   if (!switch_params_.activate_asap.load(std::memory_order_relaxed))
   {
-    activate_controllers();
+    outcome = activate_controllers();
   }
   else
   {
     // activate controllers as soon as their required joints are done switching
-    activate_controllers_asap();
+    outcome = activate_controllers_asap();
+  }
+  if (outcome.any_failure && atomic_activation_.load(std::memory_order_relaxed))
+  {
+    // All-or-nothing: a partially activated tree is not a tree. Only the controllers THIS pass
+    // activated are undone; ones that were already active keep running.
+    rollback_activated_controllers(outcome.activated);
   }
 
   // TODO(destogl): move here "do_switch = false"
 
   switch_params_.do_switch.store(false, std::memory_order_release);
   switch_params_.cv.notify_all();
+}
+
+void ControllerManager::rollback_activated_controllers(const std::vector<std::string> & activated)
+{
+  if (activated.empty()) {return;}
+  std::vector<ControllerSpec> & rt_controller_list =
+    rt_controllers_wrapper_.update_and_get_used_by_rt_list();
+
+  RCLCPP_ERROR(
+    get_logger(),
+    "Atomic activation: %zu controller(s) were activated by this switch and at least one other "
+    "failed, so the activated ones are being deactivated again (nothing stays half-activated).",
+    activated.size());
+
+  for (const auto & controller_name : activated)
+  {
+    auto found_it = std::find_if(
+      rt_controller_list.begin(), rt_controller_list.end(),
+      std::bind(controller_name_compare, std::placeholders::_1, controller_name));
+    if (found_it == rt_controller_list.end()) {continue;}
+    auto controller = found_it->c;
+    if (!is_controller_active(*controller)) {continue;}
+    const auto new_state = controller->get_node()->deactivate();
+    controller->release_interfaces();
+    if (new_state.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "During the atomic-activation rollback, controller '%s' ended in state '%s', expected "
+        "Inactive.",
+        controller_name.c_str(), new_state.label().c_str());
+    }
+  }
 }
 
 void ControllerManager::deactivate_controllers()
@@ -1727,8 +1790,9 @@ void ControllerManager::switch_chained_mode(
   }
 }
 
-void ControllerManager::activate_controllers()
+ControllerManager::ActivationOutcome ControllerManager::activate_controllers()
 {
+  ActivationOutcome outcome;
   std::vector<ControllerSpec> & rt_controller_list =
     rt_controllers_wrapper_.update_and_get_used_by_rt_list();
   std::vector<std::string> failed_controllers_command_interfaces;
@@ -1743,6 +1807,7 @@ void ControllerManager::activate_controllers()
         get_logger(),
         "Got request to activate controller '%s' but it is not in the realtime controller list",
         controller_name.c_str());
+      outcome.any_failure = true;
       continue;
     }
     auto controller = found_it->c;
@@ -1792,6 +1857,7 @@ void ControllerManager::activate_controllers()
     // something went wrong during command interfaces, go skip the controller
     if (!assignment_successful)
     {
+      outcome.any_failure = true;
       continue;
     }
 
@@ -1827,6 +1893,7 @@ void ControllerManager::activate_controllers()
     // something went wrong during state interfaces, go skip the controller
     if (!assignment_successful)
     {
+      outcome.any_failure = true;
       continue;
     }
     controller->assign_interfaces(std::move(command_loans), std::move(state_loans));
@@ -1842,11 +1909,13 @@ void ControllerManager::activate_controllers()
         hardware_interface::lifecycle_state_names::ACTIVE,
         lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
       controller->release_interfaces();
+      outcome.any_failure = true;
       failed_controllers_command_interfaces.insert(
         failed_controllers_command_interfaces.end(), command_interface_names.begin(),
         command_interface_names.end());
       continue;
     }
+    outcome.activated.push_back(controller_name);
 
     // if it is a chainable controller, make the reference interfaces available on activation
     if (controller->is_chainable())
@@ -1868,12 +1937,13 @@ void ControllerManager::activate_controllers()
   }
   // All controllers activated, switching done
   switch_params_.do_switch.store(false, std::memory_order_release);
+  return outcome;
 }
 
-void ControllerManager::activate_controllers_asap()
+ControllerManager::ActivationOutcome ControllerManager::activate_controllers_asap()
 {
   //  https://github.com/ros-controls/ros2_control/issues/263
-  activate_controllers();
+  return activate_controllers();
 }
 
 void ControllerManager::list_controllers_srv_cb(
@@ -2328,6 +2398,38 @@ void ControllerManager::read(const rclcpp::Time & time, const rclcpp::Duration &
   resource_manager_->read(time, period);
 }
 
+std::shared_ptr<const ControllerManager::ExecutionGeneration>
+ControllerManager::current_generation() const noexcept
+{
+  auto generation = std::atomic_load(&generation_);
+  if (!generation)
+  {
+    // Only reachable before the first publication (a configuration that never set the parameter).
+    generation = std::make_shared<const ExecutionGeneration>();
+  }
+  return generation;
+}
+
+void ControllerManager::publish_generation(
+  bool two_phase_enabled, std::shared_ptr<const std::vector<TwoPhaseEntry>> entries,
+  std::shared_ptr<StagedExecutionGroup> staged_group)
+{
+  // Copy-then-store: the published object is never mutated afterwards, so a cycle that already
+  // loaded it keeps a coherent view while a newer generation is built off to the side.
+  const auto previous = current_generation();
+  auto next = std::make_shared<ExecutionGeneration>();
+  next->two_phase_enabled = two_phase_enabled;
+  next->two_phase_entries = std::move(entries);
+  next->staged_group = std::move(staged_group);
+  next->id = previous->id + 1;
+  std::atomic_store(&generation_, std::shared_ptr<const ExecutionGeneration>(std::move(next)));
+}
+
+std::uint64_t ControllerManager::execution_generation() const noexcept
+{
+  return current_generation()->id;
+}
+
 std::string ControllerManager::two_phase_admission_reason(
   TwoPhaseAdmission admission, const std::string & detail) const
 {
@@ -2362,10 +2464,13 @@ std::string ControllerManager::two_phase_admission_reason(
 }
 
 ControllerManager::TwoPhaseAdmission ControllerManager::two_phase_admission(
-  const ControllerSpec & controller) const noexcept
+  const ControllerSpec & controller,
+  const std::shared_ptr<StagedExecutionGroup> & staged_for_admission) const noexcept
 {
-  const auto group = std::atomic_load(&staged_group_);
-  if (group && group->owns(controller.c.get())) {return TwoPhaseAdmission::already_staged;}
+  if (staged_for_admission && staged_for_admission->owns(controller.c.get()))
+  {
+    return TwoPhaseAdmission::already_staged;
+  }
 
   // The native loop rate-gates a controller whose update_rate divides the manager's rate and
   // passes it a matching period; the two-phase passes have no such gate, so only "follow the
@@ -2424,7 +2529,8 @@ std::vector<char> ControllerManager::controller_active_mask(
 }
 
 std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_rejections(
-  const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask) const
+  const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask,
+  const std::shared_ptr<StagedExecutionGroup> & staged_for_admission) const
 {
   // `judged(i)`: is controller i in the set this verdict is about?
   const auto judged = [&](const std::size_t i)
@@ -2457,7 +2563,7 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
     if (!implements[i]) {continue;}
     if (!judged(i)) {continue;}
 
-    auto admission = two_phase_admission(controllers[i]);
+    auto admission = two_phase_admission(controllers[i], staged_for_admission);
     std::string detail;
     if (admission == TwoPhaseAdmission::accepted)
     {
@@ -2605,7 +2711,9 @@ std::vector<ControllerManager::TwoPhaseRejection>
 ControllerManager::two_phase_rejected_controllers() const
 {
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
-  return two_phase_rejections(rt_controllers_wrapper_.get_updated_list(guard));
+  return two_phase_rejections(
+    rt_controllers_wrapper_.get_updated_list(guard), nullptr,
+    current_generation()->staged_group);
 }
 
 std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
@@ -2613,42 +2721,30 @@ ControllerManager::two_phase_entries() const noexcept
 {
   // By value: the caller keeps the snapshot alive. Returning a reference into a snapshot owned only
   // by this function's local `shared_ptr` would dangle as soon as another thread republishes.
-  return std::atomic_load(&two_phase_entries_);
+  return current_generation()->two_phase_entries;
 }
 
-void ControllerManager::rebuild_two_phase_entries(
-  const std::vector<ControllerSpec> & controllers)
+std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
+ControllerManager::build_two_phase_entries(
+  const std::vector<ControllerSpec> & controllers, bool admission_enabled,
+  const std::shared_ptr<StagedExecutionGroup> & staged_for_admission) const
 {
-  rebuild_two_phase_entries(controllers, two_phase_enabled_.load(std::memory_order_relaxed));
-}
-
-void ControllerManager::rebuild_two_phase_entries(
-  const std::vector<ControllerSpec> & controllers, bool admission_enabled)
-{
-  if (!admission_enabled)
-  {
-    // Nothing consumes the entry set, so do not allocate, cast or sort on the configuration path.
-    // This matters: `switch_controller()`, `add_controller_impl()` and `unload_controller()` call
-    // this while the real-time loop is running, and doing needless work there lengthens the switch
-    // enough to change how many cycles the loop completes (which controller-update-count tests
-    // observe). Publishing a null snapshot makes `update()` use its static empty vector.
-    std::atomic_store(&two_phase_entries_, std::shared_ptr<const std::vector<TwoPhaseEntry>>());
-    return;
-  }
-
-  // Build the new membership off to the side and publish it with one atomic store, so a reader in
-  // `update()` either sees the whole old set or the whole new one and is never blocked.
   auto entries = std::make_shared<std::vector<TwoPhaseEntry>>();
+  if (!admission_enabled) {return entries;}
+
   entries->reserve(controllers.size());
 
   // Rejections are computed ONCE, up front, so the log and the published set cannot disagree: the
-  // same verdict decides both. A rejected member is left out because the native loop below
-  // rate-gates it and the staged group, if any, owns it -- leaving it out is what makes "no
-  // controller runs twice per cycle" true.
-  const auto rejections = two_phase_rejections(controllers);
+  // same verdict decides both. A rejected member is left out because the native loop rate-gates it
+  // and the staged group, if any, owns it -- leaving it out is what makes "no controller runs twice
+  // per cycle" true.
+  const auto rejections = two_phase_rejections(controllers, nullptr, staged_for_admission);
   std::unordered_map<std::string, std::string> rejected_names;
   rejected_names.reserve(rejections.size());
-  for (const auto & rejection : rejections) {rejected_names.emplace(rejection.name, rejection.reason);}
+  for (const auto & rejection : rejections)
+  {
+    rejected_names.emplace(rejection.name, rejection.reason);
+  }
 
   std::size_t rejected_members = 0;
   for (const auto & controller : controllers)
@@ -2672,8 +2768,6 @@ void ControllerManager::rebuild_two_phase_entries(
       return std::less<const controller_interface::ControllerInterfaceBase *>()(a.base, b.base);
     });
 
-  std::atomic_store(&two_phase_entries_, std::shared_ptr<const std::vector<TwoPhaseEntry>>(entries));
-
   // Non-real-time thread only, and only when something was actually excluded, so this cannot spam
   // the control loop. EVERY rejection is logged, not just the first: the caller has to be able to
   // see why the configuration is half-working (review item E). `two_phase_rejected_controllers()`
@@ -2693,6 +2787,32 @@ void ControllerManager::rebuild_two_phase_entries(
       get_logger(), "Two-phase execution: controller '%s' %s.", rejection.name.c_str(),
       rejection.reason.c_str());
   }
+  return entries;
+}
+
+void ControllerManager::rebuild_two_phase_entries(
+  const std::vector<ControllerSpec> & controllers)
+{
+  rebuild_two_phase_entries(controllers, current_generation()->two_phase_enabled);
+}
+
+void ControllerManager::rebuild_two_phase_entries(
+  const std::vector<ControllerSpec> & controllers, bool admission_enabled)
+{
+  // ONE publication: entries for this controller list, with the mode and the staged group the
+  // generation already has. When the feature is off there is nothing to change, so the configuration
+  // path does not pay for a feature that is not in use (the earlier revision had to publish a null
+  // snapshot here, which is exactly the kind of separate publication this generation removes).
+  const auto generation = current_generation();
+  if (!admission_enabled)
+  {
+    if (!generation->two_phase_enabled) {return;}
+    publish_generation(false, nullptr, generation->staged_group);
+    return;
+  }
+  publish_generation(
+    true, build_two_phase_entries(controllers, true, generation->staged_group),
+    generation->staged_group);
 }
 
 void ControllerManager::refresh_two_phase_controllers()
@@ -2717,12 +2837,12 @@ std::size_t ControllerManager::two_phase_index(
 
 controller_interface::return_type ControllerManager::set_two_phase_execution(bool enabled)
 {
+  const auto generation = current_generation();
   if (!enabled)
   {
-    // Disable first, then clear: with the flag already false no control cycle consults the entry
-    // set for the skip decision, so the members fall back to the native loop as intended.
-    two_phase_enabled_.store(false, std::memory_order_release);
-    refresh_two_phase_controllers();
+    // ONE store that both clears the mode and drops the member set: there is no window in which a
+    // cycle could see "enabled" with members left over, or members without the mode.
+    publish_generation(false, nullptr, generation->staged_group);
     RCLCPP_INFO(get_logger(), "Two-phase execution disabled.");
     return controller_interface::return_type::OK;
   }
@@ -2733,7 +2853,7 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
     std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
     const std::vector<ControllerSpec> & controllers =
       rt_controllers_wrapper_.get_updated_list(guard);
-    const auto rejections = two_phase_rejections(controllers);
+    const auto rejections = two_phase_rejections(controllers, nullptr, generation->staged_group);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -2744,17 +2864,13 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
       }
       return controller_interface::return_type::ERROR;
     }
-  }
 
-  // PUBLISH FIRST, THEN ENABLE. The other order leaves a window in which a control cycle sees
-  // `enabled == true` with an empty (or stale) entry set, and the native-loop skip -- which is
-  // gated on the flag -- would hand a member to the fused single-pass path for that cycle.
-  {
-    std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
-    rebuild_two_phase_entries(
-      rt_controllers_wrapper_.get_updated_list(guard), /*admission_enabled=*/true);
+    // Mode and members in ONE store, so no cycle can observe "enabled but no entries" -- the window
+    // the previous publish-then-set order could only narrow, not remove.
+    publish_generation(
+      true, build_two_phase_entries(controllers, true, generation->staged_group),
+      generation->staged_group);
   }
-  two_phase_enabled_.store(true, std::memory_order_release);
   const auto entries = two_phase_entries();
   RCLCPP_INFO(
     get_logger(), "Two-phase execution enabled (%zu controller(s) implement the interface).",
@@ -2762,7 +2878,22 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
   return controller_interface::return_type::OK;
 }
 
-bool ControllerManager::two_phase_execution() const {return two_phase_enabled_;}
+void ControllerManager::set_atomic_activation(bool enabled)
+{
+  atomic_activation_.store(enabled, std::memory_order_relaxed);
+  RCLCPP_INFO(
+    get_logger(), "Atomic activation %s.", enabled ? "enabled" : "disabled (upstream semantics)");
+}
+
+bool ControllerManager::atomic_activation() const
+{
+  return atomic_activation_.load(std::memory_order_relaxed);
+}
+
+bool ControllerManager::two_phase_execution() const
+{
+  return current_generation()->two_phase_enabled;
+}
 
 void ControllerManager::set_static_controller_registry(StaticControllerRegistry::SharedPtr registry)
 {
@@ -2812,7 +2943,9 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
     static const std::vector<TwoPhaseEntry> no_two_phase_entries;
     const auto current_entries = two_phase_entries();
     const auto & entries_for_check = current_entries ? *current_entries : no_two_phase_entries;
-    if (two_phase_enabled_ && two_phase_index(entries_for_check, it->c.get()) != no_two_phase)
+    if (
+      current_generation()->two_phase_enabled &&
+      two_phase_index(entries_for_check, it->c.get()) != no_two_phase)
     {
       RCLCPP_ERROR(
         get_logger(),
@@ -2859,9 +2992,13 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
   // again by this thread, so a control cycle that already loaded it cannot race with a refresh
   // (review item D). Members are required to be inactive anyway; this only makes the cache exact.
   group->refresh_member_active_state();
-  std::atomic_store(&staged_group_, std::move(group));
-  // Group membership feeds two-phase admission, so republish the entry set from the idle thread.
-  rebuild_two_phase_entries(controllers);
+  // Group membership feeds two-phase admission, so the group AND the entry set derived from it are
+  // published as ONE generation: a cycle can never see the new group with the old member set (which
+  // would let a controller be owned by both paths for one cycle).
+  const auto generation = current_generation();
+  publish_generation(
+    generation->two_phase_enabled,
+    build_two_phase_entries(controllers, generation->two_phase_enabled, group), std::move(group));
   RCLCPP_INFO(
     get_logger(), "Installed a staged execution group with %zu members and max age %ld ns.",
     members.size(), static_cast<long>(max_age_ns));
@@ -2870,15 +3007,19 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
 
 void ControllerManager::clear_staged_execution_group()
 {
-  // The group must be removed before any of its members is unloaded or goes active.
-  std::atomic_store(&staged_group_, std::shared_ptr<StagedExecutionGroup>());
+  // The group must be removed before any of its members is unloaded or goes active. The entry set
+  // that admitted members *because* of the group is republished in the same generation.
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
-  rebuild_two_phase_entries(rt_controllers_wrapper_.get_updated_list(guard));
+  const auto controllers = rt_controllers_wrapper_.get_updated_list(guard);
+  const auto generation = current_generation();
+  publish_generation(
+    generation->two_phase_enabled,
+    build_two_phase_entries(controllers, generation->two_phase_enabled, nullptr), nullptr);
 }
 
 std::shared_ptr<StagedExecutionGroup> ControllerManager::staged_execution_group() const
 {
-  return std::atomic_load(&staged_group_);
+  return current_generation()->staged_group;
 }
 
 controller_interface::return_type ControllerManager::update(
@@ -2891,20 +3032,19 @@ controller_interface::return_type ControllerManager::update(
   ++update_loop_counter_;
   update_loop_counter_ %= update_rate_;
 
-  // Read the published membership once per cycle: one atomic load, no allocation, and the local
-  // shared_ptr keeps the vector alive for the whole cycle even if another thread retires it. When
-  // the feature is off the load is skipped entirely, so the default configuration does not pay for
-  // a feature it is not using.
+  // ONE atomic load per cycle for the whole execution state (review item D): the mode, the
+  // two-phase member set and the staged group come from the same immutable generation, so a cycle
+  // can never mix "enabled" from one configuration state with the member set of another. The local
+  // shared_ptr keeps the generation and everything it owns alive for the whole cycle.
+  const auto generation = current_generation();
   static const std::vector<TwoPhaseEntry> no_entries;
-  const auto two_phase_entries_holder =
-    two_phase_enabled_ ? std::atomic_load(&two_phase_entries_)
-                       : std::shared_ptr<const std::vector<TwoPhaseEntry>>();
-  const auto & entries = two_phase_entries_holder ? *two_phase_entries_holder : no_entries;
+  const auto & entries =
+    generation->two_phase_entries ? *generation->two_phase_entries : no_entries;
 
   // Opt-in staged group: explicit state (postorder) and command (preorder) phases, one group
   // commit. Its members are skipped by the native loop below, so no controller runs twice.
   // The group is not executed while a switch is pending: membership may be changing.
-  const auto staged = std::atomic_load(&staged_group_);
+  const auto & staged = generation->staged_group;
   if (staged && !switch_params_.do_switch.load(std::memory_order_acquire))
   {
     const auto staged_result = staged->run(time, period);
@@ -2929,7 +3069,7 @@ controller_interface::return_type ControllerManager::update(
   // Pass 1 ("Update") walks it BACKWARD so children publish before parents consume.
   // Skipped while a switch is pending, because membership may be changing.
   const bool run_two_phase =
-    two_phase_enabled_ && !entries.empty() &&
+    generation->two_phase_enabled && !entries.empty() &&
     !switch_params_.do_switch.load(std::memory_order_acquire);
   bool two_phase_state_failed = false;
   if (run_two_phase)
@@ -2974,7 +3114,9 @@ controller_interface::return_type ControllerManager::update(
       // to the fused single-pass semantics for the few cycles a switch takes, which is exactly the
       // scheduling behaviour the feature exists to replace (and would double-advance the state of a
       // controller that implements both entry points).
-      if (two_phase_enabled_ && two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
+      if (
+        generation->two_phase_enabled &&
+        two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
       {
         continue;
       }

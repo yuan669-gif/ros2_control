@@ -197,6 +197,38 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   bool two_phase_execution() const;
 
+  /// All-or-nothing activation of a switch's activate set (our extension; default OFF).
+  /**
+   * ROS 2 Humble activates a request SET best-effort: each controller is claimed and activated on its
+   * own, and one that cannot be activated is skipped while the others stay active. That is upstream's
+   * documented behaviour and its own tests rely on it (a spawner that starts controllers one at a
+   * time must not deactivate the ones already running when a later one fails).
+   *
+   * A SCHEDULED tree has a stronger requirement: a partially activated tree is not a tree -- the
+   * parent-before-child order the execution plan guarantees does not hold for a subset, and the
+   * hardware sees commands from half a cascade. With atomic activation ON, a switch that activates
+   * several controllers at once undoes the ones IT activated when any of them fails: they are
+   * deactivated, their interfaces are released and the hardware mode switch is reported as failed,
+   * so the caller observes "nothing activated" instead of a partial tree.
+   *
+   * Scope, stated exactly: only the controllers activated BY THE FAILING SWITCH are undone.
+   * Controllers that were already active before it keep running (deactivating them would be a much
+   * larger action than the request), and configuration/unload steps are unaffected.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  void set_atomic_activation(bool enabled);
+
+  CONTROLLER_MANAGER_PUBLIC
+  bool atomic_activation() const;
+
+  /// Identifier of the currently published execution generation (mode + members + staged group).
+  /**
+   * It changes exactly when one of those changes, and each publication is a single atomic store, so
+   * a client can tell "the same configuration state" from "a new one" without reading three fields.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  std::uint64_t execution_generation() const noexcept;
+
   /// One controller that implements `TwoPhaseControllerInterface` but is NOT executing through the
   /// two-phase passes, with the reason it was excluded.
   struct TwoPhaseRejection
@@ -335,10 +367,21 @@ protected:
     const std::vector<std::string> & chained_mode_switch_list, bool to_chained_mode);
 
   CONTROLLER_MANAGER_PUBLIC
-  void activate_controllers();
+  /// What one activation pass did, so that the caller can undo it when activation is atomic.
+  struct ActivationOutcome
+  {
+    bool any_failure = false;
+    /// Names activated BY THIS PASS, in the order they became active.
+    std::vector<std::string> activated;
+  };
+
+  /// Deactivate controllers this pass had activated (atomic activation only).
+  void rollback_activated_controllers(const std::vector<std::string> & activated);
+
+  ActivationOutcome activate_controllers();
 
   CONTROLLER_MANAGER_PUBLIC
-  void activate_controllers_asap();
+  ActivationOutcome activate_controllers_asap();
 
   CONTROLLER_MANAGER_PUBLIC
   void list_controllers_srv_cb(
@@ -601,11 +644,6 @@ private:
 
   std::unique_ptr<rclcpp::PreShutdownCallbackHandle> preshutdown_cb_handle_{nullptr};
   RTControllerListWrapper rt_controllers_wrapper_;
-  /// Opt-in staged execution group. Published with `std::atomic_store` by the non-real-time thread
-  /// and read with `std::atomic_load` by `update()`, so installing or retiring a group never races
-  /// with the control loop. `mutable` because the atomic accessors take a non-const pointer.
-  mutable std::shared_ptr<StagedExecutionGroup> staged_group_;
-
   /// Opt-in two-phase (FineMote Update/Handle) execution. The membership vector is rebuilt only
   /// outside the control loop and published atomically; the passes do one pointer lookup per
   /// controller and never allocate.
@@ -641,6 +679,9 @@ private:
     /// two-phase path does not go through the kernel, so it checks here.
     duplicate_instance
   };
+  /// Opt-in all-or-nothing activation (our extension, default false: upstream activates a request
+  /// set best-effort and its tests rely on that). Read on the real-time thread, written by setters.
+  std::atomic<bool> atomic_activation_{false};
   /// Read by `update()` every cycle and written by the non-real-time setter, so it is atomic.
   /// An earlier revision used a plain bool, which is a data race on its own -- making the entry
   /// SNAPSHOT atomic does not make the flag that gates it atomic (review item D).
@@ -651,7 +692,9 @@ private:
   /// Human-readable reason, with the offending owner name where one is relevant.
   std::string two_phase_admission_reason(TwoPhaseAdmission admission, const std::string & detail)
     const;
-  TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
+  TwoPhaseAdmission two_phase_admission(
+    const ControllerSpec & controller,
+    const std::shared_ptr<StagedExecutionGroup> & staged_for_admission) const noexcept;
   /// The command interfaces a controller claims, for the scheduling checks.
   /**
    * For an ACTIVE controller this is the set it actually holds a loan for
@@ -677,10 +720,46 @@ private:
    * violation is refused instead of activating the controllers and then reporting an error.
    */
   std::vector<TwoPhaseRejection> two_phase_rejections(
-    const std::vector<ControllerSpec> & controllers,
-    const std::vector<char> * active_mask = nullptr) const;
+    const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask,
+    const std::shared_ptr<StagedExecutionGroup> & staged_for_admission) const;
   /// The mask accepted by `two_phase_rejections`: 1 where `is_controller_active()` holds.
   std::vector<char> controller_active_mask(const std::vector<ControllerSpec> & controllers) const;
+  /// ONE immutable snapshot of everything `update()` needs to know about HOW to execute.
+  /**
+   * Review item D's second half. The two-phase flag, the two-phase member set and the staged group
+   * used to be three separately published values with three atomic loads per cycle, so a cycle could
+   * observe a mixture: the flag from one configuration state and the member set from another (for
+   * example "enabled" while the entries were still the previous, or empty, set). They are now built
+   * into one object and published with ONE atomic store, so every cycle sees a coherent generation.
+   *
+   * What is deliberately NOT in here: the controller LIST. It is upstream's own double-buffered
+   * publication (`RTControllerListWrapper`) with its own sleep-based handshake; folding it in would
+   * mean replacing that mechanism. `controllers_version` records which list the snapshot was built
+   * for, so a mismatch is at least observable in diagnostics.
+   *
+   * `mutable` because the atomic accessors take a non-const pointer.
+   */
+  struct ExecutionGeneration
+  {
+    bool two_phase_enabled = false;
+    std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries;
+    std::shared_ptr<StagedExecutionGroup> staged_group;
+    /// Bumped on every publication; lets a caller (and a test) name the state it saw.
+    std::uint64_t id = 0;
+  };
+  mutable std::shared_ptr<const ExecutionGeneration> generation_;
+
+  /// Publish a complete new generation with ONE atomic store.
+  /**
+   * Every publisher states the WHOLE new state, so there is no window in which one field has been
+   * updated and another has not. Called only from the non-real-time thread.
+   */
+  void publish_generation(
+    bool two_phase_enabled, std::shared_ptr<const std::vector<TwoPhaseEntry>> entries,
+    std::shared_ptr<StagedExecutionGroup> staged_group);
+  /// The published generation (never null after construction).
+  std::shared_ptr<const ExecutionGeneration> current_generation() const noexcept;
+
   /// The published entry set, BY VALUE: the caller must own the snapshot for as long as it uses it.
   /**
    * An earlier revision returned a reference into a snapshot held only by a local `shared_ptr`, so
@@ -689,7 +768,11 @@ private:
    * shape that is safe against a concurrent retire.
    */
   std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries() const noexcept;
-  /// Build membership from a controller list the caller already owns, then publish it atomically.
+  /// Build the two-phase member set for a given staged group. Never locks; non-real-time only.
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> build_two_phase_entries(
+    const std::vector<ControllerSpec> & controllers, bool admission_enabled,
+    const std::shared_ptr<StagedExecutionGroup> & staged_for_admission) const;
+  /// Build membership from a controller list the caller already owns, then publish a new generation.
   /// Never locks: it is only called from the non-real-time thread, which must not contend with
   /// switch_controller() while that holds the controllers lock waiting for the control loop.
   void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);

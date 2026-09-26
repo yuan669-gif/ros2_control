@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **A** | 静态父关系与实际生成关系可能不同（`compose` 未校验 `parent_type`，评审已复现） | **已修** | `compose` 现在 `static_assert` 子 binding 的 `parent_type` 必须等于当前节点；两个编译反例（`compile_fail_child_declares_other_parent.cpp`、`compile_fail_root_as_child.cpp`）以 `TOPOLOGY MISMATCH` 被拒；编译语料 10/10 |
 | **C** | 端口检查不是建组必经步骤；`verify_ports_match_contract` 只比长度（注释却写名称+顺序） | **已修** | `create_library_group` 现在**自动**跑 `verify_binding_ports`（失败抛 `invalid_argument`），新增 `create_library_group_unchecked` 供故意错配的调试 stub；`verify_ports_match_contract` 改为**逐位置比名称与顺序**（新增 `tc::port_at_t`）；新增"同长度错名"与"顺序颠倒"两个负向用例；三个既有 fixture 的错配已按契约修好 |
-| **D** | 模式标志与快照发布不是一致状态；`two_phase_entries()` 返回可能悬空的引用 | **已修** | `two_phase_enabled_` 改为 `std::atomic<bool>`；`two_phase_entries()` 改为**按值返回 `shared_ptr`**（原实现把引用指向只有局部 owner 的快照，是真悬空）；启用改为"**先发布成员、再置位**"，禁用改为"**先清标志、再清成员**"；`set_staged_execution_group` 改为**发布前**刷新缓存标志（发布后不再写该对象）。**未做**：模式/成员/计划的统一 generation。**真实 manager 的 TSan 已补**（见 §D.1：插桩 `controller_manager` 后测出 4 条上游握手字段的数据竞争，改成原子后归零；依赖库未插桩） |
+| **D** | 模式标志与快照发布不是一致状态；`two_phase_entries()` 返回可能悬空的引用 | **已修** | `two_phase_enabled_` 改为 `std::atomic<bool>`；`two_phase_entries()` 改为**按值返回 `shared_ptr`**（原实现把引用指向只有局部 owner 的快照，是真悬空）；启用改为"**先发布成员、再置位**"，禁用改为"**先清标志、再清成员**"；`set_staged_execution_group` 改为**发布前**刷新缓存标志（发布后不再写该对象）。**模式/成员/计划已合并为一个 generation（§D.2）**；**激活回滚见 §D.3（默认关闭）**。**真实 manager 的 TSan 已补**（见 §D.1：插桩 `controller_manager` 后测出 4 条上游握手字段的数据竞争，改成原子后归零；依赖库未插桩） |
 | **B** | 静态构建器只支持链，不支持分叉树；`ForChildren` 不能按每个孩子分别比较 | **已修**（见 §B 与 §B.1） | `BoundNode` 改为变参 `Children...`；`compose` 变参、`make_leaf` 单节点；`ForChildren`/`ChildState` 按**孩子顺序拼接**并与每个孩子声明**逐段比较**（`children_references_agree` / `children_states_agree`）；`compose` 在双方都有 `typed_ports` 时**自动**执行检查；七节点验收树 `test_typed_tree`（含兄弟顺序对调变体）在**库路径**验证静态边、阶段顺序与本周期数值；同一棵树还在**manager 路径**验证（§E.1.5，`two_pass_runs_a_branching_tree_and_propagates_it_same_cycle`） |
 | **E** | 新/不合格组件仍可能走原生路径；跨模式依赖未拒绝 | **已修**（见 §E 与 §E.1） | 跨模式参考边（两端恰有一端是两趟成员）**拒绝启用**；两趟启用期间的晚加载/晚配置不合格成员使 `configure_controller` 返回 ERROR（不再只记日志）；`switch_controller` 对**激活态**成员做同样判定；新增 `two_phase_rejected_controllers()` 暴露"被拒成员 + 原因"；**另发现并修复**"manager 列表顺序把一条边反向"这一类（§E.1.5），共六个行为用例 |
 
@@ -525,11 +525,68 @@ staged 快照或两趟准入/内核代码**——即 D 项里属于本特性的�
 
 ---
 
+## D.2 模式/成员/计划统一 generation——**已做（本轮）**
+
+评审 D 的另一半是"entries、controller list、staged group 独立发布，没有统一 generation"。
+本轮把**本特性发布的三样东西**合并成一个不可变快照：
+
+```cpp
+struct ExecutionGeneration {
+  bool two_phase_enabled;                                        // 模式
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> entries;     // 两趟成员
+  std::shared_ptr<StagedExecutionGroup> staged_group;            // staged 计划
+  std::uint64_t id;                                              // 每次发布 +1
+};
+```
+
+- `update()` 每周期**只做一次 `atomic_load`**，三个决策（跑不跑 staged、跑不跑两趟、
+  原生循环跳过谁）全部来自同一个快照——不存在"标志来自一个配置态、成员表来自另一个"的混合；
+- 每次配置变更用**一次 `atomic_store`** 发布完整新状态：
+  启用不再是"先发成员再置位"，禁用不再是"先清标志再清成员"，而是各自一次替换
+  （旧代码只能**缩小**窗口，现在窗口不存在）；
+- 安装/清除 staged group 时，**group 与由它推导的两趟成员表在同一次发布里**——否则会出现
+  "新 group 已生效、旧成员表还没更新"的一周期窗口，让同一控制器被两条路径同时拥有；
+- 被**拒绝**的请求（启用被拒、group 被拒）**不发布**任何新状态；
+- 新增 `execution_generation()`（单调 id）作为可观测契约：
+  "接受的变更恰好 +1，被拒的变更 +0"。三个用例覆盖：
+  `execution_state_is_published_as_one_generation`（启用/禁用各 +1、再启用 +1）、
+  `a_refused_enable_and_a_group_change_publish_coherently`（被拒启用 +0）、
+  `a_staged_group_change_is_one_publication`（安装 +1、被拒的两趟启用 +0、清除 +1）。
+
+**仍未合并的一项（如实）**：**控制器列表本身**。它仍是上游的 `RTControllerListWrapper`
+双缓冲 + sleep 握手；把列表也纳入 generation 等于替换上游那套机制。
+`ExecutionGeneration` 里预留的 `controllers_version` 注释说明了这一点——
+"模式/成员/计划一个 generation，列表沿用上游发布"。
+
+## D.3 激活阶段的整组回滚（文档 §7.2 的 manager 半边）——**已做，但默认关闭**
+
+**上游语义**：一次 switch 的 activate 集合是**尽力而为**的——逐个 claim、逐个激活，
+失败的那个被跳过，成功的**保持激活**。上游自己的
+`spawner_test_failed_activation_of_controllers` 就依赖这一点（spawner 一次起一个控制器，
+后一个失败**不能**把前面正在跑的停掉）。所以**把回滚做成默认行为会破坏上游语义与它的测试**。
+
+**本轮的实现**：`set_atomic_activation(true)`（参数 `atomic_activation`，默认 false）
+
+- `activate_controllers()`（`activate_controllers_asap()` 转发它）现在返回
+  `ActivationOutcome{any_failure, activated}`，记录**本次**激活成功的控制器；
+- 任一步失败（命令接口冲突/异常、状态接口失败、`on_activate` 未到 ACTIVE）时，
+  若原子激活开启，则 `rollback_activated_controllers(activated)`：
+  逐个 `deactivate()` + `release_interfaces()`，并打印明确的错误；
+- **作用域严格限定**：只撤销**本次 switch 激活的**控制器。此前已经激活的不动
+  （撤销它们的动作远大于请求本身）；configure/unload 不受影响；
+- 5 个用例（`test_atomic_activation.cpp`）：
+  ① 默认（关闭时）部分激活**保持**——把上游语义也钉住，避免"悄悄改了语义"；
+  ② 开启后同一次请求（3 个控制器，最后一个冲突）→ 本次激活的两个都被撤销，
+     此前已激活的 blocker 仍在跑；
+  ③ 回滚**释放接口**：撤销后另一个需要同一端口的控制器可以成功激活；
+  ④ `on_activate` 生命周期失败（非接口冲突）走同一条回滚路径；
+  ⑤ 全部成功时不受影响。
+
 ## 仍未做的事（明确列出，避免"看起来全做完了"）
 
 | # | 未做项 | 现状 |
 |---|---|---|
-| 1 | 模式/成员/计划的**统一 generation**（评审 D 的第二半） | 未做；首版约束是"控制循环停止时配置"，已写进 API 注释与 `REVIEW_RESPONSE_2026-09-23.md` |
+| 1 | **控制器列表**纳入统一 generation | 模式/成员/计划已合并（§D.2）；列表仍是上游 `RTControllerListWrapper` 双缓冲，纳进去等于替换上游机制。因此"控制循环停止时配置"这条约束**仍然有效** |
 | 2 | **依赖库的 TSan**（rclcpp / lifecycle / hardware_interface / FastRTPS） | `controller_manager` 自身已插桩并跑到 0 data race（§D.1）；依赖库未插桩，其 lock-order 报告无法归属，给整条依赖树插桩需要 GB 级空间与数小时 |
 | 3 | 多频 / 异步 / 动态拓扑 / 生命周期回滚 | 明确不做（评审也建议不要扩） |
 | 4 | `Spec::parents` 的 YAML/参数入口 | 未做；两趟与 staged 都从 claimed interfaces 推导，该字段不是必需 |

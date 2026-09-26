@@ -35,6 +35,12 @@ if [ ! -x "$BIN" ] || [ "$1" = "--rebuild" ]; then
   echo "[tsan] building controller_manager with -fsanitize=thread (separate build tree: $BUILD)"
   # shellcheck disable=SC1091
   source /opt/ros/humble/setup.bash
+  # The workspace's own dependencies (hierarchical_control, hardware_interface_testing, ...) come
+  # from the normal install space: this build tree only instruments controller_manager itself.
+  if [ -f "$WS/install/setup.bash" ]; then
+    # shellcheck disable=SC1091
+    source "$WS/install/setup.bash"
+  fi
   ( cd "$WS" && colcon --log-base log_tsan build --packages-select controller_manager \
       --build-base build_tsan --install-base install_tsan \
       --cmake-args "${TSAN_FLAGS[@]}" --cmake-target test_two_phase_execution ) || exit 2

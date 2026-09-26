@@ -779,6 +779,83 @@ TEST_F(TestExecutionPathAdmission, reactivating_a_legacy_claimant_is_refused_bef
   EXPECT_TRUE(mentions_cross_mode) << "the edge must be reported as cross-mode";
 }
 
+/// Review item D, second half: the mode, the two-phase member set and the staged group are published
+/// as ONE generation, and a request that is REFUSED publishes nothing at all.
+///
+/// Before this, the three values were published separately (and in one order for enable, another for
+/// disable), so a cycle could observe a mixture. Now the observable contract is simple and testable:
+/// every accepted configuration change bumps the generation id exactly once, and a rejected one
+/// leaves it alone.
+TEST_F(TestExecutionPathAdmission, execution_state_is_published_as_one_generation)
+{
+  BuildChain(0);
+  const auto initial = cm_->execution_generation();
+  EXPECT_FALSE(cm_->two_phase_execution());
+  EXPECT_EQ(nullptr, cm_->staged_execution_group());
+
+  // Enable: mode AND members in one publication.
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  EXPECT_EQ(initial + 1, cm_->execution_generation())
+    << "enabling must bump the generation exactly once (mode + members together)";
+  EXPECT_TRUE(cm_->two_phase_execution());
+  EXPECT_TRUE(cm_->two_phase_rejected_controllers().empty())
+    << "the conforming chain must be admitted in the same generation";
+
+  // Disable: again exactly one publication.
+  const auto enabled = cm_->execution_generation();
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(false));
+  EXPECT_EQ(enabled + 1, cm_->execution_generation());
+  EXPECT_FALSE(cm_->two_phase_execution());
+
+  // Re-enabling publishes exactly once as well, and a refused request publishes NOTHING -- the
+  // generation id is the observable form of "nothing changed", which three separate stores could
+  // not offer. (The refusal case with a non-conforming member is the next test.)
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  EXPECT_EQ(enabled + 2, cm_->execution_generation());
+  EXPECT_TRUE(cm_->two_phase_execution());
+}
+
+/// The same id discipline for a refused ENABLE (a non-conforming member), and for the staged group,
+/// whose membership feeds two-phase admission and must therefore travel in the same generation.
+TEST_F(TestExecutionPathAdmission, a_refused_enable_and_a_group_change_publish_coherently)
+{
+  ASSERT_GE(cm_->get_update_rate(), 2u);
+  const unsigned int half_rate = cm_->get_update_rate() / 2;
+
+  // A non-conforming member: the enable is refused and nothing is published.
+  BuildChain(half_rate);
+  const auto before_refusal = cm_->execution_generation();
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
+  EXPECT_EQ(before_refusal, cm_->execution_generation())
+    << "a refused enable must not publish a generation";
+  EXPECT_FALSE(cm_->two_phase_execution());
+  EXPECT_EQ(nullptr, cm_->staged_execution_group());
+}
+
+/// A staged group change and the two-phase member set derived from it are one publication: while the
+/// mode is on, clearing the group republishes the members that the group had excluded.
+TEST_F(TestExecutionPathAdmission, a_staged_group_change_is_one_publication)
+{
+  BuildChain(0);
+  const auto initial = cm_->execution_generation();
+
+  ASSERT_EQ(Return::OK, cm_->set_staged_execution_group({kRoot, kMid, kLeaf}));
+  EXPECT_EQ(initial + 1, cm_->execution_generation())
+    << "installing the group publishes group and member set together";
+  ASSERT_NE(nullptr, cm_->staged_execution_group());
+
+  // While the group owns those controllers, two-phase cannot take them: the refusal publishes
+  // nothing, so the group and the entry set stay consistent.
+  const auto with_group = cm_->execution_generation();
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
+  EXPECT_EQ(with_group, cm_->execution_generation());
+  EXPECT_FALSE(cm_->two_phase_execution());
+
+  cm_->clear_staged_execution_group();
+  EXPECT_EQ(with_group + 1, cm_->execution_generation());
+  EXPECT_EQ(nullptr, cm_->staged_execution_group());
+}
+
 /// The order validation above is NOT vacuous, and this is the configuration that motivated it: a
 /// chainable child that keeps its exported reference but claims NO command interface at all. Upstream
 /// `controller_sorting()` sorts such a controller ahead of one that has command interfaces, so the

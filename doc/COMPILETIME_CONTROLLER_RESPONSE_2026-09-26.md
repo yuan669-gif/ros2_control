@@ -192,8 +192,13 @@ struct TypedPorts { ... using hardware_state = HardwareState; ... };
 
 1. ~~静态 controller 与 pluginlib controller 在同一 admission/lifecycle 适配器内的混合~~（文档 §4.2/§7.4）：
    **本轮已做**，见 §3.4。仍是**工厂注册**（每次 `load_controller` 造新实例），不是把控制器做成全局对象。
-2. **manager 侧的 activate 事务/整组回滚**（文档 §7.2 的 manager 半边）：见 §1.3。
-3. **统一 generation 发布协议**（文档 §6、评审 D 的另一半）：首版仍是"控制循环停止时配置"。
+2. ~~**manager 侧的 activate 事务/整组回滚**（文档 §7.2 的 manager 半边）~~：**本轮已做**，
+   作为**默认关闭**的可选行为 `set_atomic_activation(true)`（上游的尽力而为语义与它自己的测试都保留）。
+   见 `REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md` §D.3。
+3. ~~**统一 generation 发布协议**（文档 §6、评审 D 的另一半）~~：**本轮已做**（模式/成员/staged 计划
+   合并为一个不可变快照、每次变更一次 `atomic_store`、被拒请求不发布）；
+   **控制器列表本身**仍沿用上游的双缓冲发布，因此"控制循环停止时配置"的约束仍然有效。
+   见 `REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md` §D.2。
 4. **运行中改变拓扑/manifest 被拒**（文档 §7.5）：manifest 是类型，运行期本来就无法改；
    真正需要的是"运行中配置一律拒绝并报错"，当前靠 API 注释约束而非强制。
 5. 依赖库（rclcpp/lifecycle/hardware_interface/FastRTPS）的 TSan、Gazebo 真值指标：与上一轮相同，未做。

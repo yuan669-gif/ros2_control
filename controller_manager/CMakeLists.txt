@@ -161,6 +161,16 @@ if(BUILD_TESTING)
     ros2_control_test_assets::ros2_control_test_assets
   )
 
+  # Our extension: all-or-nothing activation of a switch's activate set.
+  ament_add_gmock(test_atomic_activation
+    test/test_atomic_activation.cpp
+  )
+  target_include_directories(test_atomic_activation PRIVATE include test)
+  target_link_libraries(test_atomic_activation
+    controller_manager
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+
   # Controllers compiled into the binary, reachable through the ordinary load path.
   ament_add_gmock(test_static_controller_registry
     test/test_static_controller_registry.cpp
