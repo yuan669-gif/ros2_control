@@ -26,6 +26,7 @@
 
 #include "controller_manager/controller_manager.hpp"
 #include "controller_manager_test_common.hpp"
+#include "test_chainable_controller/test_chainable_controller.hpp"
 
 namespace
 {
@@ -143,6 +144,37 @@ public:
     return state_interfaces_.empty() ? -1.0 : state_interfaces_[0].get_value();
   }
 };
+
+/// A chainable controller that can be told to fail `on_activate`.
+/**
+ * A chainable controller is needed for the chained-mode restart path: a preceding controller writes
+ * the reference interfaces of a following one, and activating the preceding controller requires the
+ * following one to be in chained mode. `set_chained_mode()` is only allowed while inactive, so
+ * upstream stops and restarts an already-ACTIVE following controller for that -- which is what the
+ * rollback has to undo correctly.
+ */
+class SwitchableChainable : public test_chainable_controller::TestChainableController
+{
+public:
+  void set_fail_activate(bool fail) {fail_activate_ = fail;}
+
+  CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override
+  {
+    if (fail_activate_) {return CallbackReturn::FAILURE;}
+    return test_chainable_controller::TestChainableController::on_activate(previous_state);
+  }
+
+private:
+  bool fail_activate_ = false;
+};
+
+controller_interface::InterfaceConfiguration individual(const std::vector<std::string> & names)
+{
+  controller_interface::InterfaceConfiguration cfg;
+  cfg.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  cfg.names = names;
+  return cfg;
+}
 
 class TestAtomicActivation : public ControllerManagerFixture<controller_manager::ControllerManager>
 {
@@ -345,4 +377,63 @@ TEST_F(TestAtomicActivation, the_rollback_switches_the_hardware_mode_back)
   EXPECT_EQ(baseline + 202.0, observer->mode_counter())
     << "one pair for the failed switch (101) plus the rollback's pair for first's interface (101); "
        "without the hardware part of the rollback this is only +101";
+}
+
+/// A restart for a chained-mode change must be undone as a RESTART, not as a deactivation.
+/**
+ * Upstream restarts an already-ACTIVE controller when a switch has to change its chained mode
+ * (`set_chained_mode()` is only allowed while inactive), putting it into the deactivate AND the
+ * activate request. If another controller of the same switch then fails, a rollback that simply
+ * deactivates "everything this pass activated" stops a controller that was running before the switch
+ * and had nothing to do with the failure -- a failed switch silently became a successful
+ * deactivation. The pre-switch snapshot is what lets the rollback put it back.
+ */
+TEST_F(TestAtomicActivation, a_restart_for_chained_mode_is_brought_back_by_the_rollback)
+{
+  cm_->set_atomic_activation(true);
+
+  // `child` writes the hardware and exports `child/target`; `parent` writes that reference interface,
+  // which is what makes activating `parent` require `child` to be in chained mode.
+  auto child = std::make_shared<SwitchableChainable>();
+  child->set_command_interface_configuration(individual({"joint2/velocity"}));
+  child->set_state_interface_configuration(individual({"joint2/position"}));
+  child->set_reference_interface_names({"target"});
+  auto parent = std::make_shared<SwitchableChainable>();
+  parent->set_command_interface_configuration(individual({"child/target"}));
+  parent->set_state_interface_configuration(individual({}));
+  // A chainable controller must export at least one reference interface (the manager refuses one that
+  // does not). Nothing consumes this one; only `child/target` matters for the restart below.
+  parent->set_reference_interface_names({"command"});
+  parent->set_fail_activate(true);
+
+  ASSERT_NE(
+    nullptr,
+    RunWithPump([&]() {return cm_->add_controller(child, "child", "switchable_chainable");}));
+  ASSERT_NE(
+    nullptr,
+    RunWithPump([&]() {return cm_->add_controller(parent, "parent", "switchable_chainable");}));
+  // Following controller first: it exports the reference interface its preceding controller writes.
+  ASSERT_EQ(Return::OK, RunWithPump([&]() {return cm_->configure_controller("child");}));
+  ASSERT_EQ(Return::OK, RunWithPump([&]() {return cm_->configure_controller("parent");}));
+
+  // `child` runs alone: ACTIVE and not chained to anything.
+  ASSERT_EQ(Return::OK, Switch({"child"}));
+  ASSERT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, child->get_state().id());
+  ASSERT_FALSE(child->is_in_chained_mode());
+
+  // Activating `parent` makes the manager restart `child` for the chained-mode change, and `parent`
+  // then fails. The rollback must leave `child` exactly as it was.
+  EXPECT_EQ(Return::ERROR, Switch({"parent"}));
+
+  EXPECT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, child->get_state().id())
+    << "a controller that ran before the switch must still run after the failed switch";
+  EXPECT_FALSE(child->is_in_chained_mode()) << "its pre-switch chained mode must be restored";
+  EXPECT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, parent->get_state().id());
+
+  // It really holds its command interface again: a fresh controller asking for the same port has to
+  // be refused, so the rollback re-claimed the interface instead of only flipping the lifecycle.
+  auto rival = AddController("rival", {"joint2/velocity"});
+  EXPECT_EQ(Return::ERROR, Switch({"rival"}));
+  EXPECT_FALSE(IsActive(rival));
+  EXPECT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, child->get_state().id());
 }

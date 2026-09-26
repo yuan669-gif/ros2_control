@@ -53,14 +53,40 @@ blocker 先占住 `joint1/position`，然后 `Switch({"first","conflict"})`（`c
 探针是真实跑出来的（改 `controller_manager.cpp` → `--cmake-target controller_manager` → 同一个测试二进制），
 所以这个用例**不是空转**：它精确地测出了缺失的那次硬件回滚。
 
-### 1.4 仍然不能声称
+### 1.4 chained-mode 重启的控制器（原"已知限制"，已修复）
 
-- **物理总线原子性**：这只保证"我们向硬件发出了回退请求并且硬件答应了"。真正的原子提交是总线/驱动器
-  的事，`prepare/perform` 契约本身在 Humble 里就是两段式，中间没有事务语义。
-- **chained-mode 重启无法回退**：一次 switch 可能因为 "切到 chained mode" 把一个**本来已 ACTIVE** 的
-  following controller 先 deactivate 再 activate（上游 `switch_controller()` 的 restart 逻辑）。它成功后会
-  出现在 `outcome.activated` 里，回滚会把它停在 INACTIVE 而不是原来的 ACTIVE。要正确处理需要区分
-  "本次新激活" 与 "为切 chained mode 而重启"，属于上游结构性行为，本轮**没有**动，记为已知限制（见 §6）。
+一次 switch 可能为了**切换 chained mode** 把一个**本来已 ACTIVE** 的 following controller 先 deactivate
+再 activate（上游 `switch_controller()` 的 restart 逻辑；`set_chained_mode()` 只允许在非 ACTIVE 时调用）。
+它成功后会出现在 `outcome.activated` 里，而"撤销本次激活"对它的正确含义**不是**"变回 INACTIVE"，而是
+"回到切换前的 ACTIVE + 切换前的 chained mode"。原实现只做前者，于是**一次失败的 switch 会顺带停掉一个
+本来在运行、且与失败无关的控制器**。
+
+修复：
+
+- `switch_controller()` 在改写请求列表**之前**记录每个控制器的**切换前快照**（`pre_switch_state_`：
+  名字 / 是否 ACTIVE / 是否 chained）；它由发布请求列表的同一个 release/acquire（`switch_params_.do_switch`）
+  发布给实时线程，`clear_requests()` 清空；
+- 回滚分三类处理：① 本次从 INACTIVE 激活的 → 逆序 deactivate + release + 硬件换回 + reference 撤回；
+  ② **切换前已 ACTIVE 的（restart）** → 停一次、恢复 `pre.chained`，再通过**普通激活路径**
+  （`activate_controllers_for(names)`，从 `activate_controllers()` 里抽出的同一段代码）重新激活，因此
+  lifecycle / command interface 重新 claim / chainable reference 发布全部与普通激活一致；
+  ③ 本次做过的**所有** chained-mode 切换都回退，包括**没有被激活**的 following controller（它可以只被切
+  chained mode 而不被启动）；
+- `ActivationOutcome::activated` 从"名字列表"改成每控制器一条记录（名字 + 本次 claim 的 command interface +
+  是否 chainable），因为硬件换回必须**排除**那些仍然 ACTIVE 的 restart 控制器；
+- restart 自己激活失败时（不在 `outcome.activated` 里）也会按 `pre_switch_state_ ∩ activate_request_` 被找回；
+  找不回来时记 `rollback_failed` 并明确报"这些控制器切换前在运行、现在停了"。
+
+验收用例 `a_restart_for_chained_mode_is_brought_back_by_the_rollback`：`child`（chainable，写硬件并导出
+`child/target`）单独激活 → `parent`（写 `child/target`，`on_activate` 故意失败）的激活必然要求 `child`
+切 chained mode，于是 `child` 被重启；`parent` 失败后断言 `child` 仍是 **ACTIVE**、`is_in_chained_mode()`
+回到 **false**，并且它**重新持有** `joint2/velocity`（另一个控制器再想 claim 同一端口必须被拒）。
+
+**改动前后对照（已实测）**：临时关掉 restart 恢复逻辑、只重建库 → 同一用例失败，
+`child` 状态是 `'\x2' (2 = INACTIVE)` 而期望 `'\x3' (3 = ACTIVE)`；恢复后 7/7 通过。
+
+仍然不能声称：这恢复的是**本次 switch** 触碰到的控制器；**用户显式请求的 deactivate** 不会被撤销
+（上游同样如此：deactivate 侧先执行且不参与 activation 的回滚），物理总线原子性仍然不在保证内。
 
 ---
 
@@ -186,7 +212,7 @@ factory（可加载、可 configure）。
 | 套件 | 结果 |
 |---|---|
 | `hierarchical_control` / `test_static_manifest` | 5/5（含新增 P2-1 用例） |
-| `test_atomic_activation` | 6/6（含新增 P1-1 用例 + 探针实测） |
+| `test_atomic_activation` | 7/7（含新增 P1-1 用例、chained-mode 重启恢复用例 + 两次探针实测） |
 | `test_staged_execution_group` | 7/7（含新增 P1-2 惰性用例） |
 | `test_two_phase_execution` | 24/24（含新增 P1-2 安装前提用例） |
 | `test_static_controller_registry` | 9/9（含新增 P2-2/P2-3 用例） |
@@ -224,6 +250,19 @@ factory（可加载、可 configure）。
 同一失败模式、同一量级的抖动，**改动前也复现** ⇒ 既有环境/用例脆弱性，与本轮改动无关。
 （对照实验后已 `git stash pop` 并重建，`test_atomic_activation` 复测 6/6。）
 
+### 另一个既有 flaky 用例（同样做了前后对照）
+
+`test_controllers_chaining_with_controller_manager` 断言精确的 `internal_counter`（每次 `update()` +1），
+而计数取决于 10 ms 睡线程在 switch 窗口内跑了几个周期，`IMPLEMENTATION_GUIDE.md` §12.4 #5 早已记录。
+
+| 版本 | 4 次单独运行 | 失败签名 |
+|---|---|---|
+| 改动前（`b079f07` 的库） | 3 通过 / 1 失败 | `internal_counter = 15`，期望 `14`（多跑一个 tick） |
+| 改动后 | 2 通过 / 2 失败 | 同一个断言、同样的 `15 vs 14` |
+
+同一失败模式、同一量级 ⇒ 既有计时抖动；本轮改动不在 `update()`/开关周期计数路径上（回滚只在
+`atomic_activation` 且激活失败时才跑，该用例从不打开它）。
+
 ### TSan
 
 本轮**没有**重跑完整 TSan（`build_tsan` 已为腾磁盘删除；脚本会在二进制缺失时自动重建）。
@@ -236,9 +275,9 @@ factory（可加载、可 configure）。
 ## 8. 仍然不能声称（累计）
 
 - 不能在 C++ 静态初始化阶段完成 ROS controller 的**完整初始化**；
-- atomic activation 回滚恢复了本次 switch 的 lifecycle、command interface claim、reference interface
-  发布和硬件 command mode，但**没有**恢复为切 chained mode 而重启的既有控制器（§1.4），也没有物理总线
-  原子性；
+- atomic activation 回滚恢复了本次 switch 的 lifecycle（含为切 chained mode 而被重启的既有控制器，
+  见 §1.4）、command interface claim、reference interface 发布、chained mode 和硬件 command mode；
+  它**不**撤销用户显式请求的 deactivate（上游顺序如此），也没有物理总线原子性；
 - 依赖库内部（rclcpp / lifecycle / hardware_interface / FastRTPS）的 TSan 结论仍然未知（未插桩）；
 - registry 的"运行期变更线程安全"仍然不成立：提供的是**封印后只读**，不是并发写；
 - 硬件总线的物理原子提交。

@@ -1036,6 +1036,9 @@ void ControllerManager::clear_requests()
   switch_params_.do_switch.store(false, std::memory_order_release);
   deactivate_request_.clear();
   activate_request_.clear();
+  // The pre-switch snapshot belongs to one switch request; the rollback is the only reader and it
+  // runs while the pass is in flight.
+  pre_switch_state_.clear();
   // Set these interfaces as unavailable when clearing requests to avoid leaving them in available
   // state without the controller being in active state
   for (const auto & controller_name : to_chained_mode_request_)
@@ -1167,6 +1170,21 @@ controller_interface::return_type ControllerManager::switch_controller(
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
 
   const std::vector<ControllerSpec> & controllers = rt_controllers_wrapper_.get_updated_list(guard);
+
+  // Record what every controller looks like BEFORE this switch rewrites the request lists. The
+  // rollback needs it to tell "this pass activated a controller" from "this pass restarted an
+  // already-active controller only to change its chained mode", and to know which chained mode to go
+  // back to. Taken here, before `propagate_deactivation_of_chained_mode()` and the restart loop below
+  // add entries to the lists.
+  pre_switch_state_.clear();
+  pre_switch_state_.reserve(controllers.size());
+  for (const auto & controller : controllers)
+  {
+    pre_switch_state_.push_back(
+      PreSwitchState{
+        controller.info.name, is_controller_active(*controller.c),
+        controller.c->is_in_chained_mode()});
+  }
 
   // if a preceding controller is deactivated, all first-level controllers should be switched 'from'
   // chained mode
@@ -1731,60 +1749,204 @@ void ControllerManager::rollback_activated_controllers(ActivationOutcome & outco
   RCLCPP_ERROR(
     get_logger(),
     "Atomic activation: %zu controller(s) were activated by this switch and at least one other "
-    "failed, so the activated ones are being deactivated again (nothing stays half-activated).",
+    "failed, so the ones this pass started are being undone (nothing stays half-activated).",
     outcome.activated.size());
 
+  // Two kinds of controllers are in `outcome.activated`, and "undo" means something different for
+  // each. A controller that was ALREADY ACTIVE before this switch can only be here because upstream
+  // restarted it to change its chained mode (`set_chained_mode()` is only allowed while inactive);
+  // undoing it means ACTIVE again with the old chained mode. A controller that was INACTIVE is undone
+  // by deactivating it. The distinction comes from the pre-switch snapshot, not from the request
+  // lists, which this pass has rewritten.
+  std::vector<std::string> restore_to_active;
+  std::vector<std::string> switched_back_interfaces;
   // Reverse activation order: in a chain the children were activated last, so they are released
   // first and no child is left holding a reference interface of an already-deactivated parent.
-  for (auto name_it = outcome.activated.rbegin(); name_it != outcome.activated.rend(); ++name_it)
+  for (auto entry_it = outcome.activated.rbegin(); entry_it != outcome.activated.rend(); ++entry_it)
   {
-    auto found_it = std::find_if(
+    const auto & entry = *entry_it;
+    const auto found_it = std::find_if(
       rt_controller_list.begin(), rt_controller_list.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, *name_it));
+      std::bind(controller_name_compare, std::placeholders::_1, entry.name));
     if (found_it == rt_controller_list.end())
     {
       RCLCPP_ERROR(
         get_logger(),
         "Atomic activation rollback: controller '%s' is not in the realtime controller list and "
         "can not be undone.",
-        name_it->c_str());
+        entry.name.c_str());
       outcome.rollback_failed = true;
       continue;
     }
-    auto controller = found_it->c;
-    if (!is_controller_active(*controller)) {continue;}
-    const auto new_state = controller->get_node()->deactivate();
-    controller->release_interfaces();
-    if (new_state.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+    const auto * pre = pre_switch_state_of(entry.name);
+    if (pre != nullptr && pre->active)
     {
-      RCLCPP_ERROR(
-        get_logger(),
-        "During the atomic-activation rollback, controller '%s' ended in state '%s', expected "
-        "Inactive. The controller may still be running.",
-        name_it->c_str(), new_state.label().c_str());
-      outcome.rollback_failed = true;
+      // Restarted, not newly started: it has to end ACTIVE again (handled below, after the chained
+      // modes are back). Its interfaces and its loan must NOT be released.
+      restore_to_active.push_back(entry.name);
+      continue;
+    }
+
+    auto controller = found_it->c;
+    if (is_controller_active(*controller))
+    {
+      const auto new_state = controller->get_node()->deactivate();
+      controller->release_interfaces();
+      if (new_state.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "During the atomic-activation rollback, controller '%s' ended in state '%s', expected "
+          "Inactive. The controller may still be running.",
+          entry.name.c_str(), new_state.label().c_str());
+        outcome.rollback_failed = true;
+      }
+    }
+
+    // Undo the chainable-controller publication for the controllers that are NOT running any more: a
+    // reference interface that stays available while its controller is INACTIVE is exactly the state
+    // `clear_requests()` exists to avoid, and it would let a following controller claim a reference
+    // into a controller that is not running.
+    if (entry.chainable)
+    {
+      resource_manager_->make_controller_reference_interfaces_unavailable(entry.name);
+    }
+    // Only the interfaces of controllers that end up NOT active are switched back out: a restarted
+    // controller stays started, so the hardware must keep its mode.
+    for (const auto & interface_name : entry.command_interfaces)
+    {
+      if (
+        std::find(
+          switched_back_interfaces.begin(), switched_back_interfaces.end(), interface_name) ==
+        switched_back_interfaces.end())
+      {
+        switched_back_interfaces.push_back(interface_name);
+      }
     }
   }
 
-  // Undo the chainable-controller publication: a reference interface that stays available while
-  // its controller is INACTIVE is exactly the state `clear_requests()` exists to avoid, and it
-  // would let a following controller claim a reference into a controller that is not running.
-  for (const auto & controller_name : outcome.activated_chainable)
+  // A restart whose own activation failed never reached `outcome.activated`, but it was ACTIVE
+  // before this switch, so it must be brought back too -- otherwise a failed switch silently stops a
+  // controller that had nothing to do with the failure.
+  for (const auto & controller_name : activate_request_)
   {
-    resource_manager_->make_controller_reference_interfaces_unavailable(controller_name);
+    const auto * pre = pre_switch_state_of(controller_name);
+    if (pre == nullptr || !pre->active) {continue;}
+    if (
+      std::find(restore_to_active.begin(), restore_to_active.end(), controller_name) ==
+      restore_to_active.end())
+    {
+      restore_to_active.push_back(controller_name);
+    }
   }
 
-  // Undo the hardware command-mode switch. `activate_controllers()` switched the hardware into
-  // these interfaces (and, on failure, switched only the FAILED controllers' interfaces back), so
-  // the interfaces of the controllers that DID activate are still switched in. Deactivating the
-  // controller only releases our loan; a hardware in exclusive mode would otherwise stay
-  // configured for a controller that no longer runs.
-  if (!outcome.activated_command_interfaces.empty())
+  // Revert every chained-mode switch this pass made, including for controllers it did NOT activate:
+  // a following controller can be moved to chained mode without being started, and `clear_requests()`
+  // (upstream's own failure path) equally reverts the reference-interface bookkeeping. Controllers
+  // that are ACTIVE still can not change their chained mode here; the restarts among them are
+  // stopped for exactly that reason in the loop below.
+  const auto revert_chained_mode = [this, &outcome, &rt_controller_list](
+                                     const std::string & controller_name)
   {
-    const bool prepared = resource_manager_->prepare_command_mode_switch(
-      {}, outcome.activated_command_interfaces);
-    const bool performed = resource_manager_->perform_command_mode_switch(
-      {}, outcome.activated_command_interfaces);
+    const auto * pre = pre_switch_state_of(controller_name);
+    if (pre == nullptr) {return;}
+    const auto found_it = std::find_if(
+      rt_controller_list.begin(), rt_controller_list.end(),
+      std::bind(controller_name_compare, std::placeholders::_1, controller_name));
+    if (found_it == rt_controller_list.end())
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Atomic activation rollback: can not restore the chained mode of unknown controller '%s'.",
+        controller_name.c_str());
+      outcome.rollback_failed = true;
+      return;
+    }
+    const auto controller = found_it->c;
+    if (controller->is_in_chained_mode() == pre->chained) {return;}
+    if (is_controller_active(*controller)) {return;}
+    switch_chained_mode({controller_name}, pre->chained);
+  };
+  for (const auto & controller_name : to_chained_mode_request_)
+  {
+    revert_chained_mode(controller_name);
+  }
+  for (const auto & controller_name : from_chained_mode_request_)
+  {
+    revert_chained_mode(controller_name);
+  }
+
+  // Bring the restarted controllers back. They are ACTIVE right now, and their chained mode is the
+  // one this pass wanted -- so they are stopped once more, put back to the pre-switch chained mode,
+  // and started again through the ordinary activation path (which re-claims the interfaces, restores
+  // the lifecycle and, for a chainable controller, republishes its reference interfaces).
+  if (!restore_to_active.empty())
+  {
+    std::vector<std::string> to_reactivate;
+    for (const auto & controller_name : restore_to_active)
+    {
+      const auto * pre = pre_switch_state_of(controller_name);
+      const auto found_it = std::find_if(
+        rt_controller_list.begin(), rt_controller_list.end(),
+        std::bind(controller_name_compare, std::placeholders::_1, controller_name));
+      if (found_it == rt_controller_list.end() || pre == nullptr)
+      {
+        outcome.rollback_failed = true;
+        continue;
+      }
+      const auto controller = found_it->c;
+      if (is_controller_active(*controller))
+      {
+        if (controller->is_in_chained_mode() == pre->chained)
+        {
+          continue;  // already where it was: leave it running
+        }
+        const auto stopped = controller->get_node()->deactivate();
+        controller->release_interfaces();
+        if (stopped.id() != lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+        {
+          RCLCPP_ERROR(
+            get_logger(),
+            "Atomic activation rollback: controller '%s' could not be stopped to restore its "
+            "chained mode and ended in state '%s'.",
+            controller_name.c_str(), stopped.label().c_str());
+          outcome.rollback_failed = true;
+          continue;
+        }
+      }
+      if (controller->is_in_chained_mode() != pre->chained)
+      {
+        switch_chained_mode({controller_name}, pre->chained);
+      }
+      to_reactivate.push_back(controller_name);
+    }
+    if (!to_reactivate.empty())
+    {
+      const auto restored = activate_controllers_for(to_reactivate);
+      if (restored.any_failure)
+      {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Atomic activation rollback: %zu controller(s) that this switch had restarted to change "
+          "their chained mode could not be brought back to ACTIVE. They were running before the "
+          "switch and are now stopped.",
+          to_reactivate.size());
+        outcome.rollback_failed = true;
+      }
+    }
+  }
+
+  // Undo the hardware command-mode switch. The activation pass switched the hardware into the
+  // interfaces of the controllers it activated (and, on failure, switched only the FAILED
+  // controllers' interfaces back), so the interfaces of the controllers that end up INACTIVE are
+  // still switched in. Deactivating a controller only releases our loan; a hardware in exclusive mode
+  // would otherwise stay configured for a controller that no longer runs.
+  if (!switched_back_interfaces.empty())
+  {
+    const bool prepared =
+      resource_manager_->prepare_command_mode_switch({}, switched_back_interfaces);
+    const bool performed =
+      resource_manager_->perform_command_mode_switch({}, switched_back_interfaces);
     if (!prepared || !performed)
     {
       RCLCPP_ERROR(
@@ -1792,8 +1954,7 @@ void ControllerManager::rollback_activated_controllers(ActivationOutcome & outco
         "Atomic activation rollback: the hardware refused to switch %zu interface(s) back out of "
         "the rolled-back controllers' mode (prepare %s, perform %s). Those interfaces may still be "
         "configured for controllers that are no longer active.",
-        outcome.activated_command_interfaces.size(), prepared ? "OK" : "FAILED",
-        performed ? "OK" : "FAILED");
+        switched_back_interfaces.size(), prepared ? "OK" : "FAILED", performed ? "OK" : "FAILED");
       outcome.rollback_failed = true;
     }
   }
@@ -1891,11 +2052,20 @@ void ControllerManager::switch_chained_mode(
 
 ControllerManager::ActivationOutcome ControllerManager::activate_controllers()
 {
+  auto outcome = activate_controllers_for(activate_request_);
+  // All controllers activated, switching done
+  switch_params_.do_switch.store(false, std::memory_order_release);
+  return outcome;
+}
+
+ControllerManager::ActivationOutcome ControllerManager::activate_controllers_for(
+  const std::vector<std::string> & names)
+{
   ActivationOutcome outcome;
   std::vector<ControllerSpec> & rt_controller_list =
     rt_controllers_wrapper_.update_and_get_used_by_rt_list();
   std::vector<std::string> failed_controllers_command_interfaces;
-  for (const auto & controller_name : activate_request_)
+  for (const auto & controller_name : names)
   {
     auto found_it = std::find_if(
       rt_controller_list.begin(), rt_controller_list.end(),
@@ -2014,27 +2184,13 @@ ControllerManager::ActivationOutcome ControllerManager::activate_controllers()
         command_interface_names.end());
       continue;
     }
-    outcome.activated.push_back(controller_name);
-    // Record what this pass switched the hardware INTO, so a rollback can switch it back out.
-    // Deduplicated: two controllers can never claim the same command interface, but an "ALL"
-    // configuration repeats the available list and the hardware must not be told twice.
-    for (const auto & interface_name : command_interface_names)
-    {
-      if (
-        std::find(
-          outcome.activated_command_interfaces.begin(),
-          outcome.activated_command_interfaces.end(),
-          interface_name) == outcome.activated_command_interfaces.end())
-      {
-        outcome.activated_command_interfaces.push_back(interface_name);
-      }
-    }
+    outcome.activated.push_back(ActivationOutcome::Activated{
+      controller_name, command_interface_names, controller->is_chainable()});
 
     // if it is a chainable controller, make the reference interfaces available on activation
     if (controller->is_chainable())
     {
       resource_manager_->make_controller_reference_interfaces_available(controller_name);
-      outcome.activated_chainable.push_back(controller_name);
     }
   }
   // Now prepare and perform the stop interface switching as this is needed for exclusive
@@ -2049,8 +2205,6 @@ ControllerManager::ActivationOutcome ControllerManager::activate_controllers()
       "Error switching back the interfaces in the hardware when the controller activation "
       "failed.");
   }
-  // All controllers activated, switching done
-  switch_params_.do_switch.store(false, std::memory_order_release);
   return outcome;
 }
 
@@ -2058,6 +2212,15 @@ ControllerManager::ActivationOutcome ControllerManager::activate_controllers_asa
 {
   //  https://github.com/ros-controls/ros2_control/issues/263
   return activate_controllers();
+}
+
+const ControllerManager::PreSwitchState * ControllerManager::pre_switch_state_of(
+  const std::string & name) const
+{
+  const auto it = std::find_if(
+    pre_switch_state_.begin(), pre_switch_state_.end(),
+    [&name](const PreSwitchState & state) {return state.name == name;});
+  return it == pre_switch_state_.end() ? nullptr : &*it;
 }
 
 void ControllerManager::list_controllers_srv_cb(

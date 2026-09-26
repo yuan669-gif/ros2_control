@@ -446,34 +446,51 @@ protected:
    */
   struct ActivationOutcome
   {
+    /// One controller this pass activated, with what undoing (or restoring) it needs.
+    struct Activated
+    {
+      std::string name;
+      /// Command interfaces this pass switched the hardware INTO for this controller. Interface
+      /// names, not indices: a later controller list can re-map a name's position, so an index would
+      /// not survive the switch it describes.
+      std::vector<std::string> command_interfaces;
+      /// Whether this pass published the controller's reference interfaces (it is chainable).
+      bool chainable = false;
+    };
     bool any_failure = false;
-    /// Names activated BY THIS PASS, in the order they became active.
-    std::vector<std::string> activated;
-    /// Command interfaces claimed by the controllers in `activated` (union, no duplicates).
-    /**
-     * This pass switched the hardware INTO these interfaces; the rollback has to switch it back OUT
-     * of them. Interface names, not indices: the same physical port can be re-mapped by a later
-     * controller list, so an index would not survive the switch it describes.
-     */
-    std::vector<std::string> activated_command_interfaces;
-    /// Chainable controllers in `activated` whose reference interfaces this pass published.
-    std::vector<std::string> activated_chainable;
+    /// Controllers activated BY THIS PASS, in the order they became active.
+    std::vector<Activated> activated;
     /// Whether a rollback ran at all (for tests and for an honest final report).
     bool rollback_performed = false;
     /// Whether any step of the rollback failed, i.e. the system may still be half-undone.
     bool rollback_failed = false;
   };
 
-  /// Deactivate the controllers this pass activated and undo the side effects it had on hardware.
+  /// Undo what this switch's activation pass did (atomic activation only).
   /**
-   * Runs only for atomic activation (`set_atomic_activation(true)`). Controllers are undone in
-   * reverse activation order, so a child that lent the parent's reference interfaces is released
-   * before its parent. `outcome.rollback_*` is filled in, and a failed step is logged as a rollback
-   * failure rather than as a failed activation: the two need different reactions.
+   * Runs only for atomic activation (`set_atomic_activation(true)`). Three groups are treated
+   * differently, because "undo" does not mean the same thing for all of them:
+   *
+   *   * controllers this pass activated from INACTIVE are deactivated and released again, in reverse
+   *     activation order, and their hardware command mode and reference interfaces are undone;
+   *   * controllers that were ALREADY ACTIVE and were restarted only to change their chained mode
+   *     (upstream restarts them because `set_chained_mode()` is only allowed while inactive) are
+   *     brought back to ACTIVE with their pre-switch chained mode -- leaving them INACTIVE would turn
+   *     a failed switch into a successful deactivation of an unrelated controller;
+   *   * every chained-mode switch this pass made is reverted, including for controllers the pass did
+   *     NOT activate (a following controller can be switched to chained mode without being started).
+   *
+   * `outcome.rollback_*` is filled in, and a failed step is logged as a rollback failure rather than
+   * as a failed activation: the two need different reactions.
    */
   void rollback_activated_controllers(ActivationOutcome & outcome);
 
   ActivationOutcome activate_controllers();
+
+  /// Activate exactly `names` (in the given order, by the same rules as the ordinary pass). Used by
+  /// `activate_controllers()` and by the rollback, which brings restarted controllers back through
+  /// the ordinary path instead of re-implementing interface claiming.
+  ActivationOutcome activate_controllers_for(const std::vector<std::string> & names);
 
   CONTROLLER_MANAGER_PUBLIC
   ActivationOutcome activate_controllers_asap();
@@ -780,6 +797,28 @@ private:
   /// Control cycles currently inside `update()` (0 or 1 in practice). Written by the control loop,
   /// read by the configuration setters to refuse installing a path mid-cycle.
   std::atomic<int> cycles_in_flight_{0};
+
+  /// Lifecycle and chained mode of every loaded controller BEFORE the current switch was requested.
+  /**
+   * Captured by `switch_controller()` (non-real-time thread) before it rewrites the request lists,
+   * read by the rollback (real-time thread). It is what makes "undo" mean the right thing per
+   * controller: a controller that was already ACTIVE and is restarted only to change its chained mode
+   * must end ACTIVE again, while one activated from INACTIVE must end INACTIVE.
+   *
+   * Published to the real-time thread by the same release/acquire pair on `switch_params_.do_switch`
+   * that publishes the request lists, so it is immutable while the pass runs. Cleared by
+   * `clear_requests()`.
+   */
+  struct PreSwitchState
+  {
+    std::string name;
+    bool active = false;
+    bool chained = false;
+  };
+  std::vector<PreSwitchState> pre_switch_state_;
+
+  /// The recorded pre-switch state of `name`, or nullptr when this switch did not record it.
+  const PreSwitchState * pre_switch_state_of(const std::string & name) const;
 
   /// RAII marker so every `return` inside `update()` clears the in-flight count.
   class CycleGuard

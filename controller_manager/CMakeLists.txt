@@ -178,6 +178,7 @@ if(BUILD_TESTING)
   target_include_directories(test_atomic_activation PRIVATE include test)
   target_link_libraries(test_atomic_activation
     controller_manager
+    test_chainable_controller
     ros2_control_test_assets::ros2_control_test_assets
   )
 

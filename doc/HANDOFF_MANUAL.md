@@ -724,7 +724,9 @@ chainable 子节点会被上游排在父节点之前，使两条 pass 同向走�
   deactivate + release、撤销本次发布的 reference interface，并对其 command interface 执行
   `prepare/perform_command_mode_switch({}, ifaces)`（评审 P1-1；实测 mock 模式计数器 +202，关掉该步的探针为
   +101）；**安装 staged group 现在要求它已开启**，且部分成员时执行组完全惰性并被点名告警（评审 P1-2）。
-  但作用域仍仅限"本次 switch 激活的"控制器：为切 chained mode 而重启的既有控制器不会被恢复到原 ACTIVE，
+  撤销是逐项的：本次从 INACTIVE 激活的逆序停用并释放，为切 chained mode 而被**重启的既有控制器会被恢复为
+  ACTIVE** 并回到切换前的 chained mode（判据是切换前的快照，实测：关掉该逻辑会让它停在 INACTIVE），本次做过的
+  所有 chained-mode 切换都会回退。作用域仍仅限**本次 switch 触碰到的**控制器：用户显式请求的 deactivate 不撤销，
   物理总线原子性也不在保证内。
 - ❌ **编译期控制器在静态初始化期完成初始化**（2026-09-26 新增）：本轮只做到"**编译期描述** +
   按类型字符串可加载（工厂注册，与 pluginlib 共用生命周期与准入）"；node、参数、
