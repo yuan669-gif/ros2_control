@@ -29,6 +29,7 @@
 #include "controller_interface/controller_interface.hpp"
 #include "controller_interface/controller_interface_base.hpp"
 
+#include "controller_manager/static_controller_registry.hpp"
 #include "controller_manager/controller_spec.hpp"
 #include "controller_manager/staged_execution_group.hpp"
 #include "hierarchical_control/two_phase_controller_interface.hpp"
@@ -103,6 +104,27 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   controller_interface::ControllerInterfaceBaseSharedPtr load_controller(
     const std::string & controller_name, const std::string & controller_type);
+
+  /// Install the registry of controllers compiled into this binary.
+  /**
+   * `load_controller()` consults it BEFORE pluginlib, and a type it finds is created by its factory
+   * and then follows the identical path (`add_controller_impl()`), so lifecycle, interface claiming
+   * and every admission check are shared with pluginlib controllers. Installing a registry is
+   * optional; without one the behaviour is exactly as before.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  void set_static_controller_registry(StaticControllerRegistry::SharedPtr registry);
+
+  CONTROLLER_MANAGER_PUBLIC
+  std::shared_ptr<StaticControllerRegistry> static_controller_registry() const;
+
+  /// Convenience: register one compiled-in type, installing a registry on first use.
+  template <typename ControllerT>
+  void register_static_controller_type(const std::string & type)
+  {
+    if (!static_controller_registry_) {static_controller_registry_ = std::make_shared<StaticControllerRegistry>();}
+    static_controller_registry_->add<ControllerT>(type);
+  }
 
   /// load_controller loads a controller by name, the type must be defined in the parameter server.
   /**
@@ -374,6 +396,8 @@ protected:
   std::vector<std::vector<std::string>> chained_controllers_configuration_;
 
   std::unique_ptr<hardware_interface::ResourceManager> resource_manager_;
+  /// Controllers compiled into this binary, addressable by type string (optional).
+  std::shared_ptr<StaticControllerRegistry> static_controller_registry_;
 
 private:
   std::vector<std::string> get_controller_names();

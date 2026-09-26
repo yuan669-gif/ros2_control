@@ -28,6 +28,7 @@ endforeach()
 
 add_library(controller_manager SHARED
   src/controller_manager.cpp
+  src/static_controller_registry.cpp
 )
 target_compile_features(controller_manager PUBLIC cxx_std_17)
 target_include_directories(controller_manager PUBLIC
@@ -157,6 +158,19 @@ if(BUILD_TESTING)
     controller_manager
     test_controller
     test_controller_failed_init
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+
+  # Controllers compiled into the binary, reachable through the ordinary load path.
+  ament_add_gmock(test_static_controller_registry
+    test/test_static_controller_registry.cpp
+  )
+  target_include_directories(test_static_controller_registry PRIVATE include test)
+  target_link_libraries(test_static_controller_registry
+    controller_manager
+    test_controller
+    test_composite_library
+    test_staged_controller
     ros2_control_test_assets::ros2_control_test_assets
   )
 

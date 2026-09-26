@@ -628,53 +628,85 @@ controller_interface::ControllerInterfaceBaseSharedPtr ControllerManager::load_c
 {
   RCLCPP_INFO(get_logger(), "Loading controller '%s'", controller_name.c_str());
 
-  if (
-    !loader_->isClassAvailable(controller_type) &&
-    !chainable_loader_->isClassAvailable(controller_type))
-  {
-    RCLCPP_ERROR(
-      get_logger(), "Loader for controller '%s' (type '%s') not found.", controller_name.c_str(),
-      controller_type.c_str());
-    RCLCPP_INFO(get_logger(), "Available classes:");
-    for (const auto & available_class : loader_->getDeclaredClasses())
-    {
-      RCLCPP_INFO(get_logger(), "  %s", available_class.c_str());
-    }
-    for (const auto & available_class : chainable_loader_->getDeclaredClasses())
-    {
-      RCLCPP_INFO(get_logger(), "  %s", available_class.c_str());
-    }
-    return nullptr;
-  }
-  RCLCPP_DEBUG(get_logger(), "Loader for controller '%s' found.", controller_name.c_str());
-
   controller_interface::ControllerInterfaceBaseSharedPtr controller;
 
-  try
+  // A type compiled into the binary is created by its factory and then follows the SAME path as a
+  // plugin (`add_controller_impl` below): same controller list, same lifecycle, same interface
+  // claiming, same admission checks. The registry is consulted first so a compiled-in type can
+  // override a plugin with the same name deliberately, and so a configuration that names it works
+  // without changing anything else.
+  const bool compiled_in =
+    static_controller_registry_ && static_controller_registry_->has(controller_type);
+  if (compiled_in)
   {
-    if (loader_->isClassAvailable(controller_type))
-    {
-      controller = loader_->createSharedInstance(controller_type);
-    }
-    if (chainable_loader_->isClassAvailable(controller_type))
-    {
-      controller = chainable_loader_->createSharedInstance(controller_type);
-    }
-  }
-  catch (const std::exception & e)
-  {
-    RCLCPP_ERROR(
-      get_logger(), "Caught exception while loading the controller '%s' of plugin type '%s':\n%s",
-      controller_name.c_str(), controller_type.c_str(), e.what());
-    return nullptr;
-  }
-  catch (...)
-  {
-    RCLCPP_ERROR(
-      get_logger(),
-      "Caught unknown exception while loading the controller '%s' of plugin type '%s'",
+    RCLCPP_INFO(
+      get_logger(), "Controller '%s' (type '%s') comes from the compiled-in registry.",
       controller_name.c_str(), controller_type.c_str());
-    throw;
+    controller = static_controller_registry_->create(controller_type);
+    if (!controller)
+    {
+      RCLCPP_ERROR(
+        get_logger(), "The compiled-in factory for type '%s' returned no controller.",
+        controller_type.c_str());
+      return nullptr;
+    }
+  }
+  else
+  {
+    if (
+      !loader_->isClassAvailable(controller_type) &&
+      !chainable_loader_->isClassAvailable(controller_type))
+    {
+      RCLCPP_ERROR(
+        get_logger(), "Loader for controller '%s' (type '%s') not found.", controller_name.c_str(),
+        controller_type.c_str());
+      RCLCPP_INFO(get_logger(), "Available plugin classes:");
+      for (const auto & available_class : loader_->getDeclaredClasses())
+      {
+        RCLCPP_INFO(get_logger(), "  %s", available_class.c_str());
+      }
+      for (const auto & available_class : chainable_loader_->getDeclaredClasses())
+      {
+        RCLCPP_INFO(get_logger(), "  %s", available_class.c_str());
+      }
+      if (static_controller_registry_)
+      {
+        RCLCPP_INFO(get_logger(), "Available compiled-in types:");
+        for (const auto & available_type : static_controller_registry_->types())
+        {
+          RCLCPP_INFO(get_logger(), "  %s", available_type.c_str());
+        }
+      }
+      return nullptr;
+    }
+    RCLCPP_DEBUG(get_logger(), "Loader for controller '%s' found.", controller_name.c_str());
+
+    try
+    {
+      if (loader_->isClassAvailable(controller_type))
+      {
+        controller = loader_->createSharedInstance(controller_type);
+      }
+      if (chainable_loader_->isClassAvailable(controller_type))
+      {
+        controller = chainable_loader_->createSharedInstance(controller_type);
+      }
+    }
+    catch (const std::exception & e)
+    {
+      RCLCPP_ERROR(
+        get_logger(), "Caught exception while loading the controller '%s' of plugin type '%s':\n%s",
+        controller_name.c_str(), controller_type.c_str(), e.what());
+      return nullptr;
+    }
+    catch (...)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Caught unknown exception while loading the controller '%s' of plugin type '%s'",
+        controller_name.c_str(), controller_type.c_str());
+      throw;
+    }
   }
 
   ControllerSpec controller_spec;
@@ -2731,6 +2763,16 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
 }
 
 bool ControllerManager::two_phase_execution() const {return two_phase_enabled_;}
+
+void ControllerManager::set_static_controller_registry(StaticControllerRegistry::SharedPtr registry)
+{
+  static_controller_registry_ = std::move(registry);
+}
+
+std::shared_ptr<StaticControllerRegistry> ControllerManager::static_controller_registry() const
+{
+  return static_controller_registry_;
+}
 
 controller_interface::return_type ControllerManager::set_staged_execution_group(
   const std::vector<std::string> & controller_names, std::int64_t max_age_ns)

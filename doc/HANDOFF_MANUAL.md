@@ -721,6 +721,7 @@ chainable 子节点会被上游排在父节点之前，使两条 pass 同向走�
 | `doc/REVIEW_REQUIREMENTS_2026-09-24.md` | 第二份评审原文（A–E） |
 | **`doc/COMPILETIME_CONTROLLER_DESIGN_2026-09-26.md`** | **“编译期控制器”设计边界（用户提出、ChatGPT 起草）**：明确不能把控制器做成静态初始化期的全局对象，改为“编译期描述 + configure/activate 绑定” |
 | **`doc/COMPILETIME_CONTROLLER_RESPONSE_2026-09-26.md`** | **对该设计的调研与本轮改造**：原始想法为何不可行、文档三处需收紧（span 不是编译期形态 / 漏了硬件 state 接口 / 全局资源索引耦合错层）、已落地的 `static_manifest.hpp` + 插件改造 + 三条验收测试，以及仍未做的部分 |
+| `controller_manager/include/controller_manager/static_controller_registry.hpp` | **编译进二进制的控制器注册表**：`add<ControllerT>(type)` / `add_factory(...)` 登记**工厂**（每次 load 造新实例，保证多实例隔离），`load_controller` 先查它再查 pluginlib，之后走同一个 `add_controller_impl`（同一生命周期与准入）。见 `COMPILETIME_CONTROLLER_RESPONSE_2026-09-26.md` §3.4 |
 | `doc/REVIEW_HUMBLE_WORK_2026-09-23.md` | 外部评审原文（R1–R11） |
 | `doc/TWO_PASS_VS_SINGLE_PASS.md` | 两趟 vs 单趟的阶跃响应定量证明 |
 | `doc/PROJECT_REPORT_2026-09-21.md` | 项目全貌报告（给导师/新读者看）。⚠ **第 3 节「接口连接是依赖来源」的叙事已过时**，需按本文第 1.4 / 2 节修订 |

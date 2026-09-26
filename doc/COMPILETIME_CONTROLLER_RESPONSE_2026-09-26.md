@@ -151,11 +151,47 @@ struct TypedPorts { ... using hardware_state = HardwareState; ... };
 
 ---
 
+## 3.4 编译进二进制的控制器与 pluginlib 控制器走同一条路径（本轮新增，文档 §4.2/§7.4）
+
+**问题**：`load_controller(name, type)` 只通过 pluginlib 解析 `type`，所以**编译进可执行文件的控制器
+无法用类型字符串寻址**——YAML 的 `type:`、spawner、以及 `load_controller(name)` 读 `<name>.type`
+这条路都走不到它。`add_controller(instance, name, type)` 虽然能塞进实例，但那是绕过配置路径的旁路。
+
+**本轮实现**（`controller_manager/include/controller_manager/static_controller_registry.hpp`
++ `src/static_controller_registry.cpp`）：
+
+- `StaticControllerRegistry`：`add<ControllerT>(type)` 记录一个**工厂**（不是单例实例）；
+  `add_factory(type, factory)` 覆盖"构造需要参数"的情形；`create(type)` 每次返回**新实例**；
+  另外暴露 `types()`、`has_manifest()`、`command_interfaces()`、`state_interfaces()`
+  （类型声明了 `ControllerT::manifest` 时给出其编译期描述，**不需要构造**）；
+- `ControllerManager::set_static_controller_registry(reg)`（可选安装，不装则行为完全不变）
+  与 `register_static_controller_type<ControllerT>(type)` 便捷入口；
+- `load_controller(name, type)` **先查注册表**，命中就用工厂造实例，然后**走同一个
+  `add_controller_impl()`**——同一份控制器列表、同一套 `configure`/`activate` 生命周期、
+  同一套接口 claim、同一套准入检查（staged 成员、两趟准入、跨模式边、实例唯一性）。
+  类型字符串两边都没找到时，错误日志会同时列出 pluginlib 类**和**注册的类型。
+- 注册表是**工厂**而不是实例表，这一条直接服务于文档 §7.3 的隔离要求：
+  两次 `load_controller` 得到两个独立对象、两个 ROS node、两条独立生命周期。
+
+**测试**（`controller_manager/test/test_static_controller_registry.cpp`，6 用例）：
+
+| 用例 | 证明 |
+|---|---|
+| `a_compiled_in_type_is_loadable_by_type_string` | 注册类型可被类型字符串加载；未注册类型仍然被拒；`types()` 可枚举 |
+| `two_loads_are_two_independent_instances` | 两个工厂变体（joint2/joint3）各自加载、同时激活，各自 `update_phase`/`handle_phase` 每周期一次，且**各自写入自己的值**（bias+自身计数），互不干扰——这就是"不能做成全局变量"的机器化证据 |
+| `a_compiled_in_controller_runs_through_the_two_phase_passes` | 编译期控制器经 `load_controller` 进入两趟 pass，每周期每阶段一次，且**从不被原生 `update()` 调用** |
+| `a_non_conforming_compiled_in_controller_is_refused` | 频率不匹配的编译期控制器被**同一套准入检查**拒绝，拒绝理由与 plugin 控制器一致 |
+| `the_same_class_behaves_identically_through_both_routes` | **同一个 C++ 类**（`test_controller::TestController`）分别经 pluginlib 与注册表加载到同一个 manager：同样 configure、同样激活、同样接口声明——这就是"一个生命周期适配器、一个准入检查器"的证据 |
+| `a_registered_type_exposes_its_compile_time_description` | 带 manifest 的编译期类型可**不构造**就枚举 command/state 需求（`{"joint2/velocity","joint3/velocity"}` / `{"joint2/position","joint3/position"}`），且仍是普通可加载类型 |
+
+**边界（如实）**：注册表解决的是"**按类型字符串可达**"，不是"静态初始化期完成初始化"；
+编译期控制器仍然要有 node、参数、`configure`/`activate`，仍然在 manager 的同一套生命周期里。
+`add_factory` 的工厂在 `load_controller` 时执行（非实时线程），不得在实时路径分配。
+
 ## 4. 仍未做（与文档 §7/§8 对齐后的诚实清单）
 
-1. **静态 controller 与 pluginlib controller 在同一 admission/lifecycle 适配器内的混合**（文档 §4.2/§7.4）：
-   本轮只把**描述**静态化（manifest + 生成的接口清单 + 固定存储），并没有给 manager 增加"编译进二进制的
-   static provider"这条注册路径；那需要动 `ControllerManager` 的加载与 lifecycle 适配层。
+1. ~~静态 controller 与 pluginlib controller 在同一 admission/lifecycle 适配器内的混合~~（文档 §4.2/§7.4）：
+   **本轮已做**，见 §3.4。仍是**工厂注册**（每次 `load_controller` 造新实例），不是把控制器做成全局对象。
 2. **manager 侧的 activate 事务/整组回滚**（文档 §7.2 的 manager 半边）：见 §1.3。
 3. **统一 generation 发布协议**（文档 §6、评审 D 的另一半）：首版仍是"控制循环停止时配置"。
 4. **运行中改变拓扑/manifest 被拒**（文档 §7.5）：manifest 是类型，运行期本来就无法改；
