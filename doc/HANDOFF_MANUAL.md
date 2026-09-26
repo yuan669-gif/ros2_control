@@ -319,6 +319,24 @@ controller_interface::return_type set_two_phase_execution(bool);        // line 
 bool two_phase_execution() const;                                       // line 163
 ```
 
+**2026-09-26 新增/变化的 API**：
+
+```cpp
+// 编译进二进制的控制器（按类型字符串可加载，与 pluginlib 共用同一生命周期与准入）
+void set_static_controller_registry(StaticControllerRegistry::SharedPtr);
+std::shared_ptr<StaticControllerRegistry> static_controller_registry() const;
+template <typename ControllerT> void register_static_controller_type(const std::string & type);
+
+// 统一 generation：模式 + 两趟成员 + staged 计划一次发布；id 是"接受的变更 +1、被拒 +0"的契约
+std::uint64_t execution_generation() const noexcept;
+
+// 周期在飞时**安装/扩展**执行路径一律拒绝（移除始终允许）
+bool control_loop_busy() const noexcept;
+
+// 激活整组回滚（默认关闭，保留上游尽力而为语义）
+void set_atomic_activation(bool);   bool atomic_activation() const;
+```
+
 `set_two_phase_execution(true)` **会拒绝**（返回 `ERROR`，状态不变）当存在实现
 `TwoPhaseControllerInterface` 的控制器①已是当前 staged group 成员，或②声明了
 `!= 0 && != 管理器频率` 的 `update_rate`。`set_staged_execution_group()` 做反方向镜像拒绝。
@@ -326,7 +344,19 @@ bool two_phase_execution() const;                                       // line 
 （`controller_manager.cpp:2400–2416`），重叠或降频会被静默破坏。详见
 `doc/REVIEW_RESPONSE_2026-09-23.md` §R7。
 
-私有成员：`staged_group_`(536，`mutable`，原子发布)、`no_two_phase`(541)、
+**配置时机（2026-09-26 起为强制规则，不再只是文档约束）**：模式/成员/计划已经是一个
+generation（一次 `atomic_store`），但**控制器列表**仍是上游独立发布的双缓冲，而"安装执行路径"
+的准入判定是对着那份列表做的。因此 `set_two_phase_execution(true)` 与
+`set_staged_execution_group(...)` 在 `control_loop_busy()` 为真时**返回 ERROR 且不发布任何东西**；
+`set_two_phase_execution(false)` 与 `clear_staged_execution_group()` **始终允许**
+（在飞周期持有自己的 generation 快照，会用开始时的状态跑完）。
+用 `execution_generation()` 可验证"被拒 = 没变"。详见
+`doc/REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md` §D.2–D.4。
+
+私有成员（2026-09-26 起）：`generation_`（`shared_ptr<const ExecutionGeneration>`，**唯一**的执行状态发布点：
+模式 + 两趟成员 + staged 计划，一次 `atomic_store`）、`cycles_in_flight_`（周期在飞计数）、
+`atomic_activation_`；旧的 `staged_group_` / `two_phase_enabled_` / `two_phase_entries_` 三份独立发布已删除。
+`no_two_phase`(541)、
 `struct TwoPhaseEntry`(542)、`enum class TwoPhaseAdmission`(548)、
 `two_phase_enabled_`、`two_phase_entries_`(559，`shared_ptr<const vector>`，原子发布)。
 成员集**只在非实时线程重建**，`update()` 每周期一次 `std::atomic_load` 只读。
@@ -686,6 +716,14 @@ chainable 子节点会被上游排在父节点之前，使两条 pass 同向走�
   命令趟父先子后且直写 command handle，后段失败时前段已生效（`two_phase_mode_has_no_group_commit`）。
 - ❌ **本项目"比 LET 更好"**（2026-09-24 新增）：LET 用全局逻辑时刻按定义解决同一问题；
   本项目只是不需要时基/双缓冲、不增加周期延迟，代价是要求可分解阶段与无环层次。
+- ❌ **运行中任意时刻都能安全重配**（2026-09-26 新增）：模式/成员/计划是一个 generation，
+  但**控制器列表**仍是上游独立发布；因此**安装**执行路径在周期在飞时被拒绝（`control_loop_busy()`），
+  只有**移除**随时可以。要支持任意时刻安装，需要把列表也纳入 generation（未做）。
+- ❌ **激活是事务性的**（2026-09-26 新增）：上游语义是**尽力而为**（失败者跳过、成功者保持激活），
+  我们的整组回滚是**默认关闭**的可选行为 `set_atomic_activation(true)`；默认配置下部分激活仍然存在。
+- ❌ **编译期控制器在静态初始化期完成初始化**（2026-09-26 新增）：本轮只做到"**编译期描述** +
+  按类型字符串可加载（工厂注册，与 pluginlib 共用生命周期与准入）"；node、参数、
+  `configure`/`activate` 与 loan 仍在运行期。
 - ❌ **调度能力是改 `ControllerManager` 的理由**（2026-09-24 新增）：
   通用 composite 库宿主（单插件 + `create_library()`）复用同一内核且**更快**，
   管理器集成的独立价值在**逐控制器生命周期、局部激活、原生接口参与、工具可见性、故障隔离**
