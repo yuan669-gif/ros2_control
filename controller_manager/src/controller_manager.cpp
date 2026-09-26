@@ -2865,6 +2865,19 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
       return controller_interface::return_type::ERROR;
     }
 
+    // Installing a path while a cycle is in flight is refused: the admission decision above was
+    // taken against the controller list, whose publication is upstream's and is not part of the
+    // generation. Removing a path (the `!enabled` branch) stays allowed.
+    if (control_loop_busy())
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Refusing to enable two-phase execution while a control cycle is in flight: the member "
+        "admission decision is taken against the controller list, which is published separately "
+        "from the execution generation. Retry while the control loop is stopped.");
+      return controller_interface::return_type::ERROR;
+    }
+
     // Mode and members in ONE store, so no cycle can observe "enabled but no entries" -- the window
     // the previous publish-then-set order could only narrow, not remove.
     publish_generation(
@@ -2888,6 +2901,11 @@ void ControllerManager::set_atomic_activation(bool enabled)
 bool ControllerManager::atomic_activation() const
 {
   return atomic_activation_.load(std::memory_order_relaxed);
+}
+
+bool ControllerManager::control_loop_busy() const noexcept
+{
+  return cycles_in_flight_.load(std::memory_order_relaxed) != 0;
 }
 
 bool ControllerManager::two_phase_execution() const
@@ -2977,6 +2995,18 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
     members.push_back(std::move(member));
   }
 
+  // Same rule as set_two_phase_execution(true): installing a path is refused while a cycle is in
+  // flight, because group membership feeds the two-phase admission decision, which is taken against
+  // the separately published controller list. Clearing the group stays allowed.
+  if (control_loop_busy())
+  {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Refusing to install a staged execution group while a control cycle is in flight. Retry "
+      "while the control loop is stopped, or clear the group instead (removal is always allowed).");
+    return controller_interface::return_type::ERROR;
+  }
+
   std::shared_ptr<StagedExecutionGroup> group;
   try
   {
@@ -3025,6 +3055,11 @@ std::shared_ptr<StagedExecutionGroup> ControllerManager::staged_execution_group(
 controller_interface::return_type ControllerManager::update(
   const rclcpp::Time & time, const rclcpp::Duration & period)
 {
+  // Marks a cycle in flight for the configuration setters: installing an execution path while a
+  // cycle is running would take its admission decision against a controller list that is being
+  // published concurrently (see set_two_phase_execution). RAII so every `return` below clears it.
+  const CycleGuard cycle_guard(cycles_in_flight_);
+
   std::vector<ControllerSpec> & rt_controller_list =
     rt_controllers_wrapper_.update_and_get_used_by_rt_list();
 

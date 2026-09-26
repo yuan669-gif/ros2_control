@@ -161,6 +161,16 @@ if(BUILD_TESTING)
     ros2_control_test_assets::ros2_control_test_assets
   )
 
+  # Enforced runtime-reconfiguration rule: installing an execution path mid-cycle is refused.
+  ament_add_gmock(test_runtime_reconfiguration
+    test/test_runtime_reconfiguration.cpp
+  )
+  target_include_directories(test_runtime_reconfiguration PRIVATE include test)
+  target_link_libraries(test_runtime_reconfiguration
+    controller_manager
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+
   # Our extension: all-or-nothing activation of a switch's activate set.
   ament_add_gmock(test_atomic_activation
     test/test_atomic_activation.cpp

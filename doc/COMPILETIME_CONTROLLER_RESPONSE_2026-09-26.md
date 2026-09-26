@@ -199,8 +199,7 @@ struct TypedPorts { ... using hardware_state = HardwareState; ... };
    合并为一个不可变快照、每次变更一次 `atomic_store`、被拒请求不发布）；
    **控制器列表本身**仍沿用上游的双缓冲发布，因此"控制循环停止时配置"的约束仍然有效。
    见 `REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md` §D.2。
-4. **运行中改变拓扑/manifest 被拒**（文档 §7.5）：manifest 是类型，运行期本来就无法改；
-   真正需要的是"运行中配置一律拒绝并报错"，当前靠 API 注释约束而非强制。
+4. ~~**运行中改变拓扑/manifest 被拒**（文档 §7.5）~~：**本轮已强制化**——`update()` 用 RAII 计数标记周期在飞，`control_loop_busy()` 公开可查；周期在飞时**安装/扩展**执行路径（`set_two_phase_execution(true)`、`set_staged_execution_group`）返回 ERROR 且不发布任何 generation，**移除**路径始终允许（在飞周期持有自己的快照）。manifest 本身仍是类型，运行期无法改。见 `REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md` §D.4。
 5. 依赖库（rclcpp/lifecycle/hardware_interface/FastRTPS）的 TSan、Gazebo 真值指标：与上一轮相同，未做。
 
 ---

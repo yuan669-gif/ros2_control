@@ -160,8 +160,9 @@ public:
 
   /// Remove the staged group; required before unloading any of its members.
   ///
-  /// Same configuration constraint as `set_two_phase_execution`: install and clear it while the
-  /// control loop is stopped, or before it starts.
+  /// Same configuration constraint as `set_two_phase_execution`: clearing a group is always accepted
+  /// (it only removes a path, and a running cycle holds its own generation), while INSTALLING one is
+  /// refused with an error report while a control cycle is in flight.
   CONTROLLER_MANAGER_PUBLIC
   void clear_staged_execution_group();
 
@@ -183,16 +184,32 @@ public:
   /// \return OK when the flag was applied, ERROR when the request was rejected (the offending
   /// controller and the reason are logged).
   ///
-  /// CONFIGURATION CONSTRAINT (phase 1). The flag is atomic, the entry set is published atomically,
-  /// and enabling publishes the set BEFORE setting the flag, so no cycle can observe "enabled but no
-  /// entries". Those atomics do NOT make this and the controller-list publication a single
-  /// generation, though: a cycle that begins before the call sees the old state and one that begins
-  /// after sees the new one, with no ordering guarantee between them. Call this (and
-  /// `set_staged_execution_group`) while the control loop is STOPPED, or before it starts.
-  /// Reconfiguring under a running loop needs one generation covering mode + members + plan
-  /// together, which is not implemented (review item D).
+  /// MODE, MEMBERS AND PLAN ARE ONE GENERATION (review item D): the flag, the admitted member set and
+  /// the staged group are built into one immutable snapshot and published with a single atomic store,
+  /// so no cycle can observe "enabled but no entries", or a new group with the previous members.
+  ///
+  /// WHAT IS STILL NOT ONE GENERATION, and why an in-flight cycle is refused: the controller LIST.
+  /// It is upstream's double-buffered publication with its own handshake, and the admission decision
+  /// this call makes (which controllers may join, and which are active) is taken against that list.
+  /// Installing or EXTENDING an execution path while a cycle is in flight could therefore admit a
+  /// set that the concurrently changing list no longer matches. The call is refused with ERROR while
+  /// `control_loop_busy()` is true.
+  ///
+  /// REMOVING a path (`set_two_phase_execution(false)`, `clear_staged_execution_group()`) stays
+  /// allowed: a cycle already running holds its own generation, so it finishes with the state it
+  /// started from, and the next cycle sees the smaller one. Only additions are refused.
   CONTROLLER_MANAGER_PUBLIC
   controller_interface::return_type set_two_phase_execution(bool enabled);
+
+  /// True while a control cycle is inside `update()` on another thread.
+  /**
+   * The supported configuration rule, now enforced rather than documented: installing an execution
+   * path (this call with `true`, or `set_staged_execution_group`) while this returns true is refused,
+   * because the admission decision would race with the controller-list publication. Removing a path
+   * is always accepted.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  bool control_loop_busy() const noexcept;
 
   CONTROLLER_MANAGER_PUBLIC
   bool two_phase_execution() const;
@@ -682,6 +699,25 @@ private:
   /// Opt-in all-or-nothing activation (our extension, default false: upstream activates a request
   /// set best-effort and its tests rely on that). Read on the real-time thread, written by setters.
   std::atomic<bool> atomic_activation_{false};
+  /// Control cycles currently inside `update()` (0 or 1 in practice). Written by the control loop,
+  /// read by the configuration setters to refuse installing a path mid-cycle.
+  std::atomic<int> cycles_in_flight_{0};
+
+  /// RAII marker so every `return` inside `update()` clears the in-flight count.
+  class CycleGuard
+  {
+  public:
+    explicit CycleGuard(std::atomic<int> & counter) noexcept : counter_(counter)
+    {
+      counter_.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~CycleGuard() {counter_.fetch_sub(1, std::memory_order_relaxed);}
+    CycleGuard(const CycleGuard &) = delete;
+    CycleGuard & operator=(const CycleGuard &) = delete;
+
+  private:
+    std::atomic<int> & counter_;
+  };
   /// Read by `update()` every cycle and written by the non-real-time setter, so it is atomic.
   /// An earlier revision used a plain bool, which is a data race on its own -- making the entry
   /// SNAPSHOT atomic does not make the flag that gates it atomic (review item D).

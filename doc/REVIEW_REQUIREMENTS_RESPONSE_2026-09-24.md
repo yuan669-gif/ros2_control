@@ -582,11 +582,35 @@ struct ExecutionGeneration {
   ④ `on_activate` 生命周期失败（非接口冲突）走同一条回滚路径；
   ⑤ 全部成功时不受影响。
 
+## D.4 运行中配置：从"文档约束"变成**强制拒绝**（本轮）
+
+在 D.2 之后，模式/成员/计划已经是**一个 generation**，但**控制器列表**仍是上游独立发布的双缓冲，
+而"安装执行路径"的准入判定正是对着那份列表做的。因此本轮把这条规则**强制化**：
+
+- `update()` 进入时用 RAII 计数器 `cycles_in_flight_` 标记"一个周期正在运行"，**每个 return 路径**都会清除；
+- 新增 `control_loop_busy()`（公开，可诊断）；
+- **安装/扩展**路径的操作在周期在飞时**返回 ERROR 并拒绝**：
+  `set_two_phase_execution(true)`、`set_staged_execution_group(...)`，
+  错误信息说明原因（准入判定对着独立发布的列表）并提示"停止控制循环后重试"；
+- **移除**路径的操作**始终允许**：`set_two_phase_execution(false)`、`clear_staged_execution_group()`。
+  理由可验证：正在飞的周期**持有自己的 generation 快照**，会用它开始时的状态跑完；
+  下一个周期看到的是更小的状态，不存在半应用；
+- 拒绝时**不发布任何 generation**，因此 `execution_generation()` 的 id 不变——"被拒=没变"依旧可观测。
+
+**用例**（`test_runtime_reconfiguration.cpp`，3 个）：用一个 `update()` 会阻塞在条件变量上的控制器
+把"周期在飞"变成**确定性**状态，而不是赌竞态：
+
+| 用例 | 断言 |
+|---|---|
+| `installing_a_path_while_a_cycle_is_in_flight_is_refused` | 周期在飞时：两趟启用被拒、staged group 安装被拒（**成员本身合法**，所以只能是这条规则拒绝的）、id 不变、没有任何路径被安装；释放周期后**同样的调用成功**（正向对照），且各 +1 |
+| `removing_a_path_is_accepted_while_a_cycle_is_in_flight` | 周期在飞时禁用两趟 + 清除 group 均接受，id +1，在飞周期正常返回 |
+| `the_busy_flag_tracks_the_cycle` | 连续 3 个周期后 busy 标志为 false——RAII 在每个 return 路径都清 |
+
 ## 仍未做的事（明确列出，避免"看起来全做完了"）
 
 | # | 未做项 | 现状 |
 |---|---|---|
-| 1 | **控制器列表**纳入统一 generation | 模式/成员/计划已合并（§D.2）；列表仍是上游 `RTControllerListWrapper` 双缓冲，纳进去等于替换上游机制。因此"控制循环停止时配置"这条约束**仍然有效** |
+| 1 | **控制器列表**纳入统一 generation（因此运行中**安装**路径仍被拒绝，见 §D.4） | 模式/成员/计划已合并（§D.2）；列表仍是上游 `RTControllerListWrapper` 双缓冲，纳进去等于替换上游机制。因此"控制循环停止时配置"这条约束**仍然有效** |
 | 2 | **依赖库的 TSan**（rclcpp / lifecycle / hardware_interface / FastRTPS） | `controller_manager` 自身已插桩并跑到 0 data race（§D.1）；依赖库未插桩，其 lock-order 报告无法归属，给整条依赖树插桩需要 GB 级空间与数小时 |
 | 3 | 多频 / 异步 / 动态拓扑 / 生命周期回滚 | 明确不做（评审也建议不要扩） |
 | 4 | `Spec::parents` 的 YAML/参数入口 | 未做；两趟与 staged 都从 claimed interfaces 推导，该字段不是必需 |
