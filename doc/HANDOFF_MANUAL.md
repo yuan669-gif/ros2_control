@@ -667,10 +667,14 @@ chainable 子节点会被上游排在父节点之前，使两条 pass 同向走�
   七节点分叉树用例同时验证静态边、阶段顺序与**按端口名的本周期数值**，
   并把兄弟顺序对调后重跑（`hierarchical_control/test/test_typed_tree.cpp`）。
   这一条**不是**说"首次提出"，只是说本实现具备该能力。
-- ✅ **发布协议的并发模式已用 TSan 验证**（2026-09-24 更新）：racy 模式必报、atomic 模式干净
-  （`hierarchical_control/test/run_tsan_publish_protocol.sh`）；
-  但 ❌ **不能声称"整个 `ControllerManager` 已通过 TSan"**——那需要给全包另开 TSan 构建树，
-  本机磁盘不允许；且 `std::atomic_*(shared_ptr)` 也不保证无锁。
+- ✅ **发布协议与真实 manager 的并发已用 TSan 验证**（2026-09-26 更新）：
+  ① `hierarchical_control/test/run_tsan_publish_protocol.sh`——racy 模式必报、atomic 模式干净；
+  ② `controller_manager/test/run_tsan_real_manager.sh`——只给 `controller_manager` 包插桩后跑真实
+  `update()` vs `switch_controller()`：**先测出 4 条数据竞争（全在上游握手字段
+  `switch_params_.do_switch` / `activate_asap`、列表索引 `updated_*_index_`），改成原子后归零**。
+  但 ❌ **不能声称"整个依赖栈已通过 TSan"**：rclcpp / lifecycle / `hardware_interface` / FastRTPS
+  未插桩，其内部竞争看不见，剩下的 lock-order 报告（~800–2000/次）全部来自它们；
+  且 `std::atomic_*(shared_ptr)` 不保证无锁。
 - ❌ **首次提出**"双向同周期不可满足 / 反馈环需要单位延迟"（2026-09-24 新增，**评审 R11**）：
   这是同步数据流（Lee & Messerschmitt 1987：环上必须有延迟）、同步语言（不经 `pre()` 的环是因果性错误）、
   Kahn 网络、Simulink/Modelica 代数环的标准结果。见 `doc/RELATED_WORK.md` §1。

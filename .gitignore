@@ -53,3 +53,6 @@ FineMote系统内版本.pdf
 FineMote论文_文本.txt
 
 .coverage
+build_tsan/
+install_tsan/
+log_tsan/

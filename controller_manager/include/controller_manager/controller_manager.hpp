@@ -561,10 +561,18 @@ private:
       int index, std::chrono::microseconds sleep_delay = std::chrono::microseconds(200)) const;
 
     std::vector<ControllerSpec> controllers_lists_[2];
-    /// The index of the controller list with the most updated information
-    int updated_controllers_index_ = 0;
-    /// The index of the controllers list being used in the real-time thread.
-    int used_by_realtime_controllers_index_ = -1;
+    /// The index of the controller list with the most updated information.
+    /**
+     * ATOMIC, and with release/acquire on the publish/observe pair: the idle thread fills the unused
+     * list and then publishes it by storing this index, and the control loop reads the index before
+     * reading the list, so the list's contents must be visible before the index is. The plain `int`
+     * version is reported as a data race by ThreadSanitizer (review item D: the controller-list
+     * publication was never covered by the old harness).
+     */
+    std::atomic<int> updated_controllers_index_{0};
+    /// The index of the controllers list being used in the real-time thread. Atomic for the same
+    /// reason: the control loop stores it, and `switch_updated_list()` polls it from the idle thread.
+    std::atomic<int> used_by_realtime_controllers_index_{-1};
   };
 
   std::unique_ptr<rclcpp::PreShutdownCallbackHandle> preshutdown_cb_handle_{nullptr};
@@ -708,19 +716,28 @@ private:
   {
     void reset()
     {
-      do_switch = false;
-      started = false;
-      strictness = 0;
-      activate_asap = false;
+      do_switch.store(false, std::memory_order_relaxed);
+      started.store(false, std::memory_order_relaxed);
+      strictness.store(0, std::memory_order_relaxed);
+      activate_asap.store(false, std::memory_order_relaxed);
     }
 
-    bool do_switch;
-    bool started;
+    /// Cross-thread handshake flags, ATOMIC because they are written by the idle thread
+    /// (`switch_controller()`) and read by the control loop (`update()` / `manage_switch()`).
+    /// An instrumented build of this file under ThreadSanitizer reports the plain versions as a data
+    /// race, which is exactly the publication protocol review item D was about; the two-phase flag
+    /// was made atomic earlier, and these are the same class of field.
+    ///
+    /// `do_switch` carries the handshake with release/acquire, so the options below it are ordered
+    /// without needing atomics of their own; they are atomic anyway so that any reader (a log, a
+    /// status query) cannot race either.
+    std::atomic<bool> do_switch{false};
+    std::atomic<bool> started{false};
 
     // Switch options
-    int strictness;
-    bool activate_asap;
-    std::chrono::nanoseconds timeout;
+    std::atomic<int> strictness{0};
+    std::atomic<bool> activate_asap{false};
+    std::chrono::nanoseconds timeout{0};
 
     // conditional variable and mutex to wait for the switch to complete
     std::condition_variable cv;

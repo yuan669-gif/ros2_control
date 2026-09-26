@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **A** | 静态父关系与实际生成关系可能不同（`compose` 未校验 `parent_type`，评审已复现） | **已修** | `compose` 现在 `static_assert` 子 binding 的 `parent_type` 必须等于当前节点；两个编译反例（`compile_fail_child_declares_other_parent.cpp`、`compile_fail_root_as_child.cpp`）以 `TOPOLOGY MISMATCH` 被拒；编译语料 10/10 |
 | **C** | 端口检查不是建组必经步骤；`verify_ports_match_contract` 只比长度（注释却写名称+顺序） | **已修** | `create_library_group` 现在**自动**跑 `verify_binding_ports`（失败抛 `invalid_argument`），新增 `create_library_group_unchecked` 供故意错配的调试 stub；`verify_ports_match_contract` 改为**逐位置比名称与顺序**（新增 `tc::port_at_t`）；新增"同长度错名"与"顺序颠倒"两个负向用例；三个既有 fixture 的错配已按契约修好 |
-| **D** | 模式标志与快照发布不是一致状态；`two_phase_entries()` 返回可能悬空的引用 | **已修** | `two_phase_enabled_` 改为 `std::atomic<bool>`；`two_phase_entries()` 改为**按值返回 `shared_ptr`**（原实现把引用指向只有局部 owner 的快照，是真悬空）；启用改为"**先发布成员、再置位**"，禁用改为"**先清标志、再清成员**"；`set_staged_execution_group` 改为**发布前**刷新缓存标志（发布后不再写该对象）。**未做**：模式/成员/计划的统一 generation；**仍未做真实 manager 的 TSan** |
+| **D** | 模式标志与快照发布不是一致状态；`two_phase_entries()` 返回可能悬空的引用 | **已修** | `two_phase_enabled_` 改为 `std::atomic<bool>`；`two_phase_entries()` 改为**按值返回 `shared_ptr`**（原实现把引用指向只有局部 owner 的快照，是真悬空）；启用改为"**先发布成员、再置位**"，禁用改为"**先清标志、再清成员**"；`set_staged_execution_group` 改为**发布前**刷新缓存标志（发布后不再写该对象）。**未做**：模式/成员/计划的统一 generation。**真实 manager 的 TSan 已补**（见 §D.1：插桩 `controller_manager` 后测出 4 条上游握手字段的数据竞争，改成原子后归零；依赖库未插桩） |
 | **B** | 静态构建器只支持链，不支持分叉树；`ForChildren` 不能按每个孩子分别比较 | **已修**（见 §B 与 §B.1） | `BoundNode` 改为变参 `Children...`；`compose` 变参、`make_leaf` 单节点；`ForChildren`/`ChildState` 按**孩子顺序拼接**并与每个孩子声明**逐段比较**（`children_references_agree` / `children_states_agree`）；`compose` 在双方都有 `typed_ports` 时**自动**执行检查；七节点验收树 `test_typed_tree`（含兄弟顺序对调变体）在**库路径**验证静态边、阶段顺序与本周期数值；同一棵树还在**manager 路径**验证（§E.1.5，`two_pass_runs_a_branching_tree_and_propagates_it_same_cycle`） |
 | **E** | 新/不合格组件仍可能走原生路径；跨模式依赖未拒绝 | **已修**（见 §E 与 §E.1） | 跨模式参考边（两端恰有一端是两趟成员）**拒绝启用**；两趟启用期间的晚加载/晚配置不合格成员使 `configure_controller` 返回 ERROR（不再只记日志）；`switch_controller` 对**激活态**成员做同样判定；新增 `two_phase_rejected_controllers()` 暴露"被拒成员 + 原因"；**另发现并修复**"manager 列表顺序把一条边反向"这一类（§E.1.5），共六个行为用例 |
 
@@ -427,6 +427,54 @@ fork_root -> { fork_a, fork_b }      // 端口、量纲、父子边都在这一�
 `StagedControllerInterface` 的原因。**若将来要走"纯 `StagedControllerInterface` 也能绑定"，
 需要把绑定的实例指针类型参数化**，那会触及 R5 的不变式，本轮没做。
 
+### D.1 真实 `ControllerManager` 的 TSan——**已做**（本轮，磁盘清理之后）
+
+评审 D 的第二半是"现有 TSan harness 只模拟容器原子发布，不包含这些字段和实际 manager 切换协议"。
+本轮把它补上了：单独一个构建树只给 **`controller_manager` 这个包**插桩
+（`-fsanitize=thread`），依赖库保持正常构建，然后跑既有的 `test_two_phase_execution`
+——它的模式正好是"一个线程 `update()`、另一个线程 `switch_controller()` /
+`set_two_phase_execution()` / 配置",也就是要审的那条路径。
+
+复现：`bash controller_manager/test/run_tsan_real_manager.sh [--rebuild]`
+（PASS 判据 = **data race 数为 0**；脚本头写明插桩范围与局限）。
+
+**结果（先测后改）**：
+
+| | data race | 其中属于本仓库代码 | lock-order inversion |
+|---|---|---|---|
+| 修改前 | **4** | 4（全部是 manager 自己的握手字段） | 991 |
+| 修改后 | **0** | 0 | ~800–2000（随运行波动） |
+
+4 条 race 全部落在**上游的发布/握手字段**上，而没有一条落在我加的两趟协议上：
+
+| # | 冲突 | 字段 |
+|---|---|---|
+| 1 | `update()` 读 vs `switch_controller()` 写 | `switch_params_.do_switch`（普通 `bool`） |
+| 2 | `manage_switch()` 读 vs `switch_controller()` 写 | `switch_params_.activate_asap` |
+| 3 | `wait_until_rt_not_using()` 读 vs `update_and_get_used_by_rt_list()` 写 | `used_by_realtime_controllers_index_` |
+| 4 | `update_and_get_used_by_rt_list()` 读 vs `switch_updated_list()` 写 | `updated_controllers_index_` |
+
+**修复**：把这些握手字段改成 `std::atomic`，并给发布/观察那一对加 release/acquire
+（发布列表索引前写入的列表内容必须对实时线程可见）：
+`switch_params_.do_switch/started/strictness/activate_asap`、
+`RTControllerListWrapper::updated_controllers_index_ / used_by_realtime_controllers_index_`。
+语义不变（原来的 sleep 轮询握手照旧），只是把"形式上就是数据竞争"变成真的同步。
+改完后 **data race 归零**，且**没有一条报告指向 `two_phase_enabled_`、`two_phase_entries_`、
+staged 快照或两趟准入/内核代码**——即 D 项里属于本特性的部分在真实 manager 上得到确认。
+
+**仍未覆盖（如实记录）**：依赖库（rclcpp、lifecycle、`hardware_interface`、FastRTPS）**没有插桩**，
+因此
+- 它们内部的数据竞争在这里**看不见**；
+- 剩下的 ~800–2000 条 **lock-order inversion / double lock 全部来自这些未插桩库**
+  （报告里常常只有 `pthread_mutex_lock` 拦截帧，或本仓库代码只作为**调用者**出现，
+  例如 fixture 构造时的 `robot_description_callback → ResourceManager::load_urdf`）。
+  要处理它们得给整条依赖树插桩（GB 级、数小时），本机磁盘不允许，也不属于本特性范围。
+
+**一个使用上的注意**：TSan 会把进程拖慢约一个数量级，套件里**断言时间**的用例
+（`two_pass_costs_one_extra_traversal` 量微秒级耗时；switch-pause 用例依赖异步请求落点）
+在 TSan 下可能失败——脚本把它们**列出来但不计入判据**（判据只看 race 数），
+观测到的失败数在 0–9 之间波动。
+
 ### B.2 编译成本：分叉树不比同规模深链贵（新增测量）
 `BoundNode` 从单槽改成变参包后，专门测了"同节点数下链 vs 树"
 （`hierarchical_control/test/measure_binding_cost.py`，三次运行）：
@@ -482,7 +530,7 @@ fork_root -> { fork_a, fork_b }      // 端口、量纲、父子边都在这一�
 | # | 未做项 | 现状 |
 |---|---|---|
 | 1 | 模式/成员/计划的**统一 generation**（评审 D 的第二半） | 未做；首版约束是"控制循环停止时配置"，已写进 API 注释与 `REVIEW_RESPONSE_2026-09-23.md` |
-| 2 | 真实 `ControllerManager` 的 **TSan** | 磁盘不允许另开 GB 级构建树；只有发布协议 harness 做了 TSan |
+| 2 | **依赖库的 TSan**（rclcpp / lifecycle / hardware_interface / FastRTPS） | `controller_manager` 自身已插桩并跑到 0 data race（§D.1）；依赖库未插桩，其 lock-order 报告无法归属，给整条依赖树插桩需要 GB 级空间与数小时 |
 | 3 | 多频 / 异步 / 动态拓扑 / 生命周期回滚 | 明确不做（评审也建议不要扩） |
 | 4 | `Spec::parents` 的 YAML/参数入口 | 未做；两趟与 staged 都从 claimed interfaces 推导，该字段不是必需 |
 | 5 | 状态端口的**语义**区分下探到类型层 | 未做（会与内核"按拓扑而非名字区分"的规则重复） |

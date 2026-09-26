@@ -972,7 +972,7 @@ controller_interface::return_type ControllerManager::configure_controller(
 
 void ControllerManager::clear_requests()
 {
-  switch_params_.do_switch = false;
+  switch_params_.do_switch.store(false, std::memory_order_release);
   deactivate_request_.clear();
   activate_request_.clear();
   // Set these interfaces as unavailable when clearing requests to avoid leaving them in available
@@ -1394,8 +1394,8 @@ controller_interface::return_type ControllerManager::switch_controller(
     }
   }
   // start the atomic controller switching
-  switch_params_.strictness = strictness;
-  switch_params_.activate_asap = activate_asap;
+  switch_params_.strictness.store(strictness, std::memory_order_relaxed);
+  switch_params_.activate_asap.store(activate_asap, std::memory_order_relaxed);
   if (timeout == rclcpp::Duration{0, 0})
   {
     RCLCPP_INFO_ONCE(get_logger(), "Switch controller timeout is set to 0, using default 1s!");
@@ -1405,12 +1405,15 @@ controller_interface::return_type ControllerManager::switch_controller(
   {
     switch_params_.timeout = timeout.to_chrono<std::chrono::nanoseconds>();
   }
-  switch_params_.do_switch = true;
+  // Release: everything above (strictness, activate_asap, timeout, the request lists) must be
+  // visible to the control loop before it observes `do_switch`.
+  switch_params_.do_switch.store(true, std::memory_order_release);
   // wait until switch is finished
   RCLCPP_DEBUG(get_logger(), "Requested atomic controller switch from realtime loop");
   std::unique_lock<std::mutex> switch_params_guard(switch_params_.mutex, std::defer_lock);
   if (!switch_params_.cv.wait_for(
-        switch_params_guard, switch_params_.timeout, [this] { return !switch_params_.do_switch; }))
+        switch_params_guard, switch_params_.timeout,
+        [this] { return !switch_params_.do_switch.load(std::memory_order_acquire); }))
   {
     RCLCPP_ERROR(
       get_logger(), "Switch controller timed out after %f seconds!",
@@ -1586,7 +1589,7 @@ void ControllerManager::manage_switch()
   switch_chained_mode(from_chained_mode_request_, false);
 
   // activate controllers once the switch is fully complete
-  if (!switch_params_.activate_asap)
+  if (!switch_params_.activate_asap.load(std::memory_order_relaxed))
   {
     activate_controllers();
   }
@@ -1598,7 +1601,7 @@ void ControllerManager::manage_switch()
 
   // TODO(destogl): move here "do_switch = false"
 
-  switch_params_.do_switch = false;
+  switch_params_.do_switch.store(false, std::memory_order_release);
   switch_params_.cv.notify_all();
 }
 
@@ -1832,7 +1835,7 @@ void ControllerManager::activate_controllers()
       "failed.");
   }
   // All controllers activated, switching done
-  switch_params_.do_switch = false;
+  switch_params_.do_switch.store(false, std::memory_order_release);
 }
 
 void ControllerManager::activate_controllers_asap()
@@ -2860,7 +2863,7 @@ controller_interface::return_type ControllerManager::update(
   // commit. Its members are skipped by the native loop below, so no controller runs twice.
   // The group is not executed while a switch is pending: membership may be changing.
   const auto staged = std::atomic_load(&staged_group_);
-  if (staged && !switch_params_.do_switch)
+  if (staged && !switch_params_.do_switch.load(std::memory_order_acquire))
   {
     const auto staged_result = staged->run(time, period);
     switch (staged_result.status)
@@ -2883,7 +2886,9 @@ controller_interface::return_type ControllerManager::update(
   // Opt-in FineMote-style execution: two passes over the SAME ordered controller list.
   // Pass 1 ("Update") walks it BACKWARD so children publish before parents consume.
   // Skipped while a switch is pending, because membership may be changing.
-  const bool run_two_phase = two_phase_enabled_ && !entries.empty() && !switch_params_.do_switch;
+  const bool run_two_phase =
+    two_phase_enabled_ && !entries.empty() &&
+    !switch_params_.do_switch.load(std::memory_order_acquire);
   bool two_phase_state_failed = false;
   if (run_two_phase)
   {
@@ -2988,7 +2993,7 @@ controller_interface::return_type ControllerManager::update(
   }
 
   // there are controllers to (de)activate
-  if (switch_params_.do_switch)
+  if (switch_params_.do_switch.load(std::memory_order_acquire))
   {
     manage_switch();
     // Lifecycle state changed: refresh the staged group's cached active flag here instead of
@@ -3013,8 +3018,9 @@ void ControllerManager::write(const rclcpp::Time & time, const rclcpp::Duration 
 std::vector<ControllerSpec> &
 ControllerManager::RTControllerListWrapper::update_and_get_used_by_rt_list()
 {
-  used_by_realtime_controllers_index_ = updated_controllers_index_;
-  return controllers_lists_[used_by_realtime_controllers_index_];
+  const int published = updated_controllers_index_.load(std::memory_order_acquire);
+  used_by_realtime_controllers_index_.store(published, std::memory_order_release);
+  return controllers_lists_[published];
 }
 
 std::vector<ControllerSpec> & ControllerManager::RTControllerListWrapper::get_unused_list(
@@ -3026,7 +3032,7 @@ std::vector<ControllerSpec> & ControllerManager::RTControllerListWrapper::get_un
   }
   controllers_lock_.unlock();
   // Get the index to the outdated controller list
-  int free_controllers_list = get_other_list(updated_controllers_index_);
+  int free_controllers_list = get_other_list(updated_controllers_index_.load(std::memory_order_acquire));
 
   // Wait until the outdated controller list is not being used by the realtime thread
   wait_until_rt_not_using(free_controllers_list);
@@ -3041,7 +3047,7 @@ const std::vector<ControllerSpec> & ControllerManager::RTControllerListWrapper::
     throw std::runtime_error("controllers_lock_ not owned by thread");
   }
   controllers_lock_.unlock();
-  return controllers_lists_[updated_controllers_index_];
+  return controllers_lists_[updated_controllers_index_.load(std::memory_order_acquire)];
 }
 
 void ControllerManager::RTControllerListWrapper::switch_updated_list(
@@ -3052,8 +3058,9 @@ void ControllerManager::RTControllerListWrapper::switch_updated_list(
     throw std::runtime_error("controllers_lock_ not owned by thread");
   }
   controllers_lock_.unlock();
-  int former_current_controllers_list_ = updated_controllers_index_;
-  updated_controllers_index_ = get_other_list(former_current_controllers_list_);
+  int former_current_controllers_list_ = updated_controllers_index_.load(std::memory_order_acquire);
+  updated_controllers_index_.store(
+    get_other_list(former_current_controllers_list_), std::memory_order_release);
   wait_until_rt_not_using(former_current_controllers_list_);
 }
 
@@ -3065,7 +3072,7 @@ int ControllerManager::RTControllerListWrapper::get_other_list(int index) const
 void ControllerManager::RTControllerListWrapper::wait_until_rt_not_using(
   int index, std::chrono::microseconds sleep_period) const
 {
-  while (used_by_realtime_controllers_index_ == index)
+  while (used_by_realtime_controllers_index_.load(std::memory_order_acquire) == index)
   {
     if (!rclcpp::ok())
     {
