@@ -93,7 +93,14 @@ public:
   }
 
   /// Build and activate root -> module -> leaf, then install the staged group.
-  void SetupGroup(double state_offset = 0.0)
+  /**
+   * `activate_root = false` stops after the two children, which is how the manager really reaches a
+   * PARTIALLY active group: members are activated one at a time. Deactivating one instead is not an
+   * option -- upstream refuses to deactivate a chained child while its preceding controller stays
+   * active (`check_preceeding_controllers_for_deactivate`), which is recorded in
+   * `IMPLEMENTATION_GUIDE.md` §12.4 #10.
+   */
+  void SetupGroup(double state_offset = 0.0, bool activate_root = true)
   {
     sequence_ = 0;
     root_ = std::make_shared<TestStagedController>();
@@ -119,13 +126,16 @@ public:
     ASSERT_TRUE(leaf_->set_chained_mode(true));
     ASSERT_TRUE(module_->set_chained_mode(true));
 
+    // P1-2: a staged group may only be installed together with all-or-nothing activation, so a
+    // FAILED multi-controller switch can not leave the tree half-activated.
+    ASSERT_TRUE(cm_->set_atomic_activation(true));
     ASSERT_EQ(Return::OK, cm_->set_staged_execution_group({ROOT_NAME, MODULE_NAME, LEAF_NAME}));
     ASSERT_NE(nullptr, cm_->staged_execution_group());
     EXPECT_EQ(3u, cm_->staged_execution_group()->size());
 
     SwitchNow({LEAF_NAME}, {});
     SwitchNow({MODULE_NAME}, {});
-    SwitchNow({ROOT_NAME}, {});
+    if (activate_root) {SwitchNow({ROOT_NAME}, {});}
   }
 
   void Cycle(int count)
@@ -315,6 +325,9 @@ TEST_F(TestStagedExecutionGroup, multiple_reference_writers_are_rejected)
   ASSERT_EQ(Return::OK, cm_->configure_controller("root_a"));
   ASSERT_EQ(Return::OK, cm_->configure_controller("root_b"));
 
+  // The refusals below must be tested for THEIR reason, so the P1-2 precondition is satisfied.
+  ASSERT_TRUE(cm_->set_atomic_activation(true));
+
   // Both roots claim module/target: two reference writers for one consumer must be rejected.
   EXPECT_EQ(
     Return::ERROR,
@@ -324,6 +337,51 @@ TEST_F(TestStagedExecutionGroup, multiple_reference_writers_are_rejected)
   // One writer is accepted.
   EXPECT_EQ(
     Return::OK, cm_->set_staged_execution_group({"root_a", MODULE_NAME, LEAF_NAME}));
+}
+
+/// P1-2, the behavioural half of the policy: partial membership is INERT, not half-executed.
+/**
+ * Installation requires atomic activation (tested in `test_two_phase_execution.cpp`), but partial
+ * membership itself is legitimate: Humble activates members one at a time, and the switch that
+ * activates the last one has not happened yet. What must never happen is that the group executes a
+ * SUBSET -- the leaf would receive a command whose cascade stops halfway. The group therefore returns
+ * `StagedStatus::inactive`, no member's update() is called and no command is committed, while the
+ * members that are still active keep their claims. The switch that produced the partial state reports
+ * it, so the state is explicit rather than a silent "ACTIVE but driving nothing".
+ */
+TEST_F(TestStagedExecutionGroup, a_partial_membership_is_inert)
+{
+  // Two of three members active: the reachable form of "partial" (see SetupGroup).
+  SetupGroup(0.0, false);
+  ASSERT_FALSE(cm_->staged_execution_group()->members_active());
+  ASSERT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, leaf_->get_state().id());
+  ASSERT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, module_->get_state().id());
+  ASSERT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE, root_->get_state().id());
+
+  const int leaf_state0 = leaf_->state_calls, module_state0 = module_->state_calls;
+  const std::size_t leaf_commit0 = leaf_->commit_calls();
+
+  Cycle(5);
+
+  // Nothing ran: not the active members, and not a half cascade. The native loop must not pick them
+  // up either, since a group member is never executed by both paths in the same cycle.
+  EXPECT_EQ(leaf_state0, leaf_->state_calls) << "no member may run while the group is incomplete";
+  EXPECT_EQ(module_state0, module_->state_calls);
+  EXPECT_EQ(leaf_commit0, leaf_->commit_calls()) << "no command may be committed";
+  EXPECT_EQ(0, leaf_->legacy_update_calls);
+  EXPECT_EQ(0, module_->legacy_update_calls);
+
+  // Completing the group makes it run again, so "inert" is a state and not a shutdown.
+  SwitchNow({ROOT_NAME}, {});
+  ASSERT_TRUE(cm_->staged_execution_group()->members_active());
+  // Counts are taken AFTER the switch: the pump loop that applies it may run one more cycle.
+  const int root_state1 = root_->state_calls;
+  const int leaf_state1 = leaf_->state_calls;
+  const std::size_t leaf_commit1 = leaf_->commit_calls();
+  Cycle(3);
+  EXPECT_EQ(3, root_->state_calls - root_state1);
+  EXPECT_EQ(3, leaf_->state_calls - leaf_state1);
+  EXPECT_EQ(3u, leaf_->commit_calls() - leaf_commit1);
 }
 
 }  // namespace

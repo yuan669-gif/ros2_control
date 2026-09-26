@@ -272,3 +272,40 @@ TEST(StaticManifest, the_constexpr_checker_rejects_malformed_descriptions)
   EXPECT_TRUE(sm::manifest_problem(hardware_port).empty())
     << "hardware interfaces are owned by joints, not by nodes";
 }
+
+/// P2-1: parent chains that never reach the root are rejected at compile time.
+/**
+ * Two distinct shapes have to be separated, because only one of them is caught by the root count:
+ *
+ *   * a PURE cycle (a -> b -> c -> a) has no root, so "exactly one root" already rejects it;
+ *   * a chain running INTO a cycle (root r, a -> b, b -> c, c -> b) has exactly one root, unique
+ *     names, existing parents and no self-parent -- and is still not a tree: `a` can never reach `r`.
+ *
+ * The second shape is what the bounded parent walk exists for, and it is the one that would otherwise
+ * produce a manifest describing a topology no execution order can schedule.
+ */
+TEST(StaticManifest, the_constexpr_checker_rejects_parent_chains_that_enter_a_cycle)
+{
+  // Pure three-node cycle: rejected, by the root count.
+  constexpr std::array<sm::ManifestNode, 3> cycle_nodes = {
+    {{"a", "b"}, {"b", "c"}, {"c", "a"}}};
+  constexpr sm::StaticManifest<3, 0, 0, 0> pure_cycle{cycle_nodes, {}, {}, {}};
+  static_assert(
+    !sm::manifest_problem(pure_cycle).empty(), "a manifest must be checkable in a static_assert");
+  EXPECT_EQ("a manifest must have exactly one root", sm::manifest_problem(pure_cycle));
+
+  // Chain into a cycle: exactly one root, every parent exists, no self-parent -- still not a tree.
+  constexpr std::array<sm::ManifestNode, 4> rho_nodes = {
+    {{"r", ""}, {"a", "b"}, {"b", "c"}, {"c", "b"}}};
+  constexpr sm::StaticManifest<4, 0, 0, 0> rho{rho_nodes, {}, {}, {}};
+  static_assert(
+    !sm::manifest_problem(rho).empty(), "a chain that enters a cycle must be rejected");
+  EXPECT_EQ("the parent chains must not contain a cycle", sm::manifest_problem(rho));
+
+  // The same shape without the back edge is a tree, so the check rejects the cycle and not depth.
+  constexpr std::array<sm::ManifestNode, 4> chain_nodes = {
+    {{"r", ""}, {"a", "r"}, {"b", "a"}, {"c", "b"}}};
+  constexpr sm::StaticManifest<4, 0, 0, 0> chain{chain_nodes, {}, {}, {}};
+  static_assert(sm::manifest_problem(chain).empty(), "a chain to the root is well formed");
+  EXPECT_TRUE(sm::manifest_problem(chain).empty());
+}

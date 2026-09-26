@@ -648,6 +648,14 @@ controller_interface::ControllerInterfaceBaseSharedPtr ControllerManager::load_c
 {
   RCLCPP_INFO(get_logger(), "Loading controller '%s'", controller_name.c_str());
 
+  // P2-2: seal the type set BEFORE the first lookup. Loading is what shares the registry with the
+  // control path, so a registration that raced this call must fail loudly (add() throws) instead of
+  // mutating the map under the lookup below. One-way: unloading does not re-open it.
+  if (static_controller_registry_ && !static_controller_registry_->frozen())
+  {
+    static_controller_registry_->freeze();
+  }
+
   controller_interface::ControllerInterfaceBaseSharedPtr controller;
 
   // A type compiled into the binary is created by its factory and then follows the SAME path as a
@@ -1530,6 +1538,37 @@ controller_interface::return_type ControllerManager::switch_controller(
     }
   }
 
+  // P1-2, the report half of the policy: partial membership of a staged group is legitimate
+  // (members activate one at a time) but it is INERT -- the group runs nothing. Saying so here, on
+  // the switch thread, keeps the state "controller reports ACTIVE but publishes nothing" from being
+  // silent, without allocating in the control loop.
+  // A COPY of the shared_ptr (not a reference into the generation): the generation handle returned by
+  // `current_generation()` is a temporary, so a reference to one of its members would dangle in the
+  // body below.
+  if (const auto staged = current_generation()->staged_group)
+  {
+    staged->refresh_member_active_state();
+    if (!staged->members_active())
+    {
+      std::string missing;
+      for (const auto & name : staged->member_names())
+      {
+        const auto it = std::find_if(
+          to.begin(), to.end(),
+          std::bind(controller_name_compare, std::placeholders::_1, name));
+        if (it != to.end() && is_controller_active(*it->c)) {continue;}
+        if (!missing.empty()) {missing += ", ";}
+        missing += name;
+      }
+      RCLCPP_WARN(
+        get_logger(),
+        "Staged execution group is not fully active (inactive member(s): %s). The group is inert "
+        "until every member is active: no member's update() is called and no command is committed, "
+        "while the members that ARE active keep their interface claims.",
+        missing.c_str());
+    }
+  }
+
   // Item E, SECOND LINE: the pre-flight below already refuses every scheduling violation known
   // before the switch is requested. This judges the state the switch actually produced, so it also
   // covers a controller whose claims only become visible once it is ACTIVE. By this point the
@@ -1576,6 +1615,13 @@ controller_interface::ControllerInterfaceBaseSharedPtr ControllerManager::add_co
 {
   // lock controllers
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
+
+  // P2-2: a controller entering the list seals the compiled-in type set, exactly as a load does. The
+  // direct add path does not pass through load_controller(), so this is not redundant.
+  if (static_controller_registry_ && !static_controller_registry_->frozen())
+  {
+    static_controller_registry_->freeze();
+  }
 
   std::vector<ControllerSpec> & to = rt_controllers_wrapper_.get_unused_list(guard);
   const std::vector<ControllerSpec> & from = rt_controllers_wrapper_.get_updated_list(guard);
@@ -1658,7 +1704,15 @@ void ControllerManager::manage_switch()
   {
     // All-or-nothing: a partially activated tree is not a tree. Only the controllers THIS pass
     // activated are undone; ones that were already active keep running.
-    rollback_activated_controllers(outcome.activated);
+    rollback_activated_controllers(outcome);
+    if (outcome.rollback_failed)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Atomic activation rollback was incomplete; the controller set may be partially "
+        "activated. Recover by inspecting `ros2 control list_controllers -v` and switching the "
+        "affected controllers explicitly.");
+    }
   }
 
   // TODO(destogl): move here "do_switch = false"
@@ -1667,9 +1721,10 @@ void ControllerManager::manage_switch()
   switch_params_.cv.notify_all();
 }
 
-void ControllerManager::rollback_activated_controllers(const std::vector<std::string> & activated)
+void ControllerManager::rollback_activated_controllers(ActivationOutcome & outcome)
 {
-  if (activated.empty()) {return;}
+  if (outcome.activated.empty()) {return;}
+  outcome.rollback_performed = true;
   std::vector<ControllerSpec> & rt_controller_list =
     rt_controllers_wrapper_.update_and_get_used_by_rt_list();
 
@@ -1677,14 +1732,25 @@ void ControllerManager::rollback_activated_controllers(const std::vector<std::st
     get_logger(),
     "Atomic activation: %zu controller(s) were activated by this switch and at least one other "
     "failed, so the activated ones are being deactivated again (nothing stays half-activated).",
-    activated.size());
+    outcome.activated.size());
 
-  for (const auto & controller_name : activated)
+  // Reverse activation order: in a chain the children were activated last, so they are released
+  // first and no child is left holding a reference interface of an already-deactivated parent.
+  for (auto name_it = outcome.activated.rbegin(); name_it != outcome.activated.rend(); ++name_it)
   {
     auto found_it = std::find_if(
       rt_controller_list.begin(), rt_controller_list.end(),
-      std::bind(controller_name_compare, std::placeholders::_1, controller_name));
-    if (found_it == rt_controller_list.end()) {continue;}
+      std::bind(controller_name_compare, std::placeholders::_1, *name_it));
+    if (found_it == rt_controller_list.end())
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Atomic activation rollback: controller '%s' is not in the realtime controller list and "
+        "can not be undone.",
+        name_it->c_str());
+      outcome.rollback_failed = true;
+      continue;
+    }
     auto controller = found_it->c;
     if (!is_controller_active(*controller)) {continue;}
     const auto new_state = controller->get_node()->deactivate();
@@ -1694,8 +1760,41 @@ void ControllerManager::rollback_activated_controllers(const std::vector<std::st
       RCLCPP_ERROR(
         get_logger(),
         "During the atomic-activation rollback, controller '%s' ended in state '%s', expected "
-        "Inactive.",
-        controller_name.c_str(), new_state.label().c_str());
+        "Inactive. The controller may still be running.",
+        name_it->c_str(), new_state.label().c_str());
+      outcome.rollback_failed = true;
+    }
+  }
+
+  // Undo the chainable-controller publication: a reference interface that stays available while
+  // its controller is INACTIVE is exactly the state `clear_requests()` exists to avoid, and it
+  // would let a following controller claim a reference into a controller that is not running.
+  for (const auto & controller_name : outcome.activated_chainable)
+  {
+    resource_manager_->make_controller_reference_interfaces_unavailable(controller_name);
+  }
+
+  // Undo the hardware command-mode switch. `activate_controllers()` switched the hardware into
+  // these interfaces (and, on failure, switched only the FAILED controllers' interfaces back), so
+  // the interfaces of the controllers that DID activate are still switched in. Deactivating the
+  // controller only releases our loan; a hardware in exclusive mode would otherwise stay
+  // configured for a controller that no longer runs.
+  if (!outcome.activated_command_interfaces.empty())
+  {
+    const bool prepared = resource_manager_->prepare_command_mode_switch(
+      {}, outcome.activated_command_interfaces);
+    const bool performed = resource_manager_->perform_command_mode_switch(
+      {}, outcome.activated_command_interfaces);
+    if (!prepared || !performed)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Atomic activation rollback: the hardware refused to switch %zu interface(s) back out of "
+        "the rolled-back controllers' mode (prepare %s, perform %s). Those interfaces may still be "
+        "configured for controllers that are no longer active.",
+        outcome.activated_command_interfaces.size(), prepared ? "OK" : "FAILED",
+        performed ? "OK" : "FAILED");
+      outcome.rollback_failed = true;
     }
   }
 }
@@ -1916,11 +2015,26 @@ ControllerManager::ActivationOutcome ControllerManager::activate_controllers()
       continue;
     }
     outcome.activated.push_back(controller_name);
+    // Record what this pass switched the hardware INTO, so a rollback can switch it back out.
+    // Deduplicated: two controllers can never claim the same command interface, but an "ALL"
+    // configuration repeats the available list and the hardware must not be told twice.
+    for (const auto & interface_name : command_interface_names)
+    {
+      if (
+        std::find(
+          outcome.activated_command_interfaces.begin(),
+          outcome.activated_command_interfaces.end(),
+          interface_name) == outcome.activated_command_interfaces.end())
+      {
+        outcome.activated_command_interfaces.push_back(interface_name);
+      }
+    }
 
     // if it is a chainable controller, make the reference interfaces available on activation
     if (controller->is_chainable())
     {
       resource_manager_->make_controller_reference_interfaces_available(controller_name);
+      outcome.activated_chainable.push_back(controller_name);
     }
   }
   // Now prepare and perform the stop interface switching as this is needed for exclusive
@@ -2891,11 +3005,28 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
   return controller_interface::return_type::OK;
 }
 
-void ControllerManager::set_atomic_activation(bool enabled)
+bool ControllerManager::set_atomic_activation(bool enabled)
 {
+  // P1-2: a staged execution group is only safe to activate when a failed multi-controller switch
+  // rolls back, so the requirement can not be undone behind the group's back.
+  if (!enabled)
+  {
+    const auto group = current_generation()->staged_group;
+    if (group)
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Refusing to disable atomic activation while a staged execution group with %zu member(s) "
+        "is installed: a group is a whole-tree path and a failed switch must not leave it "
+        "half-activated. Clear the group first (clear_staged_execution_group()).",
+        group->size());
+      return false;
+    }
+  }
   atomic_activation_.store(enabled, std::memory_order_relaxed);
   RCLCPP_INFO(
     get_logger(), "Atomic activation %s.", enabled ? "enabled" : "disabled (upstream semantics)");
+  return true;
 }
 
 bool ControllerManager::atomic_activation() const
@@ -2913,9 +3044,30 @@ bool ControllerManager::two_phase_execution() const
   return current_generation()->two_phase_enabled;
 }
 
-void ControllerManager::set_static_controller_registry(StaticControllerRegistry::SharedPtr registry)
+bool ControllerManager::set_static_controller_registry(StaticControllerRegistry::SharedPtr registry)
 {
+  if (!registry)
+  {
+    RCLCPP_ERROR(get_logger(), "Refusing to install an empty static controller registry.");
+    return false;
+  }
+  // P2-2: an installed registry that has been loaded from is sealed (see load_controller()). Swapping
+  // it would silently change the set of loadable types while controllers are running, and would race
+  // the shared_ptr against a concurrent load.
+  if (static_controller_registry_ && static_controller_registry_->frozen())
+  {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Refusing to replace the static controller registry: this manager has already attempted to "
+      "load a controller, so the set of compiled-in types is sealed. Register and install every "
+      "type before the first load_controller() call.");
+    return false;
+  }
   static_controller_registry_ = std::move(registry);
+  RCLCPP_INFO(
+    get_logger(), "Installed a static controller registry with %zu type(s).",
+    static_controller_registry_->types().size());
+  return true;
 }
 
 std::shared_ptr<StaticControllerRegistry> ControllerManager::static_controller_registry() const
@@ -2928,6 +3080,19 @@ controller_interface::return_type ControllerManager::set_staged_execution_group(
 {
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
   const std::vector<ControllerSpec> & controllers = rt_controllers_wrapper_.get_updated_list(guard);
+
+  // P1-2: a staged group executes as a whole, so it may only be installed together with the
+  // all-or-nothing activation that keeps a FAILED switch from leaving it half-activated. Checked
+  // first, before the members are even inspected, so the reason is unambiguous.
+  if (!atomic_activation_.load(std::memory_order_relaxed))
+  {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Refusing to install a staged execution group while atomic activation is disabled: a group "
+      "is executed as a whole, and without the rollback a failed switch would leave it partially "
+      "activated. Call set_atomic_activation(true) first.");
+    return controller_interface::return_type::ERROR;
+  }
 
   std::vector<StagedGroupMember> members;
   members.reserve(controller_names.size());

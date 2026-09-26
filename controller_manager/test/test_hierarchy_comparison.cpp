@@ -322,6 +322,8 @@ Group SetupStaged(const std::shared_ptr<rclcpp::Executor> & executor, const std:
   ConfigureController(group.cm, kRoot);
   group.leaf->set_chained_mode(true);
   group.module->set_chained_mode(true);
+  // P1-2: installing a staged group requires all-or-nothing activation.
+  group.cm->set_atomic_activation(true);
   if (group.cm->set_staged_execution_group({kRoot, kModule, kLeaf}) != Return::OK)
   {
     throw std::runtime_error("install staged group");
@@ -653,6 +655,8 @@ Group SetupStagedForkN(
 
   std::vector<std::string> members{kRoot};
   for (const auto & leaf : leaves) {members.push_back(leaf.name);}
+  // P1-2: installing a staged group requires all-or-nothing activation.
+  group.cm->set_atomic_activation(true);
   if (group.cm->set_staged_execution_group(members) != Return::OK)
   {
     throw std::runtime_error("install staged fork");

@@ -13,6 +13,12 @@ namespace controller_manager
 
 void StaticControllerRegistry::insert(const std::string & type, Entry entry)
 {
+  if (frozen_)
+  {
+    throw std::logic_error(
+      "the static controller registry is frozen (the controller manager has already loaded a "
+      "controller), so type '" + type + "' can not be registered any more");
+  }
   if (type.empty())
   {
     throw std::invalid_argument("a static controller type must have a non-empty name");
@@ -25,6 +31,11 @@ void StaticControllerRegistry::insert(const std::string & type, Entry entry)
   entries_.emplace(type, std::move(entry));
 }
 
+void StaticControllerRegistry::freeze()
+{
+  frozen_ = true;
+}
+
 void StaticControllerRegistry::add_factory(const std::string & type, Factory factory)
 {
   if (!factory)
@@ -34,6 +45,22 @@ void StaticControllerRegistry::add_factory(const std::string & type, Factory fac
   }
   Entry entry;
   entry.create = std::move(factory);
+  insert(type, std::move(entry));
+}
+
+void StaticControllerRegistry::add_factory(
+  const std::string & type, Factory factory, ManifestDescriptor manifest)
+{
+  if (!factory)
+  {
+    throw std::invalid_argument(
+      "static controller type '" + type + "' needs a factory");
+  }
+  Entry entry;
+  entry.create = std::move(factory);
+  entry.has_manifest = true;
+  entry.command_interfaces = std::move(manifest.command_interfaces);
+  entry.state_interfaces = std::move(manifest.state_interfaces);
   insert(type, std::move(entry));
 }
 

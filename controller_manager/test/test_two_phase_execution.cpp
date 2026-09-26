@@ -156,6 +156,15 @@ class TestExecutionPathAdmission
 : public ControllerManagerFixture<controller_manager::ControllerManager>
 {
 public:
+  void SetUp() override
+  {
+    ControllerManagerFixture::SetUp();
+    // P1-2: installing a staged execution group requires all-or-nothing activation, so every test
+    // here opts in. The requirement itself is tested by
+    // `installing_a_staged_group_requires_atomic_activation`, which turns it off again.
+    ASSERT_TRUE(cm_->set_atomic_activation(true));
+  }
+
   void TearDown() override
   {
     if (cm_ && cm_->staged_execution_group()) {cm_->clear_staged_execution_group();}
@@ -453,6 +462,37 @@ TEST_F(TestExecutionPathAdmission, staged_group_accepts_a_rate_matching_member)
 
   EXPECT_EQ(Return::OK, cm_->set_staged_execution_group({kRoot, kMid, kLeaf}));
   EXPECT_NE(nullptr, cm_->staged_execution_group());
+}
+
+/// P1-2: a staged group is a WHOLE-TREE path, so it may only be installed together with the
+/// all-or-nothing activation that keeps a FAILED multi-controller switch from leaving the tree
+/// half-activated. The requirement is enforced at both ends: installing while atomic activation is
+/// off is refused, and disabling it while a group is installed is refused.
+TEST_F(TestExecutionPathAdmission, installing_a_staged_group_requires_atomic_activation)
+{
+  BuildChain(0);
+
+  // The fixture enabled it; turn it off to test the precondition itself.
+  ASSERT_TRUE(cm_->set_atomic_activation(false));
+  ASSERT_FALSE(cm_->atomic_activation());
+
+  EXPECT_EQ(Return::ERROR, cm_->set_staged_execution_group({kRoot, kMid, kLeaf}))
+    << "a group must not be installed without the rollback that protects it";
+  EXPECT_EQ(nullptr, cm_->staged_execution_group());
+
+  // With the precondition satisfied the install succeeds ...
+  ASSERT_TRUE(cm_->set_atomic_activation(true));
+  ASSERT_EQ(Return::OK, cm_->set_staged_execution_group({kRoot, kMid, kLeaf}));
+  ASSERT_NE(nullptr, cm_->staged_execution_group());
+
+  // ... and the requirement can not be removed behind the installed group's back.
+  EXPECT_FALSE(cm_->set_atomic_activation(false));
+  EXPECT_TRUE(cm_->atomic_activation()) << "the installed group keeps its precondition";
+
+  // Removing the group releases the requirement again.
+  cm_->clear_staged_execution_group();
+  EXPECT_TRUE(cm_->set_atomic_activation(false));
+  EXPECT_FALSE(cm_->atomic_activation());
 }
 
 /// R7: a controller that follows the manager's rate (0) is the ordinary case and stays accepted.

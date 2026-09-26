@@ -43,15 +43,32 @@ namespace controller_manager
  * tool can enumerate a compiled-in controller's declared topology and hardware requirements without
  * constructing it.
  *
- * Thread-safety: registration is expected at start-up, before controllers are loaded; lookups are
- * read-only afterwards and take no lock (there is no concurrent `load_controller()` in the supported
- * configuration constraint: controllers are loaded from the non-real-time thread).
+ * Thread-safety (review item P2-2, now ENFORCED rather than documented): the type set is mutable
+ * only during start-up. `ControllerManager` freezes the registry it installed as soon as it has
+ * loaded a controller, and `add()`/`add_factory()` throw `std::logic_error` afterwards, so a
+ * concurrent `load_controller()` can not race a registration through the `std::map`. Lookups are
+ * read-only and take no lock; they are safe once the registry is frozen, which is exactly the state
+ * a manager that is loading controllers is in.
  */
 class StaticControllerRegistry
 {
 public:
   using SharedPtr = std::shared_ptr<StaticControllerRegistry>;
   using Factory = std::function<controller_interface::ControllerInterfaceBaseSharedPtr()>;
+
+  /// A compile-time interface description supplied by the CALLER, for a factory that has no type to
+  /// read a manifest from (review item P2-3).
+  /**
+   * `add<ControllerT>()` derives this from `ControllerT::manifest`. A parameterised factory
+   * (`add_factory(type, factory, descriptor)`) has no such type, so it states the description
+   * instead: a compiled-in controller that a static tool cannot enumerate would only be half
+   * compiled-in.
+   */
+  struct ManifestDescriptor
+  {
+    std::vector<std::string> command_interfaces;
+    std::vector<std::string> state_interfaces;
+  };
 
   /// Detect a type-level `manifest` (a compile-time description) without requiring one.
   template <typename ControllerT, typename = void>
@@ -81,7 +98,8 @@ public:
   /// Register `ControllerT` under the type string `type`.
   /**
    * Throws `std::invalid_argument` on an empty type or a duplicate registration: silently replacing a
-   * type would make the configuration depend on registration order.
+   * type would make the configuration depend on registration order. Throws `std::logic_error` when
+   * the registry is frozen.
    */
   template <typename ControllerT>
   void add(const std::string & type)
@@ -107,7 +125,47 @@ public:
   }
 
   /// Register an explicitly supplied factory (for a type whose construction needs arguments).
+  /**
+   * No manifest: a factory alone does not say what the type declares, so `has_manifest(type)` stays
+   * false. Prefer the two overloads below, which keep the description attached (P2-3).
+   */
   void add_factory(const std::string & type, Factory factory);
+
+  /// Factory for `ControllerT` plus the manifest THAT TYPE declares.
+  /**
+   * Same description `add<ControllerT>()` derives, for a type that needs construction arguments --
+   * for example one that reads its ports from a compile-time binding:
+   *
+   * \code
+   * registry->add_factory<MyFork>("my_fork", [] {auto c = std::make_shared<MyFork>();
+   *                                               c->use_binding(); return c;});
+   * \endcode
+   *
+   * Fails to compile when `ControllerT` declares no `manifest`, because the point of this overload
+   * is the type's own description; use the descriptor overload to state one by hand.
+   */
+  template <typename ControllerT>
+  void add_factory(const std::string & type, Factory factory)
+  {
+    static_assert(
+      manifest_traits<ControllerT>::available,
+      "ControllerT declares no `manifest`; use add_factory(type, factory, descriptor) to supply "
+      "the compile-time description explicitly");
+    if constexpr (manifest_traits<ControllerT>::available)
+    {
+      ManifestDescriptor descriptor;
+      descriptor.command_interfaces = manifest_traits<ControllerT>::command_interfaces();
+      descriptor.state_interfaces = manifest_traits<ControllerT>::state_interfaces();
+      add_factory(type, std::move(factory), std::move(descriptor));
+    }
+  }
+
+  /// Factory plus an explicit compile-time description (hand-written or generated).
+  void add_factory(const std::string & type, Factory factory, ManifestDescriptor manifest);
+
+  /// Seal the type set. Idempotent; `add`/`add_factory` throw `std::logic_error` afterwards.
+  void freeze();
+  bool frozen() const noexcept {return frozen_;}
 
   bool has(const std::string & type) const;
   /// A NEW instance, or nullptr when `type` is not registered.
@@ -131,6 +189,7 @@ private:
   void insert(const std::string & type, Entry entry);
 
   std::map<std::string, Entry> entries_;
+  bool frozen_ = false;
 };
 
 }  // namespace controller_manager

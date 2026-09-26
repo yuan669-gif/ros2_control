@@ -203,6 +203,10 @@ TEST_F(TestRuntimeReconfiguration, installing_a_path_while_a_cycle_is_in_flight_
 {
   Activate();
   ASSERT_FALSE(cm_->control_loop_busy());
+  // P1-2: installing a staged group requires atomic activation, so enable it here; otherwise the
+  // group installs below would be refused for THAT reason and this test would prove nothing about
+  // the in-flight rule it is about.
+  ASSERT_TRUE(cm_->set_atomic_activation(true));
 
   controller_->block_next_update();
   cycle_ = std::async(std::launch::async, [this] {return cm_->update(TIME, PERIOD);});

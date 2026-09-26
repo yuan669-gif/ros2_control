@@ -343,6 +343,34 @@ constexpr std::string_view manifest_problem(const StaticManifest<N, P, C, S> & m
     if (!found) {return "every parent must name a node of the manifest";}
   }
 
+  // Parent chains (review item P2-1). A binding built by `tc::compose` cannot produce a cycle because
+  // its type-level parent chain is a tree, but `StaticManifest` is a public structure: a hand-written
+  // manifest must be checked for the shapes a tree forbids.
+  //
+  // A PURE cycle (a -> b -> c -> a) has no root, so the root count above already rejects it. What
+  // the root count does NOT catch is a chain that runs INTO a cycle: with a root `r` and
+  // a -> b, b -> c, c -> b, there is exactly one root, every parent exists and no node is its own
+  // parent, yet `a` has no path to the root and the topology is not a tree. Walking up from every
+  // node is therefore not redundant; the walk is bounded by N steps, which keeps it usable in a
+  // `static_assert` (every parent is known to exist here, so a chain either reaches a root or
+  // revisits a node within N steps).
+  for (std::size_t i = 0; i < N; ++i)
+  {
+    std::string_view current = manifest.nodes[i].name;
+    bool reached_root = false;
+    for (std::size_t step = 0; step <= N; ++step)
+    {
+      std::string_view parent;
+      for (std::size_t j = 0; j < N; ++j)
+      {
+        if (manifest.nodes[j].name == current) {parent = manifest.nodes[j].parent; break;}
+      }
+      if (parent.empty()) {reached_root = true; break;}
+      current = parent;
+    }
+    if (!reached_root) {return "the parent chains must not contain a cycle";}
+  }
+
   for (std::size_t i = 0; i < P; ++i)
   {
     if (manifest.ports[i].name.empty()) {return "port names must not be empty";}

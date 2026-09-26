@@ -56,30 +56,55 @@ status=$?
 
 races=$(grep -c "WARNING: ThreadSanitizer: data race" "$LOG")
 inversions=$(grep -c "lock-order-inversion" "$LOG")
-gtest_line=$(grep -E "^\[  (PASSED|FAILED)  \]" "$LOG" | tail -1)
+ran_line=$(grep -E "^\[==========\] [0-9]+ tests? from [0-9]+ test suites? ran\." "$LOG" | tail -1)
+run_cases=$(grep -cE "^\[ RUN      \]" "$LOG")
+failed_cases=$(grep -cE "^\[  FAILED  \] Test" "$LOG")
+expected_suites=$(grep -cE "^\[----------\] [0-9]+ tests? from (TestTwoPhaseExecution|TestExecutionPathAdmission)" "$LOG")
 
+echo "[tsan] process exit status    : $status"
 echo "[tsan] data races            : $races"
 echo "[tsan] lock-order inversions : $inversions  (uninstrumented dependencies; see the header)"
-echo "[tsan] gtest                 : ${gtest_line:-<no result line>}"
+echo "[tsan] gtest suite lines     : $expected_suites  (expected 2)"
+echo "[tsan] gtest ran             : ${ran_line:-<no result line>}"
+echo "[tsan] gtest cases started   : $run_cases"
 
-# The VERDICT is the race count, not the suite result. TSan slows the process down by roughly an
-# order of magnitude here, and several cases assert timing (`two_pass_costs_one_extra_traversal`
-# measures microseconds; the switch-pause case depends on when the asynchronous request lands), so
-# they can fail under TSan for reasons unrelated to concurrency. They are reported, not folded in.
+# P2-4: "the log contains no data race" is NOT "the test succeeded". A binary that never started
+# (missing library, `setarch` refused), a build that silently kept an old artifact, or a crashed run
+# all produce exactly zero race reports. Functional evidence is therefore required before any verdict
+# is given, and the two verdicts are reported separately.
+functional="DID-NOT-RUN"
+if [ -n "$ran_line" ] && [ "$expected_suites" -ge 2 ] && [ "$run_cases" -ge 20 ]; then
+  if [ "$failed_cases" = "0" ]; then
+    functional="RAN-AND-PASSED"
+  else
+    functional="RAN-WITH-FAILURES"
+  fi
+fi
+echo "[tsan] functional verdict     : $functional (exit status $status, $failed_cases failing case(s))"
+
+if [ "$functional" = "DID-NOT-RUN" ]; then
+  echo "[tsan] RESULT: FAIL (the suite did not run to completion under TSan, so a clean race log"
+  echo "               proves nothing; check the build step and $LOG)"
+  exit 3
+fi
+
 if [ "$races" != "0" ]; then
   echo "[tsan] races reported (frames in this package's files):"
   grep -B2 -A6 "WARNING: ThreadSanitizer: data race" "$LOG" |
     grep -oE "(controller_manager|hierarchical_control)/[a-z_/]+\.(cpp|hpp):[0-9]+" | sort | uniq -c |
     sed 's/^/[tsan]   /'
 fi
-failed=$(grep -cE "^\[  FAILED  \] Test" "$LOG")
-if [ "$failed" != "0" ]; then
-  echo "[tsan] note: $failed case(s) failed under TSan (timing-sensitive; see the comment above)"
+
+if [ "$failed_cases" != "0" ]; then
+  # Not folded into the race verdict: TSan slows the process down by roughly an order of magnitude
+  # here, and several cases assert timing (`two_pass_costs_one_extra_traversal` measures
+  # microseconds; the switch-pause case depends on when the asynchronous request lands).
+  echo "[tsan] note: $failed_cases case(s) failed under TSan (timing-sensitive; see the comment above)"
   grep -E "^\[  FAILED  \] Test" "$LOG" | sed 's/^\[  FAILED  \] /[tsan]   /; s/ ([0-9].*//' | sort -u
 fi
 
 if [ "$races" = "0" ]; then
-  echo "[tsan] RESULT: PASS (no data race reported in the instrumented manager)"
+  echo "[tsan] RESULT: RACE PASS / FUNCTIONAL $functional (no data race in the instrumented manager)"
   exit 0
 fi
 echo "[tsan] RESULT: FAIL ($races data race(s); full log: $LOG)"

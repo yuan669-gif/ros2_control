@@ -111,19 +111,50 @@ public:
    * and then follows the identical path (`add_controller_impl()`), so lifecycle, interface claiming
    * and every admission check are shared with pluginlib controllers. Installing a registry is
    * optional; without one the behaviour is exactly as before.
+   *
+   * REGISTRATION TIMING (review item P2-2). The registry is a `std::map` read by `load_controller()`
+   * and a `shared_ptr` read by the load path, so "register at start-up" can not stay a comment: this
+   * call REFUSES to install or replace a registry once this manager has attempted to load a
+   * controller, and the first `load_controller()` freezes the installed registry so `add()`/
+   * `add_factory()` throw instead of mutating the map under a concurrent lookup. The rule is
+   * therefore: register every compiled-in type, then load. Unloading a controller does not re-open
+   * the type set; sealing is one-way and the sealed state is exactly the state lookups are safe in.
+   *
+   * \return true when the registry was installed, false when the call was refused (logged), in which
+   * case the previously installed registry is unchanged.
    */
   CONTROLLER_MANAGER_PUBLIC
-  void set_static_controller_registry(StaticControllerRegistry::SharedPtr registry);
+  bool set_static_controller_registry(StaticControllerRegistry::SharedPtr registry);
 
   CONTROLLER_MANAGER_PUBLIC
   std::shared_ptr<StaticControllerRegistry> static_controller_registry() const;
 
   /// Convenience: register one compiled-in type, installing a registry on first use.
+  /**
+   * \return false when the registry is already sealed (a controller has been loaded, see
+   * `set_static_controller_registry()`); the call is then logged and nothing is registered. A
+   * duplicate or empty type string still throws `std::invalid_argument`, exactly like
+   * `StaticControllerRegistry::add()`: that is a start-up programming error, not a timing decision.
+   */
   template <typename ControllerT>
-  void register_static_controller_type(const std::string & type)
+  bool register_static_controller_type(const std::string & type)
   {
-    if (!static_controller_registry_) {static_controller_registry_ = std::make_shared<StaticControllerRegistry>();}
+    if (!static_controller_registry_)
+    {
+      static_controller_registry_ = std::make_shared<StaticControllerRegistry>();
+    }
+    if (static_controller_registry_->frozen())
+    {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Refusing to register compiled-in type '%s': the static controller registry is sealed "
+        "because this manager has already loaded a controller. Register every compiled-in type "
+        "before the first load_controller() call.",
+        type.c_str());
+      return false;
+    }
     static_controller_registry_->add<ControllerT>(type);
+    return true;
   }
 
   /// load_controller loads a controller by name, the type must be defined in the parameter server.
@@ -149,6 +180,18 @@ public:
    * plan may not change while the group is active. Group members are executed by the two-phase
    * staged contract instead of the native `update()` path; no controller is ever called by both
    * paths in the same cycle.
+   *
+   * PARTIAL MEMBERSHIP POLICY (review item P1-2), stated rather than implied:
+   *   * installing a group REQUIRES atomic activation (`set_atomic_activation(true)`), because a
+   *     group is a whole-tree path and only the rollback keeps a FAILED multi-controller switch from
+   *     leaving it half-activated. The install is refused with ERROR while atomic activation is off;
+   *   * partial membership can still exist legitimately: Humble's lifecycle activates members one at
+   *     a time, and any member may be deactivated individually. In that state the group is INERT --
+   *     `run()` returns `StagedStatus::inactive`, no member's `update()` is called and no command is
+   *     committed. The active members keep their interface claims but publish nothing;
+   *   * because "three ACTIVE controllers that drive nothing" must not be silent, the switch that
+   *     produced the partial state logs a warning naming the missing members (`switch_controller()`
+   *     is the non-real-time thread, so the report does not allocate in the control loop).
    *
    * \param[in] controller_names members of the group, in any declaration order.
    * \param[in] max_age_ns maximum accepted age of a state sample relative to the cycle.
@@ -231,9 +274,18 @@ public:
    * Scope, stated exactly: only the controllers activated BY THE FAILING SWITCH are undone.
    * Controllers that were already active before it keep running (deactivating them would be a much
    * larger action than the request), and configuration/unload steps are unaffected.
+   *
+   * INSTALLING A STAGED EXECUTION GROUP REQUIRES THIS (review item P1-2). A group is a whole-tree
+   * path, and the only way a FAILED multi-controller switch cannot leave that tree half-activated is
+   * this rollback. The requirement is refused-not-silently-ignored: `set_staged_execution_group()`
+   * returns ERROR while this is off, and disabling it is refused while a group is installed. This is
+   * our own API, so requiring the opt-in costs no upstream compatibility.
+   *
+   * \return whether the requested state was applied. `false` means the call was rejected (see
+   * `atomic_activation()` for the state that is actually in force).
    */
   CONTROLLER_MANAGER_PUBLIC
-  void set_atomic_activation(bool enabled);
+  bool set_atomic_activation(bool enabled);
 
   CONTROLLER_MANAGER_PUBLIC
   bool atomic_activation() const;
@@ -383,17 +435,43 @@ protected:
   void switch_chained_mode(
     const std::vector<std::string> & chained_mode_switch_list, bool to_chained_mode);
 
-  CONTROLLER_MANAGER_PUBLIC
   /// What one activation pass did, so that the caller can undo it when activation is atomic.
+  /**
+   * The outcome records the SIDE EFFECTS of the pass, not only which controllers became active.
+   * Deactivating a controller does not undo a hardware command-mode switch or the publication of a
+   * chainable controller's reference interfaces, so both are recorded here and undone explicitly by
+   * `rollback_activated_controllers()`. Without that, a rollback could report success while the
+   * hardware still sat in a mode that this pass had requested -- a half-done rollback is exactly the
+   * state atomic activation exists to prevent.
+   */
   struct ActivationOutcome
   {
     bool any_failure = false;
     /// Names activated BY THIS PASS, in the order they became active.
     std::vector<std::string> activated;
+    /// Command interfaces claimed by the controllers in `activated` (union, no duplicates).
+    /**
+     * This pass switched the hardware INTO these interfaces; the rollback has to switch it back OUT
+     * of them. Interface names, not indices: the same physical port can be re-mapped by a later
+     * controller list, so an index would not survive the switch it describes.
+     */
+    std::vector<std::string> activated_command_interfaces;
+    /// Chainable controllers in `activated` whose reference interfaces this pass published.
+    std::vector<std::string> activated_chainable;
+    /// Whether a rollback ran at all (for tests and for an honest final report).
+    bool rollback_performed = false;
+    /// Whether any step of the rollback failed, i.e. the system may still be half-undone.
+    bool rollback_failed = false;
   };
 
-  /// Deactivate controllers this pass had activated (atomic activation only).
-  void rollback_activated_controllers(const std::vector<std::string> & activated);
+  /// Deactivate the controllers this pass activated and undo the side effects it had on hardware.
+  /**
+   * Runs only for atomic activation (`set_atomic_activation(true)`). Controllers are undone in
+   * reverse activation order, so a child that lent the parent's reference interfaces is released
+   * before its parent. `outcome.rollback_*` is filled in, and a failed step is logged as a rollback
+   * failure rather than as a failed activation: the two need different reactions.
+   */
+  void rollback_activated_controllers(ActivationOutcome & outcome);
 
   ActivationOutcome activate_controllers();
 

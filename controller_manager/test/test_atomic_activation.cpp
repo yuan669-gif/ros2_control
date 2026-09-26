@@ -89,6 +89,61 @@ private:
   bool fail_activate_ = false;
 };
 
+/// An INSTRUMENT, not a subject: it only reads `joint1/position`.
+/**
+ * `TestActuatorHardware` -- the mock behind `joint1` in `minimal_robot_urdf` -- adds 1 to
+ * `position_state_` in `prepare_command_mode_switch()` and 100 in `perform_command_mode_switch()`,
+ * whatever the requested lists are. That state is exported as `joint1/position`, so the value read
+ * here is an exact counter of the hardware command-mode switches the manager asked for:
+ *
+ *     delta = (#prepare calls) + 100 * (#perform calls)
+ *
+ * The hardware belongs to the manager's private ResourceManager, and this is the only channel a test
+ * has to observe it -- which is why the P1-1 rollback is verified through this counter rather than
+ * through an accessor that does not exist.
+ */
+class MockModeObserver : public controller_interface::ControllerInterface
+{
+public:
+  controller_interface::InterfaceConfiguration command_interface_configuration() const override
+  {
+    controller_interface::InterfaceConfiguration cfg;
+    cfg.type = controller_interface::interface_configuration_type::NONE;
+    return cfg;
+  }
+  controller_interface::InterfaceConfiguration state_interface_configuration() const override
+  {
+    controller_interface::InterfaceConfiguration cfg;
+    cfg.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+    cfg.names = {"joint1/position"};
+    return cfg;
+  }
+
+  CallbackReturn on_init() override {return CallbackReturn::SUCCESS;}
+  CallbackReturn on_configure(const rclcpp_lifecycle::State & /*previous_state*/) override
+  {
+    return CallbackReturn::SUCCESS;
+  }
+  CallbackReturn on_activate(const rclcpp_lifecycle::State & /*previous_state*/) override
+  {
+    return CallbackReturn::SUCCESS;
+  }
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/) override
+  {
+    return CallbackReturn::SUCCESS;
+  }
+  Return update(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/) override
+  {
+    return Return::OK;
+  }
+
+  /// Live value of the mock's mode counter, or -1 while it is not active (no loan).
+  double mode_counter() const
+  {
+    return state_interfaces_.empty() ? -1.0 : state_interfaces_[0].get_value();
+  }
+};
+
 class TestAtomicActivation : public ControllerManagerFixture<controller_manager::ControllerManager>
 {
 public:
@@ -246,4 +301,48 @@ TEST_F(TestAtomicActivation, a_successful_switch_is_unaffected)
   EXPECT_EQ(Return::OK, Switch({"first", "second"}));
   EXPECT_TRUE(IsActive(first));
   EXPECT_TRUE(IsActive(second));
+}
+
+/// P1-1: the rollback must also switch the HARDWARE command mode back.
+/**
+ * Deactivating a controller and releasing its loan is not the whole undo. The switch had already
+ * switched the hardware INTO the interfaces of the controllers it activated; a rollback that stopped
+ * at the lifecycle left the hardware configured for controllers that no longer run. The mode counter
+ * of the mock behind `joint1` makes that difference measurable:
+ *
+ *   * one prepare (joint1/position += 1) and one perform (+= 100) per requested switch;
+ *   * the failed switch itself asks for one pair (+101);
+ *   * `joint1/position` is already claimed by `blocker`, so for `conflict` no pair is emitted by the
+ *     failure path -- the rollback of `first` must emit the second pair (+101).
+ *
+ * Baseline is taken AFTER the blocker is active, so it contains everything the test set-up did.
+ */
+TEST_F(TestAtomicActivation, the_rollback_switches_the_hardware_mode_back)
+{
+  cm_->set_atomic_activation(true);
+
+  // The instrument. It claims no command interface, so it can never be the reason a switch fails.
+  auto observer = std::make_shared<MockModeObserver>();
+  ASSERT_NE(
+    nullptr,
+    RunWithPump([&]() {return cm_->add_controller(observer, "observer", "mock_mode_observer");}));
+  ASSERT_EQ(Return::OK, RunWithPump([&]() {return cm_->configure_controller("observer");}));
+  ASSERT_EQ(Return::OK, Switch({"observer"}));
+  ASSERT_EQ(lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE, observer->get_state().id());
+
+  auto first = AddController("first", {"joint2/velocity"});
+  auto conflict = AddController("conflict", {"joint1/position"});
+  auto blocker = AddController("blocker", {"joint1/position"});
+  ASSERT_EQ(Return::OK, Switch({"blocker"}));
+
+  const double baseline = observer->mode_counter();
+  ASSERT_GT(baseline, 0.0) << "the instrument must be reading the mock's state";
+
+  ASSERT_EQ(Return::ERROR, Switch({"first", "conflict"}));
+  ASSERT_FALSE(IsActive(first));
+  ASSERT_FALSE(IsActive(conflict));
+
+  EXPECT_EQ(baseline + 202.0, observer->mode_counter())
+    << "one pair for the failed switch (101) plus the rollback's pair for first's interface (101); "
+       "without the hardware part of the rollback this is only +101";
 }

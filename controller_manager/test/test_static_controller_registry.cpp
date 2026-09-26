@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -430,4 +431,94 @@ TEST_F(TestStaticControllerRegistry, a_registered_type_exposes_its_compile_time_
   cm_->set_static_controller_registry(registry);
   EXPECT_NE(nullptr, cm_->load_controller("typed", kTypedForkType));
   EXPECT_EQ(Return::OK, cm_->configure_controller("typed"));
+}
+
+/// P2-3: a PARAMETERISED factory must be able to carry a compile-time description too, otherwise
+/// "every compiled-in controller can be enumerated by a static tool" holds only for the
+/// default-constructible ones.
+TEST_F(TestStaticControllerRegistry, a_parameterised_factory_can_carry_its_manifest)
+{
+  auto registry = std::make_shared<Registry>();
+
+  // The factory ALONE says nothing, so no manifest is invented for it.
+  registry->add_factory(
+    kCompiledJoint2,
+    []()
+    {
+      auto leaf = std::make_shared<CompiledTwoPhaseLeaf>();
+      leaf->set_interfaces("joint2/velocity", "joint2/position");
+      return leaf;
+    });
+  EXPECT_FALSE(registry->has_manifest(kCompiledJoint2));
+
+  // With an explicit descriptor the requirement is stated by the caller.
+  registry->add_factory(
+    kCompiledJoint3,
+    []()
+    {
+      auto leaf = std::make_shared<CompiledTwoPhaseLeaf>();
+      leaf->set_interfaces("joint3/velocity", "joint3/position");
+      return leaf;
+    },
+    Registry::ManifestDescriptor{{"joint3/velocity"}, {"joint3/position"}});
+  EXPECT_TRUE(registry->has_manifest(kCompiledJoint3));
+  EXPECT_EQ(
+    (std::vector<std::string>{"joint3/velocity"}), registry->command_interfaces(kCompiledJoint3));
+  EXPECT_EQ(
+    (std::vector<std::string>{"joint3/position"}), registry->state_interfaces(kCompiledJoint3));
+
+  // Or the factory is tied to a type that declares a manifest, and the description comes from it.
+  registry->add_factory<test_composite_library::TypedForkCompositeController>(
+    kTypedForkType,
+    []() {return std::make_shared<test_composite_library::TypedForkCompositeController>();});
+  EXPECT_TRUE(registry->has_manifest(kTypedForkType));
+  EXPECT_EQ(
+    (std::vector<std::string>{"joint2/velocity", "joint3/velocity"}),
+    registry->command_interfaces(kTypedForkType));
+  EXPECT_EQ(
+    (std::vector<std::string>{"joint2/position", "joint3/position"}),
+    registry->state_interfaces(kTypedForkType));
+
+  // The described factories are still ordinary factories.
+  cm_->set_static_controller_registry(registry);
+  EXPECT_NE(nullptr, cm_->load_controller("joint3", kCompiledJoint3));
+  EXPECT_EQ(Return::OK, cm_->configure_controller("joint3"));
+}
+
+/// P2-2: the type set is mutable only until the manager loads its first controller. Replacing the
+/// registry afterwards is refused, and the installed registry stops accepting registrations instead
+/// of mutating the map a `load_controller()` may be reading.
+TEST_F(TestStaticControllerRegistry, the_type_set_is_sealed_once_a_controller_is_loaded)
+{
+  ASSERT_FALSE(registry_->frozen());
+  ASSERT_NE(nullptr, cm_->load_controller("leaf", kCompiledLeaf));
+  EXPECT_TRUE(registry_->frozen()) << "the first load seals the installed registry";
+
+  // A replacement is refused and the installed registry is unchanged.
+  auto replacement = std::make_shared<Registry>();
+  replacement->add<test_controller::TestController>("replacement_type");
+  EXPECT_FALSE(cm_->set_static_controller_registry(replacement));
+  EXPECT_EQ(registry_, cm_->static_controller_registry());
+
+  // Direct registration throws rather than mutating a map that a load may be reading.
+  EXPECT_THROW(registry_->add<test_controller::TestController>("late_type"), std::logic_error);
+  EXPECT_THROW(
+    registry_->add_factory(
+      "late_factory", []() {return std::make_shared<CompiledTwoPhaseLeaf>();}),
+    std::logic_error);
+  EXPECT_FALSE(cm_->register_static_controller_type<CompiledTwoPhaseLeaf>("late_type_2"));
+
+  // The seal does not break the types registered before it: they still load, repeatedly.
+  EXPECT_NE(nullptr, cm_->load_controller("leaf_two", kCompiledLeaf));
+}
+
+/// The convenience call is usable exactly where it is meant to be: before the first load.
+TEST_F(TestStaticControllerRegistry, a_type_registered_through_the_manager_is_loadable)
+{
+  ASSERT_FALSE(registry_->frozen());
+  constexpr char kManagerRegistered[] = "manager_registered_leaf";
+  EXPECT_TRUE(cm_->register_static_controller_type<CompiledTwoPhaseLeaf>(kManagerRegistered))
+    << "registration before the first load must be accepted";
+  EXPECT_THAT(registry_->types(), ::testing::Contains(kManagerRegistered));
+  EXPECT_NE(nullptr, cm_->load_controller("leaf", kManagerRegistered));
 }
