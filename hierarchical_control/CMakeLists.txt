@@ -67,6 +67,11 @@ if(BUILD_TESTING)
   target_include_directories(test_typed_tree PRIVATE include)
   ament_target_dependencies(test_typed_tree ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
+  # Compile-time description layer: the manifest derived from a typed binding.
+  ament_add_gmock(test_static_manifest test/test_static_manifest.cpp)
+  target_include_directories(test_static_manifest PRIVATE include)
+  ament_target_dependencies(test_static_manifest ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
   ament_add_gmock(test_contract_regression test/test_contract_regression.cpp)
   target_include_directories(test_contract_regression PRIVATE include)
   ament_target_dependencies(test_contract_regression ${THIS_PACKAGE_INCLUDE_DEPENDS})

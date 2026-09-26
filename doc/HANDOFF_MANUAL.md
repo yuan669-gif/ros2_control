@@ -719,6 +719,8 @@ chainable 子节点会被上游排在父节点之前，使两条 pass 同向走�
 | **`doc/CODE_AUDIT_SCHEDULING_METAPROGRAMMING.md`** | **双向调度 + 元编程的代码审查记录**（2026-09-24）：修掉的 4 个问题、仍存在的边界、以及"既有测试是时间校准的"这一实测结论 |
 | **`doc/REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md`** | **第二份评审（A–E）的处理记录**：A（静态父关系 vs 实际生成关系）、C（端口检查成为建组必经步骤）、D（模式标志与快照发布的两个真 race）、**B（分叉树 typed builder，§B.1）**、**E（跨模式准入与晚加载成员，§E.1）** 均已修，含七节点验收树、四个新编译反例与四个 manager 行为用例 |
 | `doc/REVIEW_REQUIREMENTS_2026-09-24.md` | 第二份评审原文（A–E） |
+| **`doc/COMPILETIME_CONTROLLER_DESIGN_2026-09-26.md`** | **“编译期控制器”设计边界（用户提出、ChatGPT 起草）**：明确不能把控制器做成静态初始化期的全局对象，改为“编译期描述 + configure/activate 绑定” |
+| **`doc/COMPILETIME_CONTROLLER_RESPONSE_2026-09-26.md`** | **对该设计的调研与本轮改造**：原始想法为何不可行、文档三处需收紧（span 不是编译期形态 / 漏了硬件 state 接口 / 全局资源索引耦合错层）、已落地的 `static_manifest.hpp` + 插件改造 + 三条验收测试，以及仍未做的部分 |
 | `doc/REVIEW_HUMBLE_WORK_2026-09-23.md` | 外部评审原文（R1–R11） |
 | `doc/TWO_PASS_VS_SINGLE_PASS.md` | 两趟 vs 单趟的阶跃响应定量证明 |
 | `doc/PROJECT_REPORT_2026-09-21.md` | 项目全貌报告（给导师/新读者看）。⚠ **第 3 节「接口连接是依赖来源」的叙事已过时**，需按本文第 1.4 / 2 节修订 |

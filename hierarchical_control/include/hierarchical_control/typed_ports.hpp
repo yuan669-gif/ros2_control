@@ -116,10 +116,18 @@ namespace dim = dimensions;
 ///   ForChildren  -- reference ports this controller WRITES INTO its children. Optional; it exists
 ///                   only so `declarations_are_compatible` can check the parent/child edge in name,
 ///                   order and physical dimension.
+///   HardwareState -- hardware STATE interfaces this controller READS (a leaf's sensor inputs).
+///                   Optional. It is not a topology edge -- the other end is a joint, not a node --
+///                   so it stays out of the `Contract` and out of every parent/child check. It is
+///                   declared here because it is part of the controller's interface description:
+///                   without it a compile-time manifest cannot state the full set of interfaces a
+///                   controller needs, and the names would have to be hand-written a second time in
+///                   `state_interface_configuration()` (which is what this header exists to avoid).
 template <
   typename State, typename Reference, typename Actuators,
   typename ForChildren = topology_contract::PortList<>,
-  typename ChildState = topology_contract::PortList<>>
+  typename ChildState = topology_contract::PortList<>,
+  typename HardwareState = topology_contract::PortList<>>
 struct TypedPorts
 {
   static_assert(std::is_class_v<State>, "typed_ports: State must be a PortList");
@@ -127,18 +135,21 @@ struct TypedPorts
   static_assert(std::is_class_v<Actuators>, "typed_ports: Actuators must be a PortList");
   static_assert(std::is_class_v<ForChildren>, "typed_ports: ForChildren must be a PortList");
   static_assert(std::is_class_v<ChildState>, "typed_ports: ChildState must be a PortList");
+  static_assert(std::is_class_v<HardwareState>, "typed_ports: HardwareState must be a PortList");
 
   using state = State;
   using reference = Reference;
   using actuators = Actuators;
   using for_children = ForChildren;
   using child_state = ChildState;
+  using hardware_state = HardwareState;
 
   static constexpr std::size_t state_count = State::count;
   static constexpr std::size_t reference_count = Reference::count;
   static constexpr std::size_t actuator_count = Actuators::count;
   static constexpr std::size_t for_children_count = ForChildren::count;
   static constexpr std::size_t child_state_count = ChildState::count;
+  static constexpr std::size_t hardware_state_count = HardwareState::count;
 
   /// How many slots the kernel will allocate for each stage. These are the numbers the kernel
   /// actually reads, so they are named once and used by the mixin, the verifier and the tests.
@@ -157,9 +168,11 @@ template <typename Ports>
 struct contract_of;
 
 template <
-  typename State, typename Reference, typename Actuators, typename ForChildren, typename ChildState>
-struct contract_of<TypedPorts<State, Reference, Actuators, ForChildren, ChildState>>
+  typename State, typename Reference, typename Actuators, typename ForChildren, typename ChildState,
+  typename HardwareState>
+struct contract_of<TypedPorts<State, Reference, Actuators, ForChildren, ChildState, HardwareState>>
 {
+  // HardwareState deliberately does NOT enter the contract: its owner is a joint, not a node.
   using type = tc::Contract<State, Reference>;
 };
 
@@ -183,10 +196,10 @@ struct name_lists;
 
 template <
   typename... State, typename... Reference, typename... Actuators, typename... ForChildren,
-  typename... ChildState>
+  typename... ChildState, typename... HardwareState>
 struct name_lists<TypedPorts<
   tc::PortList<State...>, tc::PortList<Reference...>, tc::PortList<Actuators...>,
-  tc::PortList<ForChildren...>, tc::PortList<ChildState...>>>
+  tc::PortList<ForChildren...>, tc::PortList<ChildState...>, tc::PortList<HardwareState...>>>
 {
   static constexpr std::array<std::string_view, sizeof...(State)> state = {State::name()...};
   static constexpr std::array<std::string_view, sizeof...(Reference)> reference = {
@@ -197,6 +210,8 @@ struct name_lists<TypedPorts<
     ForChildren::name()...};
   static constexpr std::array<std::string_view, sizeof...(ChildState)> child_state = {
     ChildState::name()...};
+  static constexpr std::array<std::string_view, sizeof...(HardwareState)> hardware_state = {
+    HardwareState::name()...};
 };
 
 /// Compare a runtime list of names against a compile-time list, order-sensitively.

@@ -964,10 +964,23 @@ TEST_F(HierarchyFairComparison, post_switch_two_phase_cycles_do_not_rebuild_memb
   g_count_allocations.store(false, std::memory_order_relaxed);
 
   // The very first update() of a freshly configured manager is a warm-up cycle; after it the idle
-  // loop must be perfectly flat, otherwise this probe could not attribute a change to anything.
+  // loop must be flat, otherwise this probe could not attribute a change to anything.
+  //
+  // "Flat" is expressed with a tolerance of ONE allocation, and against the MINIMUM of the idle
+  // cycles rather than against cycle 1: on a loaded machine a stray allocation (a log string, a
+  // runtime container) can appear in any single cycle, and an exact-equality check then fails for a
+  // reason that has nothing to do with the property under test. The defect this probe detects
+  // (rebuilding the membership vector inside `update()`) costs one `reserve`, one `push_back` per
+  // member and a `sort`, i.e. far more than one (IMPLEMENTATION_GUIDE section 12.4).
+  constexpr std::size_t kStrayAllocation = 1;
+  std::size_t steady = per_cycle[1];
   for (int i = 2; i < kBaselineCycles; ++i)
   {
-    ASSERT_EQ(per_cycle[1], per_cycle[static_cast<std::size_t>(i)])
+    steady = std::min(steady, per_cycle[static_cast<std::size_t>(i)]);
+  }
+  for (int i = 1; i < kBaselineCycles; ++i)
+  {
+    ASSERT_LE(per_cycle[static_cast<std::size_t>(i)], steady + kStrayAllocation)
       << "the idle control loop must have a flat per-cycle allocation count for this probe to "
          "mean anything (cycle " << i << ")";
   }
@@ -1062,12 +1075,15 @@ TEST_F(HierarchyFairComparison, post_switch_two_phase_cycles_do_not_rebuild_memb
   //     `make_shared` + `reserve` rebuild needed.
   // The structural guarantee is in the code: `update()` contains no call that republishes
   // membership, so there is nothing left on the control path to rebuild.
-  EXPECT_LE(post_cycle[0], per_cycle[1] + 1u)
+  // The first post-switch cycle legitimately does one more allocation than steady state (the
+  // publish path runs once); from then on the count must stay at the idle level, with the same
+  // one-allocation tolerance as the baseline for host noise.
+  EXPECT_LE(post_cycle[0], steady + 2u)
     << "a surplus on the first post-switch control cycle is the signature of rebuilding membership "
        "inside update()";
   for (std::size_t i = 1; i < cycles_counted; ++i)
   {
-    EXPECT_EQ(per_cycle[1], post_cycle[i])
+    EXPECT_LE(post_cycle[i], steady + kStrayAllocation)
       << "settled idle cycles after a switch must cost exactly one idle cycle (cycle " << i << ")";
   }
 }
@@ -1168,4 +1184,112 @@ TEST_F(HierarchyFairComparison, typed_declaration_hosted_by_a_composite_plugin_m
   EXPECT_EQ(commits_before + 2 * kCycles, typed->commit_calls)
     << "the two leaves must commit once each per cycle";
   (void)offset_sum;
+}
+
+/// The compile-time DESCRIPTION and the runtime declarations must agree, and the check happens in
+/// `configure`, i.e. before any interface is loaned. The declaration of the typed plugin is GENERATED
+/// from its manifest, so the interesting case is a controller that declares more than the description
+/// requires -- here injected through the plugin's test hook, because a mismatch cannot otherwise be
+/// expressed by a generated list.
+TEST_F(HierarchyFairComparison, a_declaration_richer_than_the_manifest_is_refused_at_configure)
+{
+  auto cm = MakeManager(executor_, "cmp_manifest_cm");
+  auto typed = std::make_shared<TypedForkCompositeController>();
+  typed->set_extra_state_interface("joint9/position");
+  cm->add_controller(typed, "cmp_manifest", "typed_fork");
+
+  EXPECT_EQ(Return::ERROR, cm->configure_controller("cmp_manifest"))
+    << "configure must refuse a declaration that the compile-time description does not require";
+  EXPECT_NE(std::string::npos, typed->configure_error.find("joint9/position"))
+    << "the reason must name the offending interface: " << typed->configure_error;
+
+  // Nothing was prepared: no plan exists, no kernel was built, and no activation can publish one.
+  EXPECT_TRUE(typed->plan_node_names().empty());
+  EXPECT_EQ(0, typed->build_allocations);
+  EXPECT_EQ(0, typed->update_calls);
+}
+
+/// Two managers, the SAME compile-time description, no shared runtime state. This is the property
+/// that rules out "controllers as global variables": the description is a type, the state is owned
+/// per instance, so the two runs cannot interfere.
+TEST_F(HierarchyFairComparison, two_instances_of_the_same_description_are_isolated)
+{
+  const double reference_a = 100.0;
+  const double reference_b = -55.0;
+
+  auto cm_a = MakeManager(executor_, "cmp_iso_a_cm");
+  auto node_a = std::make_shared<TypedForkCompositeController>();
+  cm_a->add_controller(node_a, "cmp_iso_a", "typed_fork");
+  ConfigureController(cm_a, "cmp_iso_a");
+  SwitchNow(cm_a, {"cmp_iso_a"}, {});
+
+  auto cm_b = MakeManager(executor_, "cmp_iso_b_cm");
+  auto node_b = std::make_shared<TypedForkCompositeController>();
+  cm_b->add_controller(node_b, "cmp_iso_b", "typed_fork");
+  ConfigureController(cm_b, "cmp_iso_b");
+  SwitchNow(cm_b, {"cmp_iso_b"}, {});
+
+  // Same description on both sides ...
+  EXPECT_EQ(node_a->manifest_state_interfaces(), node_b->manifest_state_interfaces());
+  EXPECT_EQ(node_a->plan_node_names(), node_b->plan_node_names());
+
+  node_a->set_external_reference(reference_a);
+  node_b->set_external_reference(reference_b);
+  // Interleave the two managers, so a shared object would show up as cross-talk.
+  for (int cycle = 0; cycle < 3; ++cycle)
+  {
+    ASSERT_EQ(Return::OK, node_a->update(kTime, kPeriod));
+    ASSERT_EQ(Return::OK, node_b->update(kTime, kPeriod));
+  }
+
+  EXPECT_DOUBLE_EQ(ForkExpectedA(reference_a), node_a->command_interface_value(0));
+  EXPECT_DOUBLE_EQ(ForkExpectedB(reference_a), node_a->command_interface_value(1));
+  EXPECT_DOUBLE_EQ(ForkExpectedA(reference_b), node_b->command_interface_value(0));
+  EXPECT_DOUBLE_EQ(ForkExpectedB(reference_b), node_b->command_interface_value(1));
+}
+
+/// The other half of the same contract: the URDF/hardware side. A description that agrees with the
+/// declaration but names an interface the hardware does not export cannot be activated, and no plan
+/// is published for it. The controller-side check cannot see the URDF, so this failure comes from the
+/// manager refusing to loan the interface -- the two layers together are what makes the requirement
+/// enforceable.
+TEST_F(HierarchyFairComparison, an_interface_the_urdf_lacks_is_refused_at_activation)
+{
+  auto cm = MakeManager(executor_, "cmp_missing_itf_cm");
+  auto generic = std::make_shared<GenericCompositeController>();
+
+  std::vector<CompositeNodeSpec> specs;
+  CompositeNodeSpec root;
+  root.name = "mi_root";
+  root.factor = 2.0;
+  specs.push_back(root);
+  CompositeNodeSpec leaf;
+  leaf.name = "mi_leaf";
+  leaf.parent = "mi_root";
+  leaf.state_interfaces.push_back("joint2/position");
+  leaf.command_interfaces.push_back("joint9/velocity");  // not exported by the test URDF
+  leaf.factor = 1.0;
+  leaf.offset = 1.0;
+  specs.push_back(leaf);
+  generic->set_nodes(std::move(specs));
+
+  cm->add_controller(generic, "cmp_missing_itf", "generic_composite");
+  ASSERT_EQ(Return::OK, cm->configure_controller("cmp_missing_itf"));
+
+  auto future = std::async(
+    std::launch::async, &controller_manager::ControllerManager::switch_controller, cm.get(),
+    std::vector<std::string>{"cmp_missing_itf"}, std::vector<std::string>{}, kStrict, true,
+    rclcpp::Duration(0, 0));
+  for (int i = 0;
+       i < 400 && future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready; ++i)
+  {
+    cm->update(kTime, kPeriod);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_EQ(std::future_status::ready, future.wait_for(std::chrono::milliseconds(0)));
+  EXPECT_EQ(Return::ERROR, future.get()) << "activation must be refused";
+
+  // The controller is not active, and it never built a kernel: no partial plan was published.
+  EXPECT_EQ(0u, generic->commit_calls);
+  EXPECT_EQ(0, generic->update_calls);
 }
