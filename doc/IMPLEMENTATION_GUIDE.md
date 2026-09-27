@@ -6,6 +6,10 @@
 
 > 本文只讲**做了什么、怎么做的、哪里还没做**，不谈创新性论证。
 > 创新性/声称边界另见 `doc/PAPER.md` 与 `doc/HANDOFF_MANUAL.md` §11。
+>
+> **第一次接触这份工作**请从 `doc/ONBOARDING.md` 开始（概念 + 阅读路径 + 术语表），
+> 读代码用 `doc/CODEBASE_TOUR.md`，跑测试用 `doc/TESTING_GUIDE.md`，
+> 想知道结论是怎么被改出来的用 `doc/DEVELOPMENT_HISTORY.md`。本文是**实现状态**的权威清单。
 
 ---
 

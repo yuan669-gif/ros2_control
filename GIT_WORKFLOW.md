@@ -20,4 +20,15 @@ git diff baseline-humble..HEAD
 When publishing is requested, explicitly target origin, not official upstream.
 Do not force-push shared history as a routine update.
 
-Read doc/HANDOFF_2026-09-19.md for research status and next steps.
+## New to this work? Read these first
+
+| 想做什么 | 打开 |
+|---|---|
+| 完全不了解背景，想先懂概念 | `doc/ONBOARDING.md`（入口：三句话版 + 阅读路径 + 术语表 + "不能声称"清单） |
+| 想从零读源码 | `doc/CODEBASE_TOUR.md`（一个周期的 trace、四层阅读顺序、最小可跑例子、陷阱清单） |
+| 想跑测试 / 复现数字 | `doc/TESTING_GUIDE.md`（环境、命令、套件目录、已知 flaky 的判定方法、测量脚本口径） |
+| 想知道开发经过与被推翻的结论 | `doc/DEVELOPMENT_HISTORY.md`（阶段时间线、决策记录、撤回清单） |
+| 想要权威的"当前实现状态 / 还没做什么" | `doc/IMPLEMENTATION_GUIDE.md` §12 + `doc/HANDOFF_MANUAL.md` |
+
+Read doc/HANDOFF_2026-09-19.md for the earliest research status; the newest status is
+`doc/IMPLEMENTATION_GUIDE.md` and `doc/HANDOFF_MANUAL.md`.

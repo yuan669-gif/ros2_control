@@ -3,7 +3,11 @@
 > **本文是唯一入口文档。** 读完本文 + 第 12 节列出的 4 份文档，即可直接接手并继续执行，
 > 不需要读任何对话历史，也不需要读本目录下的其它 `HANDOFF_*.md`（那些是历史记录）。
 >
-> 生成日期：2026-09-21。工作区：`/home/mamingyuan/Desktop/ros2_control-humble`。
+> **第一次接触这份工作**：先读 `doc/ONBOARDING.md`（概念与阅读路径）、`doc/CODEBASE_TOUR.md`（读源码）、
+> `doc/TESTING_GUIDE.md`（跑测试与已知 flaky）、`doc/DEVELOPMENT_HISTORY.md`（开发经过与被推翻的结论）。
+> 本文是**当前状态与"不能声称"清单**的权威来源。
+>
+> 生成日期：2026-09-21（后续按提交持续更新）。工作区：`/home/mamingyuan/Desktop/ros2_control-humble`。
 > 状态：核心实现、形式化、控制代价量化、Gazebo 案例研究、上游行为分析**均已完成并验证**；
 > 当前处于「把已有结果整理成合格学术成果」阶段，主要缺口是**论文级写作与一个性能侧的正结果**。
 
