@@ -9,7 +9,9 @@
 >
 > 仓库：分支 `humble-work`，fork `https://github.com/yuan669-gif/ros2_control`（上游
 > `ros-controls/ros2_control` 的 Humble 副本）。所有本项目的改动都在这个分支上，
-> `git diff --stat 469f3055..HEAD` 可以看到全貌（`469f3055` 是 Humble 基线，见 `GIT_WORKFLOW.md`）。
+> `git log --oneline` 可以看到全部 28 个提交（每个 message 都写了动机与实测数字）。
+注意 `469f3055` 只是**上游仓库**的 Humble 提交号，本仓库没有上游历史，不能 `git diff 469f3055..HEAD`；
+根提交 `b1bf616` 已经包含上游源码树 + 第一版内核。
 
 ---
 
@@ -162,7 +164,8 @@ handle_phase : 正向（根 → 叶）   ⇒ 每个子拿到本周期的父参�
 
 ```bash
 git log --oneline                        # 28 个提交，全部是本项目的工作
-git diff --stat 469f3055..HEAD           # 469f3055 是 Humble 基线（GIT_WORKFLOW.md）
+git log --oneline                        # 28 个提交；git show --stat <commit> 看单个提交
+# 与上游 Humble 的差异需要另备一份干净源码树（本仓库没有上游历史）
 ```
 
 ### 新包 `hierarchical_control/`（内核与类型层，与 ROS 解耦）
@@ -230,6 +233,8 @@ git diff --stat 469f3055..HEAD           # 469f3055 是 Humble 基线（GIT_WORK
 ## 7. 文档地图
 
 **入门（先读）**：`ONBOARDING.md`（本文件）、`CODEBASE_TOUR.md`、`TESTING_GUIDE.md`、`DEVELOPMENT_HISTORY.md`
+
+**使用者（不想读源码）**：`USER_GUIDE.md`（安装进 ROS、启用分层树、库模式 vs 管理器模式、参数/API 速查、故障排查）
 
 **理论**：`FORMAL_MODEL.md`（模型与定理）、`PASS_LOWER_BOUND.md`（最少趟数）、`CONTROL_COST_OF_LAG.md`（代价）、
 `BIDIRECTIONAL_EDGE_ANALYSIS.md`（上游行为实证）、`TWO_PASS_VS_SINGLE_PASS.md`（定量对照）

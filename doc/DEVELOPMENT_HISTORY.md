@@ -3,8 +3,10 @@
 > 这份文档是**时间线与决策记录**，不是宣传材料。它按阶段记录：当时想解决什么、做了什么、
 > **实测到了什么**、哪些结论后来被自己推翻。每一段都指向原始提交或专题文档，方便核对。
 >
-> 仓库事实：分支 `humble-work`（fork `yuan669-gif/ros2_control`），基线 `469f3055`（Humble），
-> 截至本文 28 个提交。完整历史：`git log --oneline`；每个提交的 message 都写了动机。
+> 仓库事实：分支 `humble-work`（fork `yuan669-gif/ros2_control`）。上游 Humble 基线为
+> `469f3055`（**上游仓库**的提交号），但本仓库的 `.git` 从根提交 `b1bf616` 起，没有上游历史：
+> 该根提交已包含上游源码树 + 本项目第一版内核，所以下面的阶段时间线是按**提交**组织的，
+> 不是按"相对基线的 diff"。完整历史：`git log --oneline`（28 个提交，每个 message 都写了动机）。
 
 ---
 
@@ -208,6 +210,21 @@ following controller 先停后启。它重启成功后出现在"本次激活"集
 `two_phase_enable_is_refused_for_a_cross_rate_edge`），`test_static_controller_registry` 的准入用例改用
 "不能整除的速率"作为载体；全套 ctest 21/21。
 
+## 阶段 8：面向使用者的文档，并修掉一处错误的核对指令（`2026-09-28`）
+
+新增 `doc/USER_GUIDE.md`：从安装（库模式只装 `hierarchical_control`；管理器模式构建覆盖层）到
+**三种用法**（A 库模式 / B 管理器两趟 / C 管理器执行组）的选择与步骤、参数与 API 速查、运行期约束、
+故障排查表，并明确写出两条容易被忽略的事实：
+
+1. **执行组没有 ROS 入口**（只有 C++ API），想要"标准 node + spawner"就选 B；
+2. 覆盖层的 `controller_manager` **ABI 与系统安装不同**（类新增了数据成员），
+   任何自行实例化 `ControllerManager` 的包（如 `gazebo_ros2_control`）必须一起重编。
+
+同时修掉一处**我自己写错的核对指令**：早期文档让人运行 `git diff --stat 469f3055..HEAD`，
+但 `469f3055` 只是**上游仓库**的 Humble 提交号，本仓库的 `.git` 从根提交 `b1bf616` 起
+（该提交已含上游源码树 + 第一版内核），本地没有该对象，命令会报 `bad revision`。
+现已统一改为 `git log --oneline` + `git show --stat <commit>`，并说明"与上游对比需要另备一份干净源码树"。
+
 ## 决策记录（"为什么是这样"）
 
 | 决策 | 理由 |
@@ -246,7 +263,9 @@ following controller 先停后启。它重启成功后出现在"本次激活"集
 ```bash
 git log --oneline                                   # 28 个提交，按时间
 git show <commit>                                   # 每个提交的 message = 动机 + 实测数字
-git diff --stat 469f3055..HEAD                       # 相对 Humble 基线的全部改动
+git log --oneline                                    # 28 个提交，按时间
+git show --stat <commit>                             # 单提交的改动清单（message 含实测数字）
+# 想与干净的上游 Humble 源码对比：另备一份源码树，用 git diff --no-index 或 diff -ru
 ls doc/REVIEW*.md doc/*RESPONSE*.md                  # 评审原文与回应（成对出现）
 grep -rn "撤回\|已否决\|更正" doc/*.md               # "被推翻的结论"散落位置
 ```

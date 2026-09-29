@@ -1,6 +1,7 @@
 # 源码导读：从零读这份工作
 
-> 配套：`ONBOARDING.md`（先读那个）。本文假设你熟悉 C++17 和 ROS 2 的基本用法，
+> 配套：`ONBOARDING.md`（先读那个）。**只想把功能用起来、不想读源码 → `USER_GUIDE.md`。**
+> 本文假设你熟悉 C++17 和 ROS 2 的基本用法，
 > **不**假设你熟悉 ros2_control 内部，也**不**假设你看过 FineMote。
 >
 > 读法建议：§1–§3 通读（约 20 分钟），然后从 §4 挑一层深入，边读边打开对应头文件。
@@ -60,7 +61,9 @@ write()                                 ← 硬件 write（上游）
 ## 3. 哪一行是本项目改的
 
 ```bash
-git diff --stat 469f3055..HEAD        # 469f3055 = Humble 基线（见 GIT_WORKFLOW.md）
+git log --oneline                     # 全部是本项目的工作（根提交 b1bf616 即"上游 Humble 源码 + 第一版内核"）
+git show --stat <commit>              # 单个提交改了什么、为什么（message 里带实测数字）
+# 本仓库没有上游历史，`git diff 469f3055..HEAD` 会报 bad revision（469f3055 只是上游提交号）
 git log --oneline                     # 28 个提交，每个提交的 message 都写了"为什么"
 ```
 
