@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <future>
 #include <memory>
@@ -371,10 +373,12 @@ private:
   controller_interface::InterfaceConfiguration state_interface_configuration_;
 };
 
-/// R7: the two-phase passes always run every cycle, so a controller whose own update rate differs
-/// from the manager's would silently be called off-rate. Enabling must therefore be refused, and
-/// the controller must keep running through the native, rate-gated loop.
-TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_for_a_rate_mismatched_controller)
+/// R7, narrowed for rate BUCKETS (FineMote §III-B): a lower rate is now admissible in its own
+/// bucket, but an edge whose ends are in different buckets is not -- the two passes run once per
+/// bucket, so such an edge would be ordered by two schedules with no fixed relation. This chain has
+/// `mid` claiming `leaf/target` while the leaf declares half the manager's rate, so the enable must
+/// be refused and the whole chain must keep running through the native, rate-gated loop.
+TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_for_a_cross_rate_edge)
 {
   ASSERT_GE(cm_->get_update_rate(), 2u);
   const unsigned int half_rate = cm_->get_update_rate() / 2;
@@ -382,6 +386,17 @@ TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_for_a_rate_mismat
 
   EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
   EXPECT_FALSE(cm_->two_phase_execution()) << "a refused request must not flip the flag";
+
+  // The refusal names the rate bucket as the reason, not the rate alone: this controller's rate is
+  // admissible in its own bucket, but not together with its full-rate predecessor.
+  const auto rejections = cm_->two_phase_rejected_controllers();
+  ASSERT_FALSE(rejections.empty());
+  bool named_the_edge = false;
+  for (const auto & rejection : rejections)
+  {
+    if (rejection.reason.find("rate bucket") != std::string::npos) {named_the_edge = true;}
+  }
+  EXPECT_TRUE(named_the_edge) << rejections.front().reason;
 
   // Make the native path run both halves so the counters show which path did the work.
   root_->set_two_phase_legacy(true);
@@ -528,31 +543,83 @@ TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_for_a_cross_mode_
     << "the reason must name the other end of the edge: " << rejections.front().reason;
 }
 
-/// Item E, late member: the mode is enabled for a conforming chain, and a controller that implements
-/// the interface but declares a lower update rate is configured afterwards. It used to be logged and
-/// silently left to the native loop, so the configuration looked successful while the controller did
-/// not follow the two-phase schedule. The configure now fails, and the rejected member is exposed.
-TEST_F(TestExecutionPathAdmission, a_late_low_rate_member_fails_configure_while_two_phase_is_enabled)
+/// FineMote §III-B, rate buckets: a member that declares a LOWER rate is configured while the mode
+/// is on and joins its own bucket instead of being refused. It used to be refused outright because
+/// one traversal cannot rate-gate individual controllers; a bucket can, because it is scheduled on
+/// its own due cycles. The controller is independent (no reference edge), which is exactly the
+/// configuration a bucket may own: an edge across buckets is refused (previous test).
+TEST_F(TestExecutionPathAdmission, a_late_lower_rate_member_joins_its_own_bucket)
 {
   ASSERT_GE(cm_->get_update_rate(), 2u);
+  const unsigned int half_rate = cm_->get_update_rate() / 2;
   BuildChain(0);
   ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
   ASSERT_TRUE(cm_->two_phase_execution());
 
   auto late = std::make_shared<TestStagedController>();
-  MakeChainController(late, "tp_late", "target", {}, {"joint2/velocity"}, {"joint2/position"});
+  // Independent: `joint3/velocity` is not claimed by the chain, and it declares no reference port,
+  // so there is no edge to any other member.
+  MakeChainController(late, "tp_late", "target", {}, {"joint3/velocity"}, {"joint3/position"});
   // The parameter must be set AFTER add_controller(): only then does the plugin have a live node.
-  late->get_node()->set_parameter({"update_rate", static_cast<int>(cm_->get_update_rate() / 2)});
+  late->get_node()->set_parameter({"update_rate", static_cast<int>(half_rate)});
 
-  EXPECT_EQ(Return::ERROR, cm_->configure_controller("tp_late"));
+  EXPECT_EQ(Return::OK, cm_->configure_controller("tp_late"));
+  EXPECT_TRUE(cm_->two_phase_rejected_controllers().empty());
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kMid}, {});
+  SwitchNow({kRoot}, {});
+  SwitchNow({"tp_late"}, {});
+
+  const int late_phase0 = late->update_phase_calls;
+  const int root_phase0 = root_->update_phase_calls;
+  Cycle(10);
+
+  // The bucket of `tp_late` (factor 2) runs on every other cycle, with its own (doubled) period;
+  // the full-rate chain keeps running on every cycle. Neither is ever touched by the native loop.
+  EXPECT_EQ(5, late->update_phase_calls - late_phase0) << "factor-2 bucket runs every other cycle";
+  EXPECT_EQ(late->update_phase_calls, late->handle_phase_calls);
+  EXPECT_EQ(10, root_->update_phase_calls - root_phase0) << "factor-1 bucket runs every cycle";
+  const auto expected_bucket_ns = static_cast<std::int64_t>(std::llround(
+    2.0 * 1e9 / static_cast<double>(cm_->get_update_rate())));
+  EXPECT_EQ(expected_bucket_ns, late->last_update_period_ns)
+    << "a bucket passes its own period, like the native loop does for a rate-gated controller";
+  EXPECT_EQ(0, late->legacy_update_calls);
+  EXPECT_EQ(0, root_->legacy_update_calls);
+}
+
+/// A rate that the manager cannot reach exactly (it does not divide the manager's rate) is still
+/// refused: running it off-rate would be a silent behaviour change, which is what R7 removed.
+TEST_F(TestExecutionPathAdmission, a_rate_that_does_not_divide_the_manager_rate_is_refused)
+{
+  ASSERT_GE(cm_->get_update_rate(), 3u);
+  unsigned int non_divisor = 0;
+  for (unsigned int rate = 1; rate < cm_->get_update_rate(); ++rate)
+  {
+    if ((cm_->get_update_rate() % rate) != 0)
+    {
+      non_divisor = rate;
+      break;
+    }
+  }
+  ASSERT_NE(0u, non_divisor) << "the manager rate has a non-divisor below it";
+
+  BuildChain(0);
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+  ASSERT_TRUE(cm_->two_phase_execution());
+
+  auto odd = std::make_shared<TestStagedController>();
+  MakeChainController(odd, "tp_odd", "target", {}, {"joint3/velocity"}, {"joint3/position"});
+  odd->get_node()->set_parameter({"update_rate", static_cast<int>(non_divisor)});
+
+  EXPECT_EQ(Return::ERROR, cm_->configure_controller("tp_odd"));
   const auto rejections = cm_->two_phase_rejected_controllers();
   ASSERT_EQ(1u, rejections.size());
-  EXPECT_EQ("tp_late", rejections.front().name);
-  EXPECT_NE(std::string::npos, rejections.front().reason.find("update rate"))
+  EXPECT_EQ("tp_odd", rejections.front().name);
+  EXPECT_NE(std::string::npos, rejections.front().reason.find("divisor"))
     << rejections.front().reason;
   // The conforming chain is untouched: the mode is still on and still admits its three members.
   EXPECT_TRUE(cm_->two_phase_execution());
-  EXPECT_EQ(0u, late->update_phase_calls);
+  EXPECT_EQ(0u, odd->update_phase_calls);
 }
 
 /// Item E, member deactivated: the two-phase passes must skip an inactive member while the other

@@ -343,9 +343,10 @@ void TestStagedController::set_record_diagnostics(bool enabled)
 }
 
 controller_interface::return_type TestStagedController::update_phase(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/) noexcept
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & period) noexcept
 {
   ++update_phase_calls;
+  last_update_period_ns = period.nanoseconds();
   if (fail_update_) {return controller_interface::return_type::ERROR;}
   double child_estimate = two_phase_input_;
   if (!two_phase_children_.empty())

@@ -345,17 +345,29 @@ TEST_F(TestStaticControllerRegistry, a_compiled_in_controller_runs_through_the_t
     << "a two-phase member must never go through the native update()";
 }
 
-/// ... including the ADMISSION verdict: a compiled-in controller with a rate the passes cannot honour
-/// is refused by the same checker, with the same reason, as a plugin one would be.
+/// ... including the ADMISSION verdict: a compiled-in controller with a rate that no rate BUCKET can
+/// hit exactly is refused by the same checker, with the same reason, as a plugin one would be.
 TEST_F(TestStaticControllerRegistry, a_non_conforming_compiled_in_controller_is_refused)
 {
-  ASSERT_GE(cm_->get_update_rate(), 2u);
+  ASSERT_GE(cm_->get_update_rate(), 3u);
+  // A rate that does NOT divide the manager's. A lower rate that divides IS admissible in its own
+  // period bucket since 2026-09-28 (FineMote §III-B); a non-divisor never is.
+  unsigned int non_divisor = 0;
+  for (unsigned int rate = 1; rate < cm_->get_update_rate(); ++rate)
+  {
+    if ((cm_->get_update_rate() % rate) != 0)
+    {
+      non_divisor = rate;
+      break;
+    }
+  }
+  ASSERT_NE(0u, non_divisor) << "the manager rate has a non-divisor below it";
+
   const auto controller = cm_->load_controller("leaf", kCompiledLeaf);
   ASSERT_NE(nullptr, controller);
   // The rate is a node parameter, exactly as it is for a plugin controller: the node exists after
   // `load_controller()` and `on_configure` reads it.
-  controller->get_node()->set_parameter(
-    {"update_rate", static_cast<int>(cm_->get_update_rate() / 2)});
+  controller->get_node()->set_parameter({"update_rate", static_cast<int>(non_divisor)});
 
   ASSERT_EQ(Return::OK, cm_->configure_controller("leaf"));
 
@@ -365,7 +377,8 @@ TEST_F(TestStaticControllerRegistry, a_non_conforming_compiled_in_controller_is_
   const auto rejections = cm_->two_phase_rejected_controllers();
   ASSERT_EQ(1u, rejections.size());
   EXPECT_EQ("leaf", rejections.front().name);
-  EXPECT_NE(std::string::npos, rejections.front().reason.find("update rate"));
+  EXPECT_NE(std::string::npos, rejections.front().reason.find("divisor"))
+    << rejections.front().reason;
 }
 
 /// The SAME class, loaded through BOTH routes on one manager, must behave identically: same

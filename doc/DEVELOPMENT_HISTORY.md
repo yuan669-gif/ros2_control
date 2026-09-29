@@ -182,6 +182,32 @@ following controller 先停后启。它重启成功后出现在"本次激活"集
 
 ---
 
+## 阶段 7：与 FineMote 原文对照，并补齐周期分桶（`2026-09-28`）
+
+拿到论文原文（`2608.04600v1.pdf`）后逐条对照（结果见 `doc/PAPER_ALIGNMENT_2026-09-28.md`），
+发现**调度思想完全一致**（论文 §III-B 的式 (2) 就是我们两趟 pass 的同一序列），但有两处实质差异：
+
+1. **顺序来源不同**：论文用"全局对象 + 依赖注入 + C++17 部分有序初始化"得到确定的孩子先于父的注册序
+   （其 Theorem 1），我们用**类型声明**（`static_topology`/`topology_contract`）+ 列表序准入校验
+   （`unschedulable_order`）。目的相同，机制更强（编译期写错就不过），代价是不能声称实现了它的 Thm 1。
+2. **多周期支持**：论文按周期分桶 + RMS 跨桶优先级，我们此前**拒绝任何** `update_rate != 管理器频率` 的成员。
+
+**本轮据此放宽第二条**（评审 R7 之后第一次语义放宽）：新增 `TwoPhaseEntry::factor` 与
+`generation->two_phase_buckets`，`update()` 改为**逐桶**跑"状态趟（反向）+ 命令趟（正向）"，
+并把桶自己的周期传给两个阶段——这就是论文的 period bucket。**跨桶依赖仍然拒绝**（新原因
+`cross_rate_dependency`，两端一起报）：论文自己的调和周期推论说明周期不同时**向下**方向只有"有界延迟"，
+而我们对外保证每条被接纳的边**两向 0 周期滞后**，所以宁可拒绝也不静默降级。
+不能整除管理器频率的速率也仍然拒绝（否则等于升/降频执行）。
+
+**同时明确记录的缺口**：论文的**可调度性/期限判定**（Thm 2，含总线负载抽象）与**时延上界**（Thm 3/Cor 1/Cor 2）
+我们没有；我们的互补结论是"确定性（两向 0 滞后）+ 控制代价 `ΔPM = 360·f_c·L·Δt`"，而论文的 µs 级固件指标
+与我们的周期/分配指标**量纲不同、不可比**。
+
+**测试**：`test_two_phase_execution` 24 → 25 例（新增 `a_late_lower_rate_member_joins_its_own_bucket`、
+`a_rate_that_does_not_divide_the_manager_rate_is_refused`；原"速率不匹配一律拒绝"用例改名为
+`two_phase_enable_is_refused_for_a_cross_rate_edge`），`test_static_controller_registry` 的准入用例改用
+"不能整除的速率"作为载体；全套 ctest 21/21。
+
 ## 决策记录（"为什么是这样"）
 
 | 决策 | 理由 |

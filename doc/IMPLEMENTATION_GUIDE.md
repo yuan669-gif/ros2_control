@@ -340,7 +340,8 @@ cm->two_phase_execution();   // 查询
 | 拒绝原因 | 判定 | 为什么必须拒绝 |
 |---|---|---|
 | `already_staged` | 它是**当前已安装 staged group 的成员** | staged group 与两趟遍历在同一周期各自执行一次 ⇒ 该控制器每周期跑两遍 |
-| `unsupported_update_rate` | `get_update_rate() != 0 && != 管理器频率` | 两条新路径**没有**原生循环的 `update_loop_counter_ % controller_update_factor` 门控（`controller_manager.cpp:2400–2416`），会把它按管理器频率调用，静默改变离散化 |
+| `unsupported_update_rate` | `get_update_rate() != 0`、`< 管理器频率`且**不能整除**管理器频率 | 两趟路径现在支持**周期分桶**（FineMote §III-B，见下），但一个桶只能在"整数个管理器周期"后到期；不能整除就意味着要么升频要么降频执行，静默改变离散化 |
+| `cross_rate_dependency` | 一条参考边的两端落在**不同桶**（2026-09-28 新增） | 两趟每桶各跑一次，跨桶边会被两个无固定关系的调度排序，悄悄变旧。论文的调和周期推论说明：周期不同时**向下**方向本来就不同 tick 可见（只有相等才同 tick），它用 Thm 3 给界；我们保证每条被接纳的边**两向 0 周期滞后**，因此拒绝而不是降级。两端一起报，避免只排除一端 |
 
 注意：判定依据是**成员身份**而不是"是否实现 `StagedControllerInterface`"。
 一个控制器同时支持两种执行模式是合理设计（`TestStagedController` 就是），
@@ -348,12 +349,27 @@ cm->two_phase_execution();   // 查询
 若 `two_phase_enabled_` 且该成员正在两趟成员集里，则拒绝入组；
 组内成员也被施加同一条频率规则（组同样是每周期一次、传管理器周期）。
 
+### 4.2.1 两趟的周期分桶（2026-09-28，对齐 FineMote §III-B）
+
+- `TwoPhaseEntry::factor = (rate == 0 || rate >= 管理器频率) ? 1 : 管理器频率 / rate`，与上游原生循环的
+  逐控制器门控同一条规则；不整除则在准入阶段拒绝（上表）；
+- 桶因子在**发布 generation 时**算好（`two_phase_buckets`），`update()` 只读，不分配；
+- `update()` 对每个桶：`update_loop_counter_ % factor == 0` 时才跑该桶的**状态趟（反向）+ 命令趟（正向）**，
+  并把**桶自己的周期**（`factor / update_rate_`）传给 `update_phase`/`handle_phase`；
+- 桶之间存在参考边时拒绝（`cross_rate_dependency`）；
+- 兼容性：原来"任何 `update_rate != 管理器频率` 都拒绝"的行为被**放宽**为"可整除即接受"，
+  这是评审 R7 之后第一次语义放宽，理由与边界写在上表与 `doc/PAPER_ALIGNMENT_2026-09-28.md` §3；
+- 用例：`a_late_lower_rate_member_joins_its_own_bucket`（半速桶 10 周期跑 5 次、周期 ×2、原生循环 0 次）、
+  `two_phase_enable_is_refused_for_a_cross_rate_edge`、`a_rate_that_does_not_divide_the_manager_rate_is_refused`。
+
+
 ### 4.3 成员索引：非实时构建、原子发布、实时只读
 
 ```cpp
-struct TwoPhaseEntry {   // controller_manager.hpp:542-546
+struct TwoPhaseEntry {
   const controller_interface::ControllerInterfaceBase * base;
   hierarchical_control::TwoPhaseControllerInterface * instance;
+  unsigned int factor = 1;   // 周期桶：每 factor 个管理器周期跑一次自己的两趟（2026-09-28）
 };
 static constexpr std::size_t no_two_phase = SIZE_MAX;   // 行 541
 // 不可变快照：构建者先造好新 vector，再一次性发布
@@ -422,7 +438,8 @@ if (run_two_phase) {
 - 两趟**跳过**切换挂起时的执行（成员集合可能正在变化）；
 - legacy 与 two-phase 控制器**可以混用**，但**相对顺序无保证**（已写入 API 注释）；
 - **准入**（2026-09-23）：实现 `TwoPhaseControllerInterface` 的控制器若已在 staged group 里、
-  或声明了不等于管理器频率的 `update_rate`，`set_two_phase_execution(true)` 返回 `ERROR`
+  或声明了不能整除管理器频率的 `update_rate`，或一条参考边的两端落在不同周期桶，
+  `set_two_phase_execution(true)` 返回 `ERROR`（可整除的更低频率现在按桶接受，见 §4.2.1）
   且**不改变**任何状态；反方向由 `set_staged_execution_group()` 镜像拒绝。
   这保证了一个控制器**每周期最多被一条路径执行一次**；
 - **故障包含**（2026-09-24）：**任一** `update_phase` 失败 ⇒ 该周期**整趟命令阶段都不跑**，
@@ -557,8 +574,9 @@ staged_execution_group();                       // 行 2472
 - 成员已是 **ACTIVE**（必须 INACTIVE 才能加入）；
 - 成员未实现 `StagedControllerInterface`（`dynamic_cast` 失败）；
 - **（2026-09-23）** 两趟执行已启用且该成员**正在两趟成员集里**——两条路径会同周期执行它；
-- **（2026-09-23）** 成员声明了 `!= 0 && != 管理器频率` 的 `update_rate`——组没有原生循环那种
-  逐控制器降频门控；
+- **（2026-09-23）** 成员声明了 `!= 0 && != 管理器频率` 的 `update_rate`——**staged group 仍然拒绝**：
+  组是"每周期一次、整组提交"的单位，没有桶的概念（两趟路径已放宽为周期分桶，见 §4.2.1，
+  两者语义不同：组按周期提交，桶按周期到期）；
 - `StagedExecutionGroup::create` 抛 `std::invalid_argument`（拓扑/端口错误）。
 
 **组的成员必须已经加载、configure 完成且 INACTIVE。**

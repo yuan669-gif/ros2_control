@@ -764,6 +764,17 @@ private:
   {
     const controller_interface::ControllerInterfaceBase * base;
     hierarchical_control::TwoPhaseControllerInterface * instance;
+    /// Rate bucket: this member's passes run once every `factor` manager cycles with a period of
+    /// `factor` manager periods, exactly as the native loop rate-gates a controller. 1 = every cycle.
+    ///
+    /// STATIC PERIOD BUCKETS. FineMote's static policy groups devices by period for the same reason
+    /// (its §III-B): a traversal cannot rate-gate *individual* controllers, so a period becomes a
+    /// bucket, and each bucket is scheduled with its own two passes. A reference edge between two
+    /// buckets would be ordered by two schedules with no fixed relation, so it is refused
+    /// (`cross_rate_dependency`) instead of being left silently one cycle stale: the paper bounds
+    /// that case with its Theorem 3, this implementation does not have that bound yet and therefore
+    /// declines the configuration rather than degrading it.
+    unsigned int factor = 1;
   };
   /// Why a controller that implements TwoPhaseControllerInterface may not join the two-phase path.
   enum class TwoPhaseAdmission
@@ -771,8 +782,19 @@ private:
     accepted,
     /// Already a member of the installed staged execution group, which would execute it too.
     already_staged,
-    /// Has a nonzero update_rate that the two-phase passes cannot honour.
+    /// Declares an update rate that is neither "follow the manager" nor an exact divisor of the
+    /// manager's rate, so no bucket can run it at the rate it asked for.
     unsupported_update_rate,
+    /// Takes part in a reference edge whose two ends are in DIFFERENT rate buckets. Both ends are
+    /// reported together, so excluding them can never leave one end of that edge scheduled alone.
+    ///
+    /// This is refused rather than bounded, and the reason is in FineMote's own analysis: its
+    /// harmonic corollary gets same-tick visibility for the UPWARD direction whenever the child's
+    /// period is no larger than the parent's, but for the DOWNWARD direction only when the two
+    /// periods are EQUAL -- otherwise it falls back to a response-time bound. This implementation
+    /// guarantees same-tick freshness in BOTH directions on every admitted edge, so an edge it
+    /// cannot order within one bucket is a configuration it declines instead of silently degrading.
+    cross_rate_dependency,
     /// Claims a reference interface owned by a loaded controller that is NOT a two-phase member (or
     /// is such a controller claimed by a non-member). The two ends would then be ordered by
     /// DIFFERENT schedules -- pass 2 runs after the native loop -- so the edge silently degrades to
@@ -896,6 +918,9 @@ private:
   {
     bool two_phase_enabled = false;
     std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries;
+    /// Distinct rate buckets of `two_phase_entries`, ascending, precomputed at publication time so
+    /// the control loop never has to derive them (and never allocates).
+    std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets;
     std::shared_ptr<StagedExecutionGroup> staged_group;
     /// Bumped on every publication; lets a caller (and a test) name the state it saw.
     std::uint64_t id = 0;
@@ -941,6 +966,13 @@ private:
   std::size_t two_phase_index(
     const std::vector<TwoPhaseEntry> & entries,
     const controller_interface::ControllerInterfaceBase * controller) const noexcept;
+  /// The rate bucket of a controller that declares `controller_rate`: 1 when it follows the manager
+  /// or asks for at least the manager's rate (upstream's native-loop rule), otherwise
+  /// `update_rate_ / controller_rate`, which the admission only accepts when it divides exactly.
+  unsigned int two_phase_factor(unsigned int controller_rate) const noexcept;
+  /// The distinct buckets of `entries`, ascending. Non-real-time: called when a generation is built.
+  static std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets_of(
+    const std::vector<TwoPhaseEntry> & entries);
   /// mutex copied from ROS1 Control, protects service callbacks
   /// not needed if we're guaranteed that the callbacks don't come from multiple threads
   std::mutex services_lock_;

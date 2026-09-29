@@ -123,7 +123,7 @@ git log --oneline                     # 28 个提交，每个提交的 message �
 它存在的意义是"把调度单独拿出来验证"——如果连这个都做不到同周期，那执行组的复杂度就无从谈起。
 实现它的控制器由 `update_phase()`/`handle_phase()` 驱动，并且**不会被原生循环再调一次**。
 
-> 验证：`controller_manager/test/test_two_phase_execution.cpp`（24 例，含"单趟滞后 = 深度"、
+> 验证：`controller_manager/test/test_two_phase_execution.cpp`（25 例，含"单趟滞后 = 深度"、
 > "两趟两向都新鲜"、跨模式边拒绝、列表顺序导致边反向时拒绝等）。
 
 **4.4 `controller_manager/include/controller_manager/cycle_tree.hpp`（库模式内核）**
@@ -255,7 +255,9 @@ static_assert(manifest.node_count == 3);
 **4.14 准入（admission）：哪些配置会被拒绝**
 
 `two_phase_admission()` 与 `two_phase_rejections()` 给出带原因的拒绝：`already_staged`（执行组成员不能被两趟
-再拥有一次）、`unsupported_update_rate`（两趟没有原生循环的降频门）、`cross_mode_dependency`（一条参考边两端
+再拥有一次）、`unsupported_update_rate`（速率不能整除管理器频率，做不出整数周期桶）、
+`cross_rate_dependency`（一条参考边的两端在不同周期桶；FineMote 用 Thm 3 给界，我们保证两向 0 滞后所以拒绝）、
+`cross_mode_dependency`（一条参考边两端
 一个是两趟成员、一个是 legacy）、`unschedulable_order`（上游 `controller_sorting()` 可能把"不 claim 任何
 command interface 的 chainable 控制器"排在父节点之前，使两趟对那条边同向走错）、`duplicate_instance`
 （同一个对象挂两个名字会被每阶段调用两次——实测 3 周期 6 次调用）。这些检查**在请求发出前**跑一次（对

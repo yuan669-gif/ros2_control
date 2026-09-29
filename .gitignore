@@ -51,6 +51,11 @@ FineMote-main/
 FineMote-main.zip
 FineMote系统内版本.pdf
 FineMote论文_文本.txt
+# The published paper (and its extracted text) are the same reference material; the extracted text
+# lives under log/ (already ignored) and only the paths used in doc/PAPER_ALIGNMENT_2026-09-28.md
+# are referenced.
+2608.04600v1.pdf
+2608.04600v1.txt
 
 .coverage
 build_tsan/

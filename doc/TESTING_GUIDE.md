@@ -100,13 +100,13 @@ cd build/hierarchical_control && ctest -R test_static_topology_negative --output
 | `test_contract_regression` | 12 | R3/R4/R5/R6 回归：缺状态写不算新鲜、部分写被检出、缺执行器写不提交、晚到的 sink 失败不破坏内部视图、**一个父可以给同一个子两个端口**、一个父两个孩子一致、一个子两个父被拒、一个端口两个写者被拒、同一 claimant 重复 claim 被拒、自属端口按硬件处理、外部 owner 被忽略、**非零基址偏移在 binding 后仍然正确**（早期 `void*` 往返丢地址调整的那个 bug） |
 | `test_static_topology_negative`（脚本） | 15 文件 | 12 个**必须编译失败**且诊断含特定子串；2 个必须编译通过 |
 
-### 3.2 `controller_manager`（管理器，18 个 gtest 程序 / 186 例 + pytest/launch）
+### 3.2 `controller_manager`（管理器，18 个 gtest 程序 / 187 例 + pytest/launch）
 
 本项目直接相关的：
 
 | 套件 | 例数 | 钉住的不变量 |
 |---|---|---|
-| `test_two_phase_execution` | 24 | 单趟滞后=深度 vs 两趟 0 滞后；准入拒绝（跨模式边、降频成员、可调度顺序、同实例两名）；执行状态 generation 一次发布；被拒请求不发布；切换期间成员不被原生循环接管 |
+| `test_two_phase_execution` | 25 | 单趟滞后=深度 vs 两趟 0 滞后；准入拒绝（跨模式边、不能整除的速率、跨周期桶的参考边、可调度顺序、同实例两名）；**周期分桶**（低速率成员在自己的桶里按自己的周期跑，跨桶边被拒）；执行状态 generation 一次发布；被拒请求不发布；切换期间成员不被原生循环接管 |
 | `test_staged_execution_group` | 7 | 管理器里的端到端阶段执行；整组提交；**部分成员惰性**（5 周期计数不变，补齐后 +3）；配置错误被拒 |
 | `test_atomic_activation` | 7 | 默认=上游 best-effort；开关打开后撤销本次激活；接口确实被释放；**硬件模式换回**（计数器 +202 vs 探针 +101）；**chained-mode 重启被恢复**（`'\x2'` vs `'\x3'`） |
 | `test_runtime_reconfiguration` | 3 | 周期在飞时安装执行路径被拒且不发布；移除始终允许 |
@@ -190,6 +190,7 @@ TEST_F(YourFixture, the_invariant_you_are_pinning)
 |---|---|---|---|
 | `test_controllers_chaining_with_controller_manager` | `internal_counter = 15` 期望 `14` | 计数由 10 ms 睡线程在 switch 窗口内的 tick 数决定 | 实测：改动前 3/4 通过、改动后 2/4，**同一签名**；空闲时更容易通过，加 2 个 CPU 忙循环后 4/4 通过 |
 | `test_spawner_unspawner`（`failed_activation_of_controllers`、`wildcard_entries_*`） | `Could not contact service /test_controller_manager/list_controllers` 后 `loaded_controllers` 为 0/2 | 1.0 s 服务发现超时；用例还用退出码 256 同时表示"激活失败"与"联系不上服务" | 实测：改动前 2/4、改动后 1/4 通过，**同一签名**；单独跑 `wildcard` 用例可通过 |
+| `test_hardware_spawner`（`spawner_with_later_load_of_robot_description`） | 期望第一次 spawner 调用**失败**（256）却返回 0；或 `Could not contact service /…/list_hardware_components` | 用例用一个 **2.5 s 的 wall timer** 延迟发送 `robot_description`，并假设「超时 1.0 s 的 spawner 一定在描述到达之前就问过服务」；宿主负载高时 spawner 进程启动本身就超过 2.5 s，假设失效（反向的服务发现抖动） | 实测单独跑 4 次：2 通过 / 2 失败，两种签名都出现；未触及相关代码路径（两趟默认关闭、spawner 是独立进程） |
 | `test_controller_manager_srvs` | ctest `TIMEOUT 120` | 该套件需要约 230 s | 直接跑二进制 14/14 通过；是 ctest 属性问题，不是代码问题 |
 | `test_hierarchy_comparison.post_switch_two_phase_cycles_do_not_rebuild_membership` | 偶发 `per_cycle[i] > steady + kStrayAllocation` | 宿主抢占让某些周期的分配数抖动 | 现在取**空闲基线的最小值**再比较（并允许少量 stray），不再拿单个基线周期做基准 |
 

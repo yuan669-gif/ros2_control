@@ -2697,6 +2697,10 @@ void ControllerManager::publish_generation(
   auto next = std::make_shared<ExecutionGeneration>();
   next->two_phase_enabled = two_phase_enabled;
   next->two_phase_entries = std::move(entries);
+  // Bucket list is derived HERE, once, so the control loop only reads it (and never allocates).
+  next->two_phase_buckets =
+    next->two_phase_entries ? two_phase_buckets_of(*next->two_phase_entries)
+                            : std::make_shared<const std::vector<unsigned int>>();
   next->staged_group = std::move(staged_group);
   next->id = previous->id + 1;
   std::atomic_store(&generation_, std::shared_ptr<const ExecutionGeneration>(std::move(next)));
@@ -2718,8 +2722,18 @@ std::string ControllerManager::two_phase_admission_reason(
       return "is a member of the installed staged execution group, so it would be executed by both "
              "paths in the same cycle";
     case TwoPhaseAdmission::unsupported_update_rate:
-      return "declares an update rate that differs from the controller manager's, which the "
-             "two-phase passes cannot honour (they always run every cycle)";
+      return "declares an update rate that is neither the controller manager's rate nor an exact "
+             "divisor of it, so no rate bucket could run it at the rate it asked for (a bucket has "
+             "to divide the manager's cycle count exactly, see TwoPhaseEntry::factor)";
+    case TwoPhaseAdmission::cross_rate_dependency:
+      return "takes part in a reference edge with '" + detail +
+             "' whose two ends are in DIFFERENT rate buckets, so that edge would be ordered by two "
+             "schedules with no fixed relation and would silently use an older value. FineMote's own "
+             "harmonic corollary gets same-tick visibility in the UPWARD direction when the child's "
+             "period is no larger than the parent's, but in the DOWNWARD direction only for EQUAL "
+             "periods; it bounds the rest. This implementation guarantees same-tick freshness in "
+             "BOTH directions on every admitted edge, so it refuses such an edge instead of "
+             "degrading it";
     case TwoPhaseAdmission::cross_mode_dependency:
       return "takes part in a reference edge that crosses the two-phase/legacy boundary with '" +
              detail +
@@ -2749,15 +2763,36 @@ ControllerManager::TwoPhaseAdmission ControllerManager::two_phase_admission(
     return TwoPhaseAdmission::already_staged;
   }
 
-  // The native loop rate-gates a controller whose update_rate divides the manager's rate and
-  // passes it a matching period; the two-phase passes have no such gate, so only "follow the
-  // manager" (0) or an exact match is safe.
+  // The native loop rate-gates a controller whose update_rate divides the manager's rate and passes
+  // it a matching period. The two-phase passes get the same ability through rate BUCKETS (one pair
+  // of passes per period, see TwoPhaseEntry::factor), so a lower rate is admissible as long as it
+  // divides the manager's rate exactly: a rate the manager cannot hit without drifting is refused
+  // rather than run off-rate. A rate at or above the manager's runs every cycle, as upstream does.
   const auto controller_update_rate = controller.c->get_update_rate();
-  if (controller_update_rate != 0 && controller_update_rate != update_rate_)
+  if (
+    controller_update_rate != 0 && controller_update_rate < update_rate_ &&
+    (update_rate_ % controller_update_rate) != 0)
   {
     return TwoPhaseAdmission::unsupported_update_rate;
   }
   return TwoPhaseAdmission::accepted;
+}
+
+unsigned int ControllerManager::two_phase_factor(unsigned int controller_rate) const noexcept
+{
+  return (controller_rate == 0 || controller_rate >= update_rate_) ? 1u
+                                                                  : update_rate_ / controller_rate;
+}
+
+std::shared_ptr<const std::vector<unsigned int>> ControllerManager::two_phase_buckets_of(
+  const std::vector<TwoPhaseEntry> & entries)
+{
+  auto buckets = std::make_shared<std::vector<unsigned int>>();
+  buckets->reserve(entries.size());
+  for (const auto & entry : entries) {buckets->push_back(entry.factor);}
+  std::sort(buckets->begin(), buckets->end());
+  buckets->erase(std::unique(buckets->begin(), buckets->end()), buckets->end());
+  return buckets;
 }
 
 std::vector<std::string> ControllerManager::claimed_command_interfaces(
@@ -2942,8 +2977,8 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
       if (!judged(i)) {is_member[i] = 0;}
     }
 
-    bool order_broken = false;
-    for (std::size_t parent = 0; parent < controllers.size() && !order_broken; ++parent)
+    bool edge_broken = false;
+    for (std::size_t parent = 0; parent < controllers.size() && !edge_broken; ++parent)
     {
       if (!is_member[parent]) {continue;}
       for (const auto & port : claimed_command_interfaces(controllers[parent]))
@@ -2955,7 +2990,29 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
         if (child_it == by_name.end() || !is_member[child_it->second]) {continue;}
         const std::size_t child = child_it->second;
         if (child == parent) {continue;}  // a controller's own port is not an edge
-        if (parent < child) {continue;}   // the required order
+
+        // RATE BUCKETS. The passes run once per bucket, so the two ends of one edge must be in the
+        // SAME bucket; otherwise the edge is ordered by two schedules with no fixed relation and its
+        // value silently ages. FineMote covers this case with its Theorem 3 latency bound (harmonic
+        // periods); without that bound here, the configuration is refused. Both ends are reported,
+        // so the rebuild path can never keep one end of the edge.
+        if (
+          two_phase_factor(controllers[parent].c->get_update_rate()) !=
+          two_phase_factor(controllers[child].c->get_update_rate()))
+        {
+          rejections.push_back(
+            TwoPhaseRejection{
+              controllers[parent].info.name,
+              two_phase_admission_reason(TwoPhaseAdmission::cross_rate_dependency, owner)});
+          rejections.push_back(
+            TwoPhaseRejection{
+              controllers[child].info.name,
+              two_phase_admission_reason(TwoPhaseAdmission::cross_rate_dependency, owner)});
+          edge_broken = true;  // one report is enough; the caller fails the whole operation
+          break;
+        }
+
+        if (parent < child) {continue;}  // the required order
 
         // Report BOTH ends, so a caller that can only exclude (the rebuild path) never keeps one end
         // of an edge the schedule cannot order.
@@ -2967,7 +3024,7 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
           TwoPhaseRejection{
             controllers[child].info.name,
             two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, owner)});
-        order_broken = true;  // one report is enough; the caller fails the whole operation
+        edge_broken = true;  // one report is enough; the caller fails the whole operation
         break;
       }
     }
@@ -3035,7 +3092,8 @@ ControllerManager::build_two_phase_entries(
       ++rejected_members;
       continue;
     }
-    entries->push_back(TwoPhaseEntry{controller.c.get(), instance});
+    entries->push_back(
+      TwoPhaseEntry{controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate())});
   }
 
   std::sort(
@@ -3401,8 +3459,11 @@ controller_interface::return_type ControllerManager::update(
   // shared_ptr keeps the generation and everything it owns alive for the whole cycle.
   const auto generation = current_generation();
   static const std::vector<TwoPhaseEntry> no_entries;
+  static const std::vector<unsigned int> no_buckets;
   const auto & entries =
     generation->two_phase_entries ? *generation->two_phase_entries : no_entries;
+  const auto & buckets =
+    generation->two_phase_buckets ? *generation->two_phase_buckets : no_buckets;
 
   // Opt-in staged group: explicit state (postorder) and command (preorder) phases, one group
   // commit. Its members are skipped by the native loop below, so no controller runs twice.
@@ -3428,35 +3489,53 @@ controller_interface::return_type ControllerManager::update(
     }
   }
 
-  // Opt-in FineMote-style execution: two passes over the SAME ordered controller list.
-  // Pass 1 ("Update") walks it BACKWARD so children publish before parents consume.
-  // Skipped while a switch is pending, because membership may be changing.
+  // Opt-in FineMote-style execution: two passes over the SAME ordered controller list, once per
+  // RATE BUCKET. Pass 1 ("Update") walks the list BACKWARD so children publish before parents
+  // consume; pass 2 walks it FORWARD. Skipped while a switch is pending, because membership may be
+  // changing.
+  //
+  // WHY BUCKETS. A traversal cannot rate-gate individual controllers, so a declared period becomes a
+  // bucket that runs every `factor` cycles with a `factor`-fold period -- the same rule the native
+  // loop applies per controller, and the same structuring as FineMote's static policy (its §III-B).
+  // Reference edges are only admitted WITHIN one bucket (see TwoPhaseAdmission::cross_rate_dependency),
+  // so the bucket order inside a cycle is unobservable: the buckets are independent by construction.
   const bool run_two_phase =
     generation->two_phase_enabled && !entries.empty() &&
     !switch_params_.do_switch.load(std::memory_order_acquire);
   bool two_phase_state_failed = false;
   if (run_two_phase)
   {
-    for (std::size_t slot = rt_controller_list.size(); slot-- > 0;)
+    for (const auto factor : buckets)
     {
-      auto & spec = rt_controller_list[slot];
-      const auto index = two_phase_index(entries, spec.c.get());
-      if (index == no_two_phase || !is_controller_active(*spec.c)) {continue;}
-      if (
-        entries[index].instance->update_phase(time, period) !=
-        controller_interface::return_type::OK)
+      // Upstream's rule: a controller with factor f is due when the cycle counter divides by f.
+      if ((update_loop_counter_ % factor) != 0) {continue;}
+      const auto bucket_period = (factor == 1u)
+                                   ? period
+                                   : rclcpp::Duration::from_seconds(
+                                       static_cast<double>(factor) /
+                                       static_cast<double>(update_rate_));
+      for (std::size_t slot = rt_controller_list.size(); slot-- > 0;)
       {
-        RCLCPP_ERROR(
-          get_logger(),
-          "Two-phase update stage failed for controller '%s'; this cycle computes no commands.",
-          spec.info.name.c_str());
-        ret = controller_interface::return_type::ERROR;
-        // Containment, weakest form that is still honest: a controller that rejected its own state
-        // must not then have its command stage run on that state, and the parents downstream of it
-        // cannot be trusted either. The command pass is skipped for the WHOLE cycle instead of
-        // partially applied. The command interfaces keep the previous cycle's values; there is no
-        // rollback of anything a controller already wrote (see the header).
-        two_phase_state_failed = true;
+        auto & spec = rt_controller_list[slot];
+        const auto index = two_phase_index(entries, spec.c.get());
+        if (index == no_two_phase || entries[index].factor != factor) {continue;}
+        if (!is_controller_active(*spec.c)) {continue;}
+        if (
+          entries[index].instance->update_phase(time, bucket_period) !=
+          controller_interface::return_type::OK)
+        {
+          RCLCPP_ERROR(
+            get_logger(),
+            "Two-phase update stage failed for controller '%s'; this cycle computes no commands.",
+            spec.info.name.c_str());
+          ret = controller_interface::return_type::ERROR;
+          // Containment, weakest form that is still honest: a controller that rejected its own state
+          // must not then have its command stage run on that state, and the parents downstream of it
+          // cannot be trusted either. The command pass is skipped for the WHOLE cycle instead of
+          // partially applied. The command interfaces keep the previous cycle's values; there is no
+          // rollback of anything a controller already wrote (see the header).
+          two_phase_state_failed = true;
+        }
       }
     }
   }
@@ -3523,18 +3602,30 @@ controller_interface::return_type ControllerManager::update(
   }
   else if (run_two_phase)
   {
-    for (auto & spec : rt_controller_list)
+    // Same bucket gating as the state pass: a bucket's command pass runs in the same cycle as its
+    // state pass, so a member's own precedence (state before command) holds in every bucket.
+    for (const auto factor : buckets)
     {
-      const auto index = two_phase_index(entries, spec.c.get());
-      if (index == no_two_phase || !is_controller_active(*spec.c)) {continue;}
-      if (
-        entries[index].instance->handle_phase(time, period) !=
-        controller_interface::return_type::OK)
+      if ((update_loop_counter_ % factor) != 0) {continue;}
+      const auto bucket_period = (factor == 1u)
+                                   ? period
+                                   : rclcpp::Duration::from_seconds(
+                                       static_cast<double>(factor) /
+                                       static_cast<double>(update_rate_));
+      for (auto & spec : rt_controller_list)
       {
-        RCLCPP_ERROR(
-          get_logger(), "Two-phase handle stage failed for controller '%s'.",
-          spec.info.name.c_str());
-        ret = controller_interface::return_type::ERROR;
+        const auto index = two_phase_index(entries, spec.c.get());
+        if (index == no_two_phase || entries[index].factor != factor) {continue;}
+        if (!is_controller_active(*spec.c)) {continue;}
+        if (
+          entries[index].instance->handle_phase(time, bucket_period) !=
+          controller_interface::return_type::OK)
+        {
+          RCLCPP_ERROR(
+            get_logger(), "Two-phase handle stage failed for controller '%s'.",
+            spec.info.name.c_str());
+          ret = controller_interface::return_type::ERROR;
+        }
       }
     }
   }

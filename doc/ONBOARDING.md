@@ -198,7 +198,7 @@ git diff --stat 469f3055..HEAD           # 469f3055 是 Humble 基线（GIT_WORK
 | `hierarchical_control/test/static_topology_negative/` | **必须编译失败**的语料（15 个源文件）+ `test_static_topology_negative.py` 驱动 |
 | `hierarchical_control/test/measure_*.py` | 编译成本测量（`measure_compile_cost.py`、`measure_binding_cost.py`） |
 | `hierarchical_control/test/run_tsan_publish_protocol.sh` | 发布会话协议的 TSan |
-| `controller_manager/test/` | 管理器级 gtest（18 个程序、186 个用例）+ 启动/pytest 用例 |
+| `controller_manager/test/` | 管理器级 gtest（18 个程序、187 个用例）+ 启动/pytest 用例 |
 | `controller_manager/test/test_composite_library/` | 通用 composite 宿主 + typed 分叉树插件（同一内核的第二种宿主） |
 | `controller_manager/test/run_tsan_real_manager.sh` | 给真实 `ControllerManager` 插桩的 TSan |
 | `case_study/` | Gazebo 闭环案例（控制器 + 配置 + 日志） |
@@ -241,6 +241,8 @@ git diff --stat 469f3055..HEAD           # 469f3055 是 Humble 基线（GIT_WORK
 **元编程**：`METAPROGRAMMING_CONTRACT.md`、`TOPOLOGY_CONTRACT_JOIN.md`、`PORT_DIMENSIONS.md`、`COMPILE_COST.md`
 
 **案例**：`GAZEBO_CASE_STUDY.md`（真实仿真闭环）
+
+**与论文的对照**：`PAPER_ALIGNMENT_2026-09-28.md`（逐条对照 FineMote 的思想/机制/定理，判定一致·更窄·缺失·更强）
 
 **评审史（原始记录）**：`REVIEW_HUMBLE_WORK_2026-09-23.md`、`REVIEW_RESPONSE_2026-09-23.md`、
 `REVIEW_REQUIREMENTS_2026-09-24.md`、`REVIEW_REQUIREMENTS_RESPONSE_2026-09-24.md`、

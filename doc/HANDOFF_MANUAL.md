@@ -342,10 +342,11 @@ void set_atomic_activation(bool);   bool atomic_activation() const;
 ```
 
 `set_two_phase_execution(true)` **会拒绝**（返回 `ERROR`，状态不变）当存在实现
-`TwoPhaseControllerInterface` 的控制器①已是当前 staged group 成员，或②声明了
-`!= 0 && != 管理器频率` 的 `update_rate`。`set_staged_execution_group()` 做反方向镜像拒绝。
-原因：两条新路径都每周期执行一次、都传管理器周期，没有原生循环的逐控制器降频门控
-（`controller_manager.cpp:2400–2416`），重叠或降频会被静默破坏。详见
+`TwoPhaseControllerInterface` 的控制器①已是当前 staged group 成员，②声明了**不能整除**管理器频率的
+`update_rate`，或③一条参考边的两端落在**不同周期桶**。`set_staged_execution_group()` 做反方向镜像拒绝，
+并且**组仍然拒绝任何 `!= 0 && != 管理器频率` 的成员**（组是"每周期一次、整组提交"的单位，没有桶）。
+2026-09-28 起两趟路径支持**周期分桶**（FineMote §III-B）：可整除的更低频率会在自己的桶里按自己的周期跑，
+理由与边界见 `doc/PAPER_ALIGNMENT_2026-09-28.md` §3。组的部分见
 `doc/REVIEW_RESPONSE_2026-09-23.md` §R7。
 
 **配置时机（2026-09-26 起为强制规则，不再只是文档约束）**：模式/成员/计划已经是一个

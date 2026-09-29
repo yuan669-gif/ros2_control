@@ -131,6 +131,9 @@ public:
 
   int update_phase_calls = 0;
   int handle_phase_calls = 0;
+  /// Period the manager passed to the last `update_phase()`, so a test can check that a rate BUCKET
+  /// receives the bucket's own period (the native loop does the same for a rate-gated controller).
+  std::int64_t last_update_period_ns = 0;
 
   // ---- test configuration -------------------------------------------------------------------
   CONTROLLER_MANAGER_PUBLIC
