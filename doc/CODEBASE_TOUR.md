@@ -126,7 +126,7 @@ git log --oneline                     # 28 个提交，每个提交的 message �
 它存在的意义是"把调度单独拿出来验证"——如果连这个都做不到同周期，那执行组的复杂度就无从谈起。
 实现它的控制器由 `update_phase()`/`handle_phase()` 驱动，并且**不会被原生循环再调一次**。
 
-> 验证：`controller_manager/test/test_two_phase_execution.cpp`（25 例，含"单趟滞后 = 深度"、
+> 验证：`controller_manager/test/test_two_phase_execution.cpp`（27 例，含"单趟滞后 = 深度"、
 > "两趟两向都新鲜"、跨模式边拒绝、列表顺序导致边反向时拒绝等）。
 
 **4.4 `controller_manager/include/controller_manager/cycle_tree.hpp`（库模式内核）**

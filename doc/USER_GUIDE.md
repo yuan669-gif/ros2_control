@@ -476,6 +476,7 @@ controller_manager:
 | 参数 | 默认 | 作用 |
 |---|---|---|
 | `update_rate` | 100 | 管理器周期（Hz，上游） |
+| `wcet_ns`（**每个控制器**自己的参数） | 未声明 | 该控制器一周期（两个阶段合计）的最坏执行时间，纳秒。声明后管理器会给出声明口径的可调度性报告；不声明则报告为"未检查" |
 | `two_phase_execution` | false | 开启两趟执行（成员在首次列表变化/切换时推导） |
 | `atomic_activation` | false | 本次 switch 的全有或全无回滚 |
 
@@ -490,6 +491,7 @@ C++ API（需要覆盖层）：
 | `execution_generation()` | 执行代单调 id（可观测"配置变更是否发布"） |
 | `control_loop_busy()` | 周期是否在飞（决定能否安装执行路径） |
 | `two_phase_rejected_controllers()` | 当前被两趟排除的成员及原因 |
+| `two_phase_schedulability()` | 声明 WCET 口径的可调度性报告（利用率、Liu–Layland 界、是否满足、最忙的桶） |
 | `set_static_controller_registry(...)` / `register_static_controller_type<T>(type)` | 编译内置控制器（工厂注册；首次加载前注册） |
 
 ---
@@ -519,8 +521,10 @@ C++ API（需要覆盖层）：
 - **执行组自身在配置完成后零分配**（`run()` 100 次 0 次分配，有断言）；但
   `ControllerManager::update()` **整体仍会分配**，来源是上游 Humble 代码（lifecycle 状态查询、
   控制器列表拷贝）。因此"接进来就能零分配"不成立，正确说法是"我们没有新增实时路径分配"。
-- **没有 WCET/期限判定**：本仓库不测 WCET，也不做可调度性分析（论文有，我们没有）。请按你自己的
-  硬件与周期自行留余量。
+- **有"声明 WCET"口径的可调度性检查，但没有 WCET 分析**：给每个控制器声明 `wcet_ns` 后，管理器按
+  速率桶算利用率并套用 Liu–Layland 充分条件（日志会给结论，`two_phase_schedulability()` 可读）。
+  这是**你声明什么就检查什么**：不声明 → 报告"未检查"；界不满足 → 只报警告，**不拒绝**配置
+  （调度仍能跑，只是没有期限保证）。也不建模通信/总线负载。真正的 WCET 与余量仍需你自己负责。
 - 控制循环里不要做分配/日志风暴；成员激活缓存（`refresh_member_active_state()`）只在切换后刷新，
   **非切换导致的状态变化**可能让缓存过期（已知妥协）。
 

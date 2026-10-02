@@ -201,7 +201,7 @@ git log --oneline                        # 28 个提交；git show --stat <commi
 | `hierarchical_control/test/static_topology_negative/` | **必须编译失败**的语料（15 个源文件）+ `test_static_topology_negative.py` 驱动 |
 | `hierarchical_control/test/measure_*.py` | 编译成本测量（`measure_compile_cost.py`、`measure_binding_cost.py`） |
 | `hierarchical_control/test/run_tsan_publish_protocol.sh` | 发布会话协议的 TSan |
-| `controller_manager/test/` | 管理器级 gtest（18 个程序、187 个用例）+ 启动/pytest 用例 |
+| `controller_manager/test/` | 管理器级 gtest（18 个程序、189 个用例）+ 启动/pytest 用例 |
 | `controller_manager/test/test_composite_library/` | 通用 composite 宿主 + typed 分叉树插件（同一内核的第二种宿主） |
 | `controller_manager/test/run_tsan_real_manager.sh` | 给真实 `ControllerManager` 插桩的 TSan |
 | `case_study/` | Gazebo 闭环案例（控制器 + 配置 + 日志） |
@@ -233,6 +233,8 @@ git log --oneline                        # 28 个提交；git show --stat <commi
 ## 7. 文档地图
 
 **入门（先读）**：`ONBOARDING.md`（本文件）、`CODEBASE_TOUR.md`、`TESTING_GUIDE.md`、`DEVELOPMENT_HISTORY.md`
+
+**汇报/总览**：`FINAL_REPORT_2026-09-28.md`（最终报告：问题、方法、证据表、明确不能声称的清单、下一步优先级）
 
 **使用者（不想读源码）**：`USER_GUIDE.md`（安装进 ROS、启用分层树、库模式 vs 管理器模式、参数/API 速查、故障排查）
 

@@ -14,6 +14,8 @@
 
 #include "controller_manager/controller_manager.hpp"
 
+#include <cmath>
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <string>
@@ -2701,6 +2703,34 @@ void ControllerManager::publish_generation(
   next->two_phase_buckets =
     next->two_phase_entries ? two_phase_buckets_of(*next->two_phase_entries)
                             : std::make_shared<const std::vector<unsigned int>>();
+  // Declared-WCET schedulability of the set being published, computed here (non-real-time) so the
+  // control loop and the accessor only ever read it.
+  next->two_phase_schedulability =
+    next->two_phase_entries
+      ? two_phase_schedulability_of(*next->two_phase_entries, *next->two_phase_buckets)
+      : nullptr;
+  if (next->two_phase_schedulability && next->two_phase_schedulability->members != 0)
+  {
+    const auto & check = *next->two_phase_schedulability;
+    if (!check.complete)
+    {
+      RCLCPP_WARN(
+        get_logger(),
+        "Two-phase schedulability NOT checked: %zu of %zu member(s) declared no 'wcet_ns' "
+        "parameter, so no utilization bound can be computed. Declare it in each controller's "
+        "parameters to get the check.",
+        check.members - check.declared, check.members);
+    }
+    else
+    {
+      RCLCPP_INFO(
+        get_logger(),
+        "Two-phase declared-WCET schedulability: U=%.4f, Liu-Layland bound for %zu bucket(s)"
+        "=%.4f, verdict=%s (busiest bucket: factor %zu, U=%.4f).",
+        check.utilization, check.buckets, check.bound, check.sufficient ? "SUFFICIENT" : "NOT MET",
+        check.worst_bucket_factor, check.worst_bucket_utilization);
+    }
+  }
   next->staged_group = std::move(staged_group);
   next->id = previous->id + 1;
   std::atomic_store(&generation_, std::shared_ptr<const ExecutionGeneration>(std::move(next)));
@@ -2782,6 +2812,52 @@ unsigned int ControllerManager::two_phase_factor(unsigned int controller_rate) c
 {
   return (controller_rate == 0 || controller_rate >= update_rate_) ? 1u
                                                                   : update_rate_ / controller_rate;
+}
+
+std::shared_ptr<const ControllerManager::TwoPhaseSchedulability>
+ControllerManager::two_phase_schedulability_of(
+  const std::vector<TwoPhaseEntry> & entries, const std::vector<unsigned int> & buckets) const
+{
+  auto report = std::make_shared<TwoPhaseSchedulability>();
+  report->members = entries.size();
+  report->buckets = buckets.size();
+  report->complete = true;
+  report->declared = 0;
+  for (const auto & entry : entries)
+  {
+    if (entry.wcet_ns > 0) {++report->declared;}
+    else {report->complete = false;}
+  }
+
+  // One fixed-priority task per bucket: C_w = Σ declared WCETs of the bucket, T_w = bucket period.
+  // An implicit deadline (T_w) is what the two-phase passes have: they run once per bucket period.
+  for (const auto factor : buckets)
+  {
+    std::int64_t bucket_wcet_ns = 0;
+    for (const auto & entry : entries)
+    {
+      if (entry.factor == factor) {bucket_wcet_ns += entry.wcet_ns;}
+    }
+    const auto bucket_period_ns =
+      static_cast<double>(factor) * 1e9 / static_cast<double>(update_rate_);
+    const double bucket_utilization =
+      bucket_period_ns > 0.0 ? static_cast<double>(bucket_wcet_ns) / bucket_period_ns : 0.0;
+    report->utilization += bucket_utilization;
+    if (bucket_utilization > report->worst_bucket_utilization)
+    {
+      report->worst_bucket_utilization = bucket_utilization;
+      report->worst_bucket_factor = factor;
+    }
+  }
+
+  // Liu & Layland sufficient condition for W fixed-priority tasks with implicit deadlines.
+  report->bound =
+    report->buckets == 0
+      ? 0.0
+      : static_cast<double>(report->buckets) *
+          (std::pow(2.0, 1.0 / static_cast<double>(report->buckets)) - 1.0);
+  report->sufficient = report->complete && report->utilization <= report->bound;
+  return report;
 }
 
 std::shared_ptr<const std::vector<unsigned int>> ControllerManager::two_phase_buckets_of(
@@ -3050,6 +3126,12 @@ ControllerManager::two_phase_rejected_controllers() const
     current_generation()->staged_group);
 }
 
+std::shared_ptr<const ControllerManager::TwoPhaseSchedulability>
+ControllerManager::two_phase_schedulability() const
+{
+  return current_generation()->two_phase_schedulability;
+}
+
 std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
 ControllerManager::two_phase_entries() const noexcept
 {
@@ -3092,8 +3174,25 @@ ControllerManager::build_two_phase_entries(
       ++rejected_members;
       continue;
     }
-    entries->push_back(
-      TwoPhaseEntry{controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate())});
+    // Declared WCET for the schedulability report. It is a controller parameter, exactly like
+    // `update_rate`; an undeclared one stays 0 and makes the check incomplete on purpose.
+    std::int64_t wcet_ns = 0;
+    try
+    {
+      controller.c->get_node()->get_parameter("wcet_ns", wcet_ns);
+    }
+    catch (const std::exception & e)
+    {
+      // A `wcet_ns` of the wrong type must not break admission: report it as undeclared instead.
+      RCLCPP_WARN(
+        get_logger(),
+        "Ignoring 'wcet_ns' of controller '%s': %s (expected an integer number of nanoseconds).",
+        controller.info.name.c_str(), e.what());
+      wcet_ns = 0;
+    }
+    if (wcet_ns < 0) {wcet_ns = 0;}
+    entries->push_back(TwoPhaseEntry{
+      controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate()), wcet_ns});
   }
 
   std::sort(

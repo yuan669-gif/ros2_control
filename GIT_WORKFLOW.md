@@ -33,6 +33,7 @@ Do not force-push shared history as a routine update.
 | 想从零读源码 | `doc/CODEBASE_TOUR.md`（一个周期的 trace、四层阅读顺序、最小可跑例子、陷阱清单） |
 | 想跑测试 / 复现数字 | `doc/TESTING_GUIDE.md`（环境、命令、套件目录、已知 flaky 的判定方法、测量脚本口径） |
 | 想知道开发经过与被推翻的结论 | `doc/DEVELOPMENT_HISTORY.md`（阶段时间线、决策记录、撤回清单） |
+| **要给别人汇报 / 一页看懂全貌** | `doc/FINAL_REPORT_2026-09-28.md`（最终报告：问题、方法、证据表、不能声称、下一步） |
 | 想知道我们和 FineMote 论文的异同 | `doc/PAPER_ALIGNMENT_2026-09-28.md`（逐条对照 + 判定：一致 / 更窄 / 缺失 / 更强） |
 | 想要权威的"当前实现状态 / 还没做什么" | `doc/IMPLEMENTATION_GUIDE.md` §12 + `doc/HANDOFF_MANUAL.md` |
 

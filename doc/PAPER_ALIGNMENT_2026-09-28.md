@@ -124,6 +124,8 @@ further derive an upper bound on intra-tree decision latency"**
 
 | 用例 | 钉住什么 |
 |---|---|
+| `declared_wcet_schedulability_is_reported_per_bucket` | 声明 WCET 后按桶算利用率与 Liu–Layland 界；不满足界时**报告 NOT MET 但不拒绝**（调度仍可运行，只是没有期限保证） |
+| `an_undeclared_wcet_makes_the_check_incomplete` | 未声明 WCET ⇒ `complete=false`、`sufficient=false`（"未检查"绝不读成"通过"）；补齐后通过 |
 | `a_late_lower_rate_member_joins_its_own_bucket` | 半速成员独立成桶：10 周期里桶跑 5 次、周期是 2 倍、原生循环 0 次调用；同周期全速链跑 10 次 |
 | `two_phase_enable_is_refused_for_a_cross_rate_edge` | `mid` 认领 `leaf/target` 而 leaf 半速 → 启用被拒，理由点名"rate bucket"；整链回到原生循环（10 周期里 5 对，且 `legacy_update_calls > 0`） |
 | `a_rate_that_does_not_divide_the_manager_rate_is_refused` | 不能整除的速率仍然拒绝（不会被悄悄降频/升频执行） |
@@ -164,13 +166,19 @@ further derive an upper bound on intra-tree decision latency"**
 
 ---
 
-## 6. 论文有、我们没有（明确缺口，按重要性）
+## 6. 论文有、我们没有（明确缺口，按重要性；第 1 条已补到"声明 WCET"口径）
 
 1. **可调度性/期限分析（Thm 2 + Lemma 1/2）**：论文把总线响应抽象成周期负载，用 Liu–Layland 给
-   `Σ C/P ≤ (N_B+W)(2^{1/(N_B+W)} − 1)` 的充分条件。我们**没有任何 WCET 与期限判定**
-   （`IMPLEMENTATION_GUIDE.md` §12.1 #9：只测分配次数与中位耗时，且宿主非实时）。
-   → 若要写进论文，这是最需要补的一条；在 ros2_control/Linux 上诚实的做法是**接受用户声明的 WCET**
-   做同样的判定，而不是测一个假的 WCET。
+   `Σ C/P ≤ (N_B+W)(2^{1/(N_B+W)} − 1)` 的充分条件。
+   **2026-09-28 已补上论文式的充分条件检查（按"声明 WCET"口径）**：每个成员可从自己的
+   `wcet_ns` 参数声明一个周期的执行时间（含两个阶段，对应论文的 `C_n`），管理器按**速率桶**聚合成
+   固定优先级任务（桶周期 `T_w`），计算 `U = Σ C_w/T_w` 与 `U ≤ W(2^{1/W}−1)`，并发布
+   `TwoPhaseSchedulability{complete, members, declared, buckets, utilization, bound, sufficient,
+   worst_bucket_factor}`（`ControllerManager::two_phase_schedulability()`），发布时打印日志；
+   未声明的成员会让结论是 **"未检查"** 而不是"通过"。用例：
+   `declared_wcet_schedulability_is_reported_per_bucket`、`an_undeclared_wcet_makes_the_check_incomplete`。
+   **仍然不同**：我们不测 WCET（不声称 WCET 分析），也不建模总线/通信负载（`read()`/`write()` + DDS
+   是这段边界，管理器不建模），因此这仍是"论文的充分条件 + 用户声明的输入"，不是论文的完整分析。
 2. **树内决策时延上界（Thm 3）**：我们没有响应时间界；跨桶边因此只能拒绝（§3）。
    → 可行的下一步：为我们承认的"调和 + 跨桶"情形推导一个**周期数**单位的上界（论文用 µs，我们用周期），
    与现有 `ΔPM` 定律衔接。

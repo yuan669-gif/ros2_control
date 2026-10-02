@@ -225,6 +225,25 @@ following controller 先停后启。它重启成功后出现在"本次激活"集
 （该提交已含上游源码树 + 第一版内核），本地没有该对象，命令会报 `bad revision`。
 现已统一改为 `git log --oneline` + `git show --stat <commit>`，并说明"与上游对比需要另备一份干净源码树"。
 
+## 阶段 9：补上"声明 WCET"的可调度性检查（`2026-09-28`）
+
+对照论文时列出的最大缺口是**分析层**：论文有 Thm 2（Liu–Layland 充分条件，含总线负载抽象）与
+Thm 3（树内时延上界），我们此前两者都没有。本轮把**可检查的那一半**补上，并把不能声称的部分写清：
+
+- 新增每个控制器参数 `wcet_ns`（整数纳秒，覆盖两个阶段，对应论文的 `C_n`）；
+- 管理器在**发布 generation 时**（非实时）按速率桶聚合成固定优先级任务（桶周期 `T_w`），
+  计算 `U = Σ C_w/T_w` 与 `U ≤ W(2^{1/W}−1)`，发布 `TwoPhaseSchedulability`，
+  并在日志里给出结论与**最忙的桶**（`ControllerManager::two_phase_schedulability()` 可读）；
+- **未声明 ⇒ "未检查"**（`complete=false`, `sufficient=false`），绝不读成"通过"；
+  **不满足界 ⇒ 只报告、不拒绝**（调度仍可运行，只是没有期限保证）；
+- 明确**不**建模总线/通信负载（`read()`/`write()` + DDS 是这段边界），**不**做 WCET 分析——
+  这两点是"论文有、我们没有"的残余，写进 `PAPER_ALIGNMENT_2026-09-28.md` §6。
+
+用例：`declared_wcet_schedulability_is_reported_per_bucket`（舒适集 U=0.30 ≤ 0.828；
+9 ms+9 ms ⇒ U=1.35 > 0.828 报告 NOT MET 且模式保持开启）、
+`an_undeclared_wcet_makes_the_check_incomplete`（3 成员 1 桶、未声明 ⇒ 不完整；补齐 3×1 ms ⇒ U=0.3 通过）。
+`test_two_phase_execution` 25 → 27 例。
+
 ## 决策记录（"为什么是这样"）
 
 | 决策 | 理由 |

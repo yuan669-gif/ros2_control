@@ -100,13 +100,13 @@ cd build/hierarchical_control && ctest -R test_static_topology_negative --output
 | `test_contract_regression` | 12 | R3/R4/R5/R6 回归：缺状态写不算新鲜、部分写被检出、缺执行器写不提交、晚到的 sink 失败不破坏内部视图、**一个父可以给同一个子两个端口**、一个父两个孩子一致、一个子两个父被拒、一个端口两个写者被拒、同一 claimant 重复 claim 被拒、自属端口按硬件处理、外部 owner 被忽略、**非零基址偏移在 binding 后仍然正确**（早期 `void*` 往返丢地址调整的那个 bug） |
 | `test_static_topology_negative`（脚本） | 15 文件 | 12 个**必须编译失败**且诊断含特定子串；2 个必须编译通过 |
 
-### 3.2 `controller_manager`（管理器，18 个 gtest 程序 / 187 例 + pytest/launch）
+### 3.2 `controller_manager`（管理器，18 个 gtest 程序 / 189 例 + pytest/launch）
 
 本项目直接相关的：
 
 | 套件 | 例数 | 钉住的不变量 |
 |---|---|---|
-| `test_two_phase_execution` | 25 | 单趟滞后=深度 vs 两趟 0 滞后；准入拒绝（跨模式边、不能整除的速率、跨周期桶的参考边、可调度顺序、同实例两名）；**周期分桶**（低速率成员在自己的桶里按自己的周期跑，跨桶边被拒）；执行状态 generation 一次发布；被拒请求不发布；切换期间成员不被原生循环接管 |
+| `test_two_phase_execution` | 27 | 单趟滞后=深度 vs 两趟 0 滞后；准入拒绝（跨模式边、不能整除的速率、跨周期桶的参考边、可调度顺序、同实例两名）；**周期分桶**（低速率成员在自己的桶里按自己的周期跑，跨桶边被拒）；**声明 WCET 的可调度性报告**（按桶算 U 与 Liu–Layland 界；未声明 ⇒ "未检查"；不满足 ⇒ 报告不拒绝）；执行状态 generation 一次发布；被拒请求不发布；切换期间成员不被原生循环接管 |
 | `test_staged_execution_group` | 7 | 管理器里的端到端阶段执行；整组提交；**部分成员惰性**（5 周期计数不变，补齐后 +3）；配置错误被拒 |
 | `test_atomic_activation` | 7 | 默认=上游 best-effort；开关打开后撤销本次激活；接口确实被释放；**硬件模式换回**（计数器 +202 vs 探针 +101）；**chained-mode 重启被恢复**（`'\x2'` vs `'\x3'`） |
 | `test_runtime_reconfiguration` | 3 | 周期在飞时安装执行路径被拒且不发布；移除始终允许 |

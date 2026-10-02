@@ -1355,3 +1355,95 @@ TEST_F(TestExecutionPathAdmission, two_phase_enable_is_refused_when_one_object_h
                                 << rejections.front().reason;
 }
 
+
+/// FineMote Theorem 2 analogue: with DECLARED execution times the two-phase schedule is checkable.
+/**
+ * The buckets are fixed-priority tasks (shorter period first, RMS) with implicit deadlines, so the
+ * Liu & Layland sufficient condition applies. This implementation never measures a WCET, so the check
+ * is only as true as the numbers the controllers declare -- and a member that declares nothing makes
+ * the whole verdict "not checked" rather than "fine". These three cases pin exactly that:
+ * a comfortable set, a set that does not meet the bound, and an incomplete one.
+ */
+TEST_F(TestExecutionPathAdmission, declared_wcet_schedulability_is_reported_per_bucket)
+{
+  ASSERT_GE(cm_->get_update_rate(), 2u);
+  const unsigned int half_rate = cm_->get_update_rate() / 2;
+
+  // Two independent members (no edge, so no cross-bucket refusal): factor 1 and factor 2.
+  auto fast = std::make_shared<TestStagedController>();
+  auto slow = std::make_shared<TestStagedController>();
+  MakeChainController(fast, "tp_fast", "target", {}, {"joint2/velocity"}, {"joint2/position"});
+  MakeChainController(slow, "tp_slow", "target", {}, {"joint3/velocity"}, {"joint3/position"});
+  slow->get_node()->set_parameter({"update_rate", static_cast<int>(half_rate)});
+
+  // Declared WCETs (both stages together): 2 ms at factor 1 and 2 ms at factor 2 (period 20 ms).
+  //   U = 2/10 + 2/20 = 0.30, bound for W=2 = 2*(sqrt(2)-1) ≈ 0.828 => SUFFICIENT.
+  fast->get_node()->set_parameter({"wcet_ns", 2000000});
+  slow->get_node()->set_parameter({"wcet_ns", 2000000});
+
+  ASSERT_EQ(Return::OK, ConfigureWithPump("tp_fast"));
+  ASSERT_EQ(Return::OK, ConfigureWithPump("tp_slow"));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+
+  const auto relaxed = cm_->two_phase_schedulability();
+  ASSERT_NE(nullptr, relaxed);
+  EXPECT_EQ(2u, relaxed->members);
+  EXPECT_EQ(2u, relaxed->declared);
+  EXPECT_TRUE(relaxed->complete);
+  EXPECT_EQ(2u, relaxed->buckets);
+  EXPECT_TRUE(relaxed->sufficient);
+  EXPECT_NEAR(0.30, relaxed->utilization, 1e-9);
+  EXPECT_NEAR(2.0 * (std::sqrt(2.0) - 1.0), relaxed->bound, 1e-9);
+  EXPECT_EQ(1u, relaxed->worst_bucket_factor)
+    << "2 ms in a 10 ms bucket (0.20) is busier than 2 ms in a 20 ms bucket (0.10)";
+
+  // Now declare execution times that break the bound: 9 ms at factor 1 + 9 ms at factor 2.
+  //   U = 0.9 + 0.45 = 1.35 > 0.828 => NOT MET, and the report must say so (as a report, not a
+  //   refusal: the schedule can still be run, it just has no deadline guarantee).
+  fast->get_node()->set_parameter({"wcet_ns", 9000000});
+  slow->get_node()->set_parameter({"wcet_ns", 9000000});
+  // A re-publication re-reads the declared times (in a real system: any list change, or a restart).
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(false));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+
+  const auto overloaded = cm_->two_phase_schedulability();
+  ASSERT_NE(nullptr, overloaded);
+  EXPECT_TRUE(overloaded->complete);
+  EXPECT_FALSE(overloaded->sufficient);
+  EXPECT_NEAR(1.35, overloaded->utilization, 1e-9);
+  EXPECT_TRUE(cm_->two_phase_execution()) << "a failed utilization bound is a report, not a refusal";
+}
+
+/// An undeclared WCET must read as "not checked", never as "checked and fine".
+TEST_F(TestExecutionPathAdmission, an_undeclared_wcet_makes_the_check_incomplete)
+{
+  BuildChain(0);
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+
+  const auto report = cm_->two_phase_schedulability();
+  ASSERT_NE(nullptr, report);
+  EXPECT_EQ(3u, report->members);
+  EXPECT_EQ(0u, report->declared);
+  EXPECT_FALSE(report->complete);
+  EXPECT_FALSE(report->sufficient) << "an unknown execution time must never satisfy the bound";
+  EXPECT_NEAR(0.0, report->utilization, 1e-12);
+  // All three chain members follow the manager rate, so they are ONE bucket (buckets are per period,
+  // not per member) and the bound for a single task is 1.0.
+  EXPECT_EQ(1u, report->buckets);
+  EXPECT_NEAR(1.0, report->bound, 1e-12)
+    << "the bound is reported for the bucket count even when the check is incomplete";
+
+  // Declaring the times for all three members completes it.
+  root_->get_node()->set_parameter({"wcet_ns", 1000000});
+  mid_->get_node()->set_parameter({"wcet_ns", 1000000});
+  leaf_->get_node()->set_parameter({"wcet_ns", 1000000});
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(false));
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true));
+
+  const auto completed = cm_->two_phase_schedulability();
+  ASSERT_NE(nullptr, completed);
+  EXPECT_TRUE(completed->complete);
+  EXPECT_EQ(3u, completed->declared);
+  EXPECT_TRUE(completed->sufficient);
+  EXPECT_NEAR(0.3, completed->utilization, 1e-9) << "3 ms of a single 10 ms bucket";
+}

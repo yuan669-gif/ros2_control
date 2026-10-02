@@ -362,6 +362,14 @@ cm->two_phase_execution();   // 查询
 - 用例：`a_late_lower_rate_member_joins_its_own_bucket`（半速桶 10 周期跑 5 次、周期 ×2、原生循环 0 次）、
   `two_phase_enable_is_refused_for_a_cross_rate_edge`、`a_rate_that_does_not_divide_the_manager_rate_is_refused`。
 
+**声明 WCET 的可调度性报告（2026-09-28，论文 Thm 2 的对应物）**：成员可用自己的参数
+`wcet_ns`（整数纳秒，覆盖两个阶段，对应论文的 `C_n`）声明一周期的最坏执行时间；管理器在**发布
+generation 时**（非实时）按桶聚合，算 `U = Σ C_w / T_w` 与 Liu–Layland 充分条件
+`U ≤ W(2^{1/W} − 1)`，发布 `TwoPhaseSchedulability`（`two_phase_schedulability()` 可读）并在日志打印
+结论与**最忙的桶**。未声明的成员使 `complete=false`、`sufficient=false`（"未检查"≠"通过"）。
+**注意**：这是"论文的充分条件 + 用户声明的输入"，不是 WCET 分析；也不建模总线/通信负载
+（`read()`/`write()` + DDS 是这段边界）。界不满足时**只报告、不拒绝**：调度仍可运行，只是没有期限保证。
+
 
 ### 4.3 成员索引：非实时构建、原子发布、实时只读
 

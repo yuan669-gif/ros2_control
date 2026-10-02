@@ -324,6 +324,7 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   std::vector<TwoPhaseRejection> two_phase_rejected_controllers() const;
 
+
   template <
     typename T, typename std::enable_if<
                   std::is_convertible<T *, controller_interface::ControllerInterfaceBase *>::value,
@@ -775,7 +776,59 @@ private:
     /// that case with its Theorem 3, this implementation does not have that bound yet and therefore
     /// declines the configuration rather than degrading it.
     unsigned int factor = 1;
+    /// DECLARED worst-case execution time of this controller for one cycle, in nanoseconds, read from
+    /// its own `wcet_ns` parameter; 0 means "not declared".
+    ///
+    /// It covers BOTH stages of the device (state + command), because that is the unit the
+    /// schedulability condition below is about -- FineMote's `C_n` likewise covers both stages of a
+    /// device task. It is *declared*, never measured: this overlay runs on Linux and has no WCET
+    /// analysis, so the framework can only check the arithmetic the user asserts. A member that
+    /// declares nothing makes the whole check incomplete, and the report says so instead of guessing.
+    std::int64_t wcet_ns = 0;
   };
+
+public:
+  /// What the declared WCETs say about the two-phase schedule (FineMote Theorem 2 analogue).
+  /**
+   * The two-phase path runs one pair of passes per RATE BUCKET, so the schedule is a fixed-priority
+   * one: a shorter period is higher priority (RMS), and within a bucket the order is fixed. With
+   * declared execution times the sufficient condition of Liu & Layland applies:
+   *
+   *     U = Σ_w  C_w / T_w   ≤   W · (2^(1/W) − 1)      (W = number of buckets)
+   *
+   * It is a SUFFICIENT condition, not a deadline test, and it is only as true as the declared
+   * numbers. It deliberately excludes the bus/communication workloads FineMote adds: in ros2_control
+   * the equivalent boundary is `read()`/`write()` plus DDS, which this manager does not model.
+   */
+  struct TwoPhaseSchedulability
+  {
+    /// Every member declared a WCET. When false the numbers below are partial and `sufficient` stays
+    /// false: an unknown execution time must never read as "checked and fine".
+    bool complete = false;
+    std::size_t members = 0;
+    std::size_t declared = 0;
+    std::size_t buckets = 0;
+    /// Σ over buckets of (bucket execution time / bucket period).
+    double utilization = 0.0;
+    /// W · (2^(1/W) − 1) for `buckets` buckets (1.0 for a single bucket).
+    double bound = 0.0;
+    /// `complete && utilization <= bound`.
+    bool sufficient = false;
+    /// The busiest bucket, so a diagnostic can say WHICH period is the problem.
+    std::size_t worst_bucket_factor = 0;
+    double worst_bucket_utilization = 0.0;
+  };
+
+  /// The declared-WCET schedulability of the currently published two-phase set (null when empty).
+  /**
+   * Read it after enabling two-phase execution; it reflects the members and their `wcet_ns`
+   * parameters as of the last publication. `complete == false` means at least one member declared no
+   * WCET, and `sufficient` is then false by construction.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  std::shared_ptr<const TwoPhaseSchedulability> two_phase_schedulability() const;
+
+private:
   /// Why a controller that implements TwoPhaseControllerInterface may not join the two-phase path.
   enum class TwoPhaseAdmission
   {
@@ -921,6 +974,9 @@ private:
     /// Distinct rate buckets of `two_phase_entries`, ascending, precomputed at publication time so
     /// the control loop never has to derive them (and never allocates).
     std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets;
+    /// Declared-WCET schedulability of the published two-phase set, computed at publication time
+    /// (non-real-time). Empty (null) when two-phase execution has no members.
+    std::shared_ptr<const TwoPhaseSchedulability> two_phase_schedulability;
     std::shared_ptr<StagedExecutionGroup> staged_group;
     /// Bumped on every publication; lets a caller (and a test) name the state it saw.
     std::uint64_t id = 0;
@@ -973,6 +1029,10 @@ private:
   /// The distinct buckets of `entries`, ascending. Non-real-time: called when a generation is built.
   static std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets_of(
     const std::vector<TwoPhaseEntry> & entries);
+  /// Declared-WCET schedulability of `entries` grouped by `buckets`. Non-real-time.
+  std::shared_ptr<const TwoPhaseSchedulability> two_phase_schedulability_of(
+    const std::vector<TwoPhaseEntry> & entries,
+    const std::vector<unsigned int> & buckets) const;
   /// mutex copied from ROS1 Control, protects service callbacks
   /// not needed if we're guaranteed that the callbacks don't come from multiple threads
   std::mutex services_lock_;
