@@ -63,7 +63,7 @@ write()                                 ← 硬件 write（上游）
 ```bash
 git log --oneline                     # 全部是本项目的工作（根提交 b1bf616 即"上游 Humble 源码 + 第一版内核"）
 git show --stat <commit>              # 单个提交改了什么、为什么（message 里带实测数字）
-# 本仓库没有上游历史，`git diff 469f3055..HEAD` 会报 bad revision（469f3055 只是上游提交号）
+git fetch origin humble && git diff --stat 469f3055 HEAD   # 与上游 Humble 的完整对比（149 文件、+36454/−98）
 git log --oneline                     # 28 个提交，每个提交的 message 都写了"为什么"
 ```
 

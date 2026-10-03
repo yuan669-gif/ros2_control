@@ -6,11 +6,13 @@ The old external metadata workflow and its baseline hashes were incorrect. Do no
 - Branch: humble (tracks upstream/humble).
 - origin: https://github.com/yuan669-gif/ros2_control.git (user fork).
 - upstream: https://github.com/ros-controls/ros2_control.git (official source).
-- baseline-humble: 469f3055da3b0f097d0616c8b214072434529053（**上游仓库**的提交号，只作引用）。
-  注意：本仓库的 `.git` 从根提交 `b1bf616` 开始（该提交已包含上游 Humble 源码 + 本项目第一版内核），
-  **没有**上游历史，所以 `git diff 469f3055..HEAD` 在这里会报 `bad revision`。要看本项目改了什么，用
-  `git log --oneline`（28 个提交，每个 message 都写了动机）与 `git show --stat <commit>`；
-  要与干净的上游源码对比，需要另有一份 Humble 源码树，然后 `git diff --no-index <pristine>/… …`。
+- baseline-humble: 469f3055da3b0f097d0616c8b214072434529053 = **上游 Humble 的提交**，它是
+  `origin/humble`（fork 的 humble 分支）的祖先，所以 `git fetch origin humble` 之后本地就能解析它：
+  `git diff --stat 469f3055 HEAD` 是"上游 Humble → 本项目"的完整对比（当前 149 文件、+36454/−98）。
+  注意两点：① 本分支自己的历史是**独立**的（根提交 `b1bf616` 已包含上游源码树 + 第一版内核），
+  所以 `git log --oneline` 列出的 31 个提交**就是**本项目的工作；② `origin/humble` 比上游多 4 个
+  早期提交（v1 原型 `c9e6452`、研究文档 `a2ff98a`/`c74c1cd`、cycle_tree 实验 `ea3992e`），
+  它们**不在** `humble-work` 里（那条原型已由 `hierarchical_control` 重写取代）。
 - v1-hierarchical-prototype: c9e6452a (experimental; not integrated into the manager).
 - Research contract: a2ff98a2.
 
@@ -33,6 +35,7 @@ Do not force-push shared history as a routine update.
 | 想从零读源码 | `doc/CODEBASE_TOUR.md`（一个周期的 trace、四层阅读顺序、最小可跑例子、陷阱清单） |
 | 想跑测试 / 复现数字 | `doc/TESTING_GUIDE.md`（环境、命令、套件目录、已知 flaky 的判定方法、测量脚本口径） |
 | 想知道开发经过与被推翻的结论 | `doc/DEVELOPMENT_HISTORY.md`（阶段时间线、决策记录、撤回清单） |
+| **接下来做什么**（待办清单，含"两趟独立分支"的方案） | `doc/PENDING_WORK.md` |
 | **要给别人汇报 / 一页看懂全貌** | `doc/FINAL_REPORT_2026-09-28.md`（最终报告：问题、方法、证据表、不能声称、下一步） |
 | 想知道我们和 FineMote 论文的异同 | `doc/PAPER_ALIGNMENT_2026-09-28.md`（逐条对照 + 判定：一致 / 更窄 / 缺失 / 更强） |
 | 想要权威的"当前实现状态 / 还没做什么" | `doc/IMPLEMENTATION_GUIDE.md` §12 + `doc/HANDOFF_MANUAL.md` |

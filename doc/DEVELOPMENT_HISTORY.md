@@ -3,10 +3,11 @@
 > 这份文档是**时间线与决策记录**，不是宣传材料。它按阶段记录：当时想解决什么、做了什么、
 > **实测到了什么**、哪些结论后来被自己推翻。每一段都指向原始提交或专题文档，方便核对。
 >
-> 仓库事实：分支 `humble-work`（fork `yuan669-gif/ros2_control`）。上游 Humble 基线为
-> `469f3055`（**上游仓库**的提交号），但本仓库的 `.git` 从根提交 `b1bf616` 起，没有上游历史：
-> 该根提交已包含上游源码树 + 本项目第一版内核，所以下面的阶段时间线是按**提交**组织的，
-> 不是按"相对基线的 diff"。完整历史：`git log --oneline`（28 个提交，每个 message 都写了动机）。
+> 仓库事实：分支 `humble-work`（fork `yuan669-gif/ros2_control`）。上游 Humble 基线为 `469f3055`，
+> 它是 `origin/humble` 的祖先（`git fetch origin humble` 之后即可解析）；
+> 本分支自己的历史是独立的（根提交 `b1bf616` 已包含上游源码树 + 第一版内核），
+> 因此下面的阶段时间线按**提交**组织。完整历史：`git log --oneline`（31 个提交，message 都写了动机）；
+> 与上游的完整对比：`git diff --stat 469f3055 HEAD`（当前 149 文件、+36454/−98）。
 
 ---
 
@@ -220,10 +221,12 @@ following controller 先停后启。它重启成功后出现在"本次激活"集
 2. 覆盖层的 `controller_manager` **ABI 与系统安装不同**（类新增了数据成员），
    任何自行实例化 `ControllerManager` 的包（如 `gazebo_ros2_control`）必须一起重编。
 
-同时修掉一处**我自己写错的核对指令**：早期文档让人运行 `git diff --stat 469f3055..HEAD`，
-但 `469f3055` 只是**上游仓库**的 Humble 提交号，本仓库的 `.git` 从根提交 `b1bf616` 起
-（该提交已含上游源码树 + 第一版内核），本地没有该对象，命令会报 `bad revision`。
-现已统一改为 `git log --oneline` + `git show --stat <commit>`，并说明"与上游对比需要另备一份干净源码树"。
+同时修掉一处**我自己写错的核对指令**：早期文档写 `git diff --stat 469f3055..HEAD` 却没说
+`469f3055` 需要先 `git fetch origin humble`，在没取过 `origin/humble` 的克隆里会报 `bad revision`。
+现已写成两段：本分支自己的历史用 `git log --oneline` + `git show --stat <commit>`；
+与上游 Humble 的完整对比用 `git fetch origin humble && git diff --stat 469f3055 HEAD`
+（当前 149 文件、+36454/−98）。顺带记录：`origin/humble` 比上游多 4 个早期提交
+（v1 原型 `c9e6452`、研究文档 `a2ff98a`/`c74c1cd`、cycle_tree 实验 `ea3992e`），它们**不在** `humble-work` 里。
 
 ## 阶段 9：补上"声明 WCET"的可调度性检查（`2026-09-28`）
 

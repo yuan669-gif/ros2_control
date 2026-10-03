@@ -9,9 +9,9 @@
 >
 > 仓库：分支 `humble-work`，fork `https://github.com/yuan669-gif/ros2_control`（上游
 > `ros-controls/ros2_control` 的 Humble 副本）。所有本项目的改动都在这个分支上，
-> `git log --oneline` 可以看到全部 28 个提交（每个 message 都写了动机与实测数字）。
-注意 `469f3055` 只是**上游仓库**的 Humble 提交号，本仓库没有上游历史，不能 `git diff 469f3055..HEAD`；
-根提交 `b1bf616` 已经包含上游源码树 + 第一版内核。
+> `git log --oneline` 可以看到本项目的 31 个提交（每个 message 都写了动机与实测数字）。
+与上游 Humble 的完整对比：先 `git fetch origin humble`（`469f3055` 是它的祖先），
+再 `git diff --stat 469f3055 HEAD`（当前 149 文件、+36454/−98）。
 
 ---
 
@@ -164,8 +164,9 @@ handle_phase : 正向（根 → 叶）   ⇒ 每个子拿到本周期的父参�
 
 ```bash
 git log --oneline                        # 28 个提交，全部是本项目的工作
-git log --oneline                        # 28 个提交；git show --stat <commit> 看单个提交
-# 与上游 Humble 的差异需要另备一份干净源码树（本仓库没有上游历史）
+git log --oneline                        # 31 个提交；git show --stat <commit> 看单个提交
+git fetch origin humble                  # 让上游基线 469f3055 可解析
+git diff --stat 469f3055 HEAD            # 上游 Humble → 本项目（149 文件、+36454/−98）
 ```
 
 ### 新包 `hierarchical_control/`（内核与类型层，与 ROS 解耦）
@@ -233,6 +234,8 @@ git log --oneline                        # 28 个提交；git show --stat <commi
 ## 7. 文档地图
 
 **入门（先读）**：`ONBOARDING.md`（本文件）、`CODEBASE_TOUR.md`、`TESTING_GUIDE.md`、`DEVELOPMENT_HISTORY.md`
+
+**接下来做什么**：`PENDING_WORK.md`（唯一待办清单：优先级、范围、验收标准、与论文的缺口对应）
 
 **汇报/总览**：`FINAL_REPORT_2026-09-28.md`（最终报告：问题、方法、证据表、明确不能声称的清单、下一步优先级）
 
