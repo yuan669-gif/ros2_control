@@ -60,6 +60,7 @@
 #include "controller_interface/controller_interface_base.hpp"
 #include "hierarchical_control/staged_controller_interface.hpp"
 #include "hierarchical_control/staged_execution_group.hpp"
+#include "hierarchical_control/static_manifest.hpp"
 #include "hierarchical_control/topology_contract.hpp"
 #include "hierarchical_control/typed_ports.hpp"
 
@@ -161,6 +162,14 @@ StagedExecutionGroup::Spec to_library_spec(const Binding & binding)
   // Compile-time: ownership of every declared port (and, transitively, the acyclicity of the
   // Node types and the dimensions carried by the Port types).
   tc::require_ports_are_owned<Binding>();
+
+  // Compile-time: the manifest invariants of the binding's own TYPE -- one root, unique node names,
+  // parents that name a node, acyclic parent chains, and at most one port per role (a repeated
+  // actuator or `for_children` port is an in-tree interface CLAIM CONFLICT). These checks existed and
+  // were tested but no entry point called them, so a malformed description still compiled. Enforcing
+  // them HERE (rather than in `compose`, which must not depend on `static_manifest.hpp`) keeps the
+  // layering intact while making every use of the checked entry point carry the invariants.
+  static_manifest::require_manifest_is_well_formed<Binding>();
 
   // Runtime: the binding's own shape, reported with a diagnostic that names the problem.
   return to_library_spec(tc::build_spec_rows(binding));

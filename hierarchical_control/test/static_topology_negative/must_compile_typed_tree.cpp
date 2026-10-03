@@ -16,5 +16,9 @@ int main()
 {
   const auto tree = negt::make_tree<root_ports>();
   const auto rows = negt::tc::build_spec_rows(tree);
-  return static_cast<int>(rows.names.size());
+  // The CHECKED entry point must also ACCEPT this well-formed tree, so the manifest enforcement
+  // exercised by `compile_fail_manifest_claim_conflict.cpp` cannot be passing by rejecting
+  // everything.
+  const auto spec = hierarchical_control::topology_binding::to_library_spec(tree);
+  return static_cast<int>(rows.names.size() + spec.names.size());
 }

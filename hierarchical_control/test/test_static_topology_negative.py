@@ -29,6 +29,7 @@ This script compiles a small corpus and asserts each file's outcome:
     compile_fail_typed_state_edge_order.cpp -> must FAIL (typed state edge, wrong child order)
     compile_fail_typed_wrong_dimension.cpp -> must FAIL (typed reference edge, dimension)
     compile_fail_typed_wrong_name.cpp      -> must FAIL (typed state edge, same length, other port)
+    compile_fail_manifest_claim_conflict.cpp -> must FAIL (manifest: two nodes claim one interface)
 
 If a "compile_fail" file ever starts compiling, a guarantee has regressed and this test fails.
 If the control file stops compiling, the test infrastructure is broken and this test also fails --
@@ -86,6 +87,10 @@ CORPUS = {
     "compile_fail_typed_state_edge_order.cpp": (False, "STATE EDGE MISMATCH"),
     "compile_fail_typed_wrong_dimension.cpp": (False, "REFERENCE EDGE MISMATCH"),
     "compile_fail_typed_wrong_name.cpp": (False, "STATE EDGE MISMATCH"),
+    # The manifest invariants (one root / unique names / known parents / acyclic chains / one port
+    # per ROLE) are enforced by the checked entry point `to_library_spec`. The case below is the one
+    # a string-name topology cannot see at all: two nodes claiming the SAME hardware interface.
+    "compile_fail_manifest_claim_conflict.cpp": (False, "INTERFACE CLAIM CONFLICT"),
 }
 
 

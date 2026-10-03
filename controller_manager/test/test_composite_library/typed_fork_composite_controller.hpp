@@ -323,6 +323,15 @@ public:
   static constexpr auto manifest =
     hierarchical_control::static_manifest::manifest_of_v<binding_type>;
 
+  /// The description above is only worth having if its invariants are ENFORCED: a malformed tree
+  /// (two roots, a name collision, a parent chain that cycles, two nodes claiming one interface) must
+  /// not compile. `to_library_spec` already asserts this, but the plugin can be instantiated without
+  /// going through it (the kernel is built in `on_activate`), so the declaration is checked here too.
+  static_assert(
+    hierarchical_control::static_manifest::manifest_is_well_formed<binding_type>(),
+    "typed_fork: the declared controller tree must be well formed (one root, unique node names, "
+    "parents that name a node, acyclic parent chains, at most one port per role)");
+
 private:
   bool build_kernel();
   bool resolve_interface_slots();

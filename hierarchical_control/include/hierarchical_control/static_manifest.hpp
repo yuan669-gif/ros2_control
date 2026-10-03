@@ -414,6 +414,33 @@ constexpr bool manifest_is_well_formed() noexcept
   return manifest_problem(manifest_of_v<Binding>).empty();
 }
 
+/// Compile-time ENFORCEMENT of the manifest invariants, for use inside a checked entry point.
+/**
+ * `manifest_is_well_formed<Binding>()` answers the question but enforces nothing: it was written and
+ * tested but called from nowhere, so every invariant below was in practice unverified (compile-time
+ * review item F1). Calling this function from the entry point a user actually uses turns each one
+ * into a compile error with a diagnostic that says which rule was broken:
+ *
+ *   * exactly one root, non-empty and unique node names, every parent naming a node, no parent-chain
+ *     cycle (a `compose`-built binding cannot produce a cycle, but a manifest is a public structure);
+ *   * at most one port per ROLE. A repeated port of one role is not a cosmetic duplicate: two nodes
+ *     declaring the same actuator (or the same `for_children` reference) is an in-tree INTERFACE
+ *     CLAIM CONFLICT, which the `ResourceManager` would otherwise only reject at activation time.
+ *
+ * The runtime checker stays for the deployments this cannot see: a hand-written `StaticManifest`, and
+ * every pluginlib/YAML controller, never instantiate this template.
+ */
+template <typename Binding>
+constexpr void require_manifest_is_well_formed()
+{
+  static_assert(
+    manifest_is_well_formed<Binding>(),
+    "static_manifest: MALFORMED COMPILE-TIME DESCRIPTION -- a manifest must have exactly one root, "
+    "unique non-empty node names, parents that name a node, acyclic parent chains, and at most one "
+    "port per role. A repeated port of one role is an in-tree INTERFACE CLAIM CONFLICT: two nodes "
+    "claim the same hardware interface.");
+}
+
 /// Compare the manifest's hardware requirements against a controller's runtime declarations.
 /**
  * The manifest is compiled in; `command_interface_configuration()` / `state_interface_configuration()`
