@@ -15,7 +15,8 @@
 
 | 序 | 事项 | 为什么排这个位置 | 量级 | 前置 |
 |---|---|---|---|---|
-| **P0-1** | **把"管理器模式 + 两趟"切成独立最小分支**（§1） | 用户价值最高：最接近原生、改动最小、可单独给上游 PR；越早切，后面的改动越不会污染它 | 1–2 天 | 无 |
+| **P0-1** ✅ | **把"管理器模式 + 两趟"切成独立最小分支**（§1） | **已完成 2026-10-03**：分支 `feature/two-phase-manager`（基点上游 `469f3055`），15 文件 +2862 行，22 例测试全绿。说明见 `TWO_PHASE_BRANCH.md` | 1–2 天 | 无 |
+| **P0-0** ✅ | **编译期可确定性审计 + 把 manifest 不变式接到入口**（§1.9） | **已完成 2026-10-03**：13 项审计 + 落地价值最高的 F1+F2（负向编译语料 16/16、`hierarchical_control` ctest 13/13）。见 `COMPILETIME_AUDIT_2026-10.md` | 0.5 天 | 无 |
 | **P0-2** | 补论文 Thm 3 的对应物（周期数单位的时延上界）→ 把跨速率桶边从"拒绝"改成"有界接纳"（§2.1） | 目前**唯一的能力性缺口**；补上后两趟路径对多速率拓扑完整 | 3–5 天（含推导） | 需要先写清模型假设 |
 | **P1-1** | 给执行组一个 ROS 入口（服务或参数 + 仲裁）（§2.2） | 决定"用法 C"能不能用标准 `ros2_control_node` 部署 | 2–4 天 | 需先定"准入判定与控制器列表一致性"协议 |
 | **P1-2** | 把控制器列表纳入执行代（§2.3） | 去掉"安装执行路径必须停止期"这条约束 | 1 周（动上游列表发布协议） | 无 |
@@ -28,6 +29,14 @@
 ---
 
 ## 1. P0-1：把"管理器模式 + 两趟"做成独立最小分支
+
+> **状态：已完成（2026-10-03）**。分支：`feature/two-phase-manager`，基点上游 `469f3055`。
+> 交付物：`controller_interface/two_phase_controller_interface.hpp`（接口头搬进上游包，**无新包**）、
+> `controller_manager` 的两趟调度 + 速率分桶 + 准入（约 950 行）、
+> `controller_manager/test/test_two_phase_execution.cpp`（22 例，ctest 通过）、
+> `two_phase_example_controller`（示例控制器）、`two_phase_demo`（可运行 demo：URDF+YAML+launch）、
+> 分支说明 `TWO_PHASE_BRANCH.md`、用户文档 `controller_manager/doc/two_phase_execution.md`。
+> **验收对照见 `TWO_PHASE_BRANCH.md` §5**；下面保留当时的计划原文，作为"范围/边界"的记录。
 
 > 用户的判断：**这种用法最接近原生 ros2_control、改动最小、最适合用户直接用**。
 > 我同意，并且建议按下面的方式切（**最小补丁**，不是把 31 个提交 cherry-pick 过去）。
@@ -136,6 +145,20 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 
 **风险**：① 两条线各自演进会产生语义漂移 → 用 §1.7 的"同一套断言"约束；
 ② 特性分支若被用户当成"完整方案"，会缺少整组提交/帧语义 → 在分支说明里写清边界。
+
+### 1.9 已完成：编译期可确定性审计（2026-10-03）
+
+见 `COMPILETIME_AUDIT_2026-10.md`。要点：
+
+- 审计了 13 项"运行期 vs 编译期"，分类 A（立即可做）/ B（需设计）/ C（不该搬）。
+- **落地了价值最高的一项**：`manifest_is_well_formed<Binding>()` 早已实现并被测试，
+  却没有任何入口调用；现在接进 `topology_binding::to_library_spec<Binding>()` 与
+  `TypedForkCompositeController`，并补了一个负向编译用例
+  （`compile_fail_manifest_claim_conflict.cpp`，两个节点认领同一硬件接口 → 编译错误）。
+- 边界：**不删任何运行期检查**（pluginlib/YAML 部署看不到这些 `static_assert`）。
+- 剩余的 A 类（F3 计划二次校验、F4 复合插件残余分派）与 B 类（F5 静态准入单元、
+  F6 编译期顺序、F7 RateTag、F8 标注式链关系、F11 constexpr 容器）**未做**，
+  优先级见审计文档 §3。
 
 ---
 
@@ -314,3 +337,27 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 | ABI / 覆盖层规则 | `USER_GUIDE.md` §1.4、`FINAL_REPORT_2026-09-28.md` §5 |
 | Gazebo 真值指标不可靠 / 耗时不稳 | `IMPLEMENTATION_GUIDE.md` §12.3 #1/#2 |
 | Jazzy/Rolling 复现（无 Docker） | `IMPLEMENTATION_GUIDE.md` §12.2 |
+
+---
+
+## 7. 论文定位与文献（2026-10 新增）
+
+见 `LITERATURE_SURVEY_2026-10.md`。**结论对本项目不利，但必须正视**：
+
+1. **创新点 1（树状双向两趟调度）在机制层面不是新的**：所引的 FineMote
+   （arXiv:2608.04600v1）**§III-B 式 (2)** 已经给出"同一线性化、桶内先全部 `+`（子→父）、
+   再全部 `−`（父→子）"，**§IV-C2 推论 2** 已经给出同周期零等待；
+   上游 `ros2_control` 也**已经**维护一条由树导出的线性化（issue #853 已修）。
+   可辩护的增量是：**把它移植到插件式、运行期加载的控制器集合上**，量化上游单趟的
+   **静默单向陈旧**，并把残余正确性条件**归约为一组有限的运行期准入检查**。
+2. **创新点 2（编译期元编程）是成熟技术在新区间的应用**：typestate（1986）、
+   dimension types（1994/1997）、session types（1998）、policy-based design、
+   **负向编译测试（Pigweed `pw_compilation_testing`）** 都是已有工作；
+   未发现把"控制器拓扑"编码为 C++ 类型链并 `static_assert` 的先例，但这是**领域空白**，
+   不是方法空白。审稿人最可能的攻击点是 **ROS 2 自己的静态校验答案是 codegen
+   （`generate_parameter_library`）而不是 TMP**——必须正面回应。
+3. 因此建议的定位是**枚举式结论**：
+   "在一个插件式、YAML/URDF 驱动的实时控制框架里，可前移到编译期的恰好是**由类型唯一决定**的那一层"
+   （见 `COMPILETIME_AUDIT_2026-10.md` §4）。
+4. 必引清单、逐条重叠分析与可辩护的贡献陈述见 `LITERATURE_SURVEY_2026-10.md` §5/§7；
+   投稿去向的讨论见其 §6（JOSS 明确接受"重实现已知方案"，但**要求** state-of-the-field 对比）。
