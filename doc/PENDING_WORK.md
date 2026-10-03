@@ -158,7 +158,10 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 - 边界：**不删任何运行期检查**（pluginlib/YAML 部署看不到这些 `static_assert`）。
 - **另已落地**：把"哪些节点是叶子"变成编译期事实（`static_manifest::leaf_names()` /
   `leaf_count()`），激活路径不再做 O(N²) 父名扫描，并在缺接口时点名（审计 §3.1）。
-- 剩余的 A 类（F4 里的 `node_at` switch、generic composite）与 B 类（F5 静态准入单元、
+- **另已落地**：声明式两阶段树的**编译期描述层**（`static_two_phase_admission.hpp`）——
+  会员性、成员先序、参考边、父先于子全部由类型导出；核心验证是**等价性**：
+  编译期边集 == 运行时按 `"<owner>/"` 切分推断出的边集（审计 §3.2）。
+- 剩余的 A 类（F4 里的 `node_at` switch、generic composite）与 B 类（**F5 的管理器入口**、
   F6 编译期顺序、F7 RateTag、F8 标注式链关系、F11 constexpr 容器）**未做**。
   **F5/F6 已出设计**：`STATIC_ADMISSION_DESIGN_2026-10.md`（含"六个拒绝码里三个由类型取代、
   两个必须留运行期、一个在静态树里不存在"的结论与可证伪的等价性验证计划）。

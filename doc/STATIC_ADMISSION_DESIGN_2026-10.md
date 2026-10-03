@@ -2,7 +2,13 @@
 
 日期：2026-10-03　分支：`humble-work`　前置：`COMPILETIME_AUDIT_2026-10.md`（审计 §3 的 F5/F6）
 
-> 这份文档是**设计**，不是已实现的东西。目的：把审计里"真正的能力缺口"写清楚——
+> **状态（2026-10-03 更新）**：§3 的 `tree_description` 描述层**已实现并验证**
+> （`hierarchical_control/include/hierarchical_control/static_two_phase_admission.hpp`，
+> `test_static_two_phase_admission.cpp` 3/3，负向语料 18/18，`hierarchical_control` ctest 14/14）。
+> §3 的**管理器入口** `set_two_phase_execution_static<Binding>()` 与 F6（把静态顺序交给管理器）
+> **仍未实现**；§5 的等价性验证已在描述层与运行期字符串之间完成，接管器顺序的那一步没有做。
+>
+> 这份文档的其余部分是**设计**。目的：把审计里"真正的能力缺口"写清楚——
 > 对**静态声明的树**，管理器的六个 `TwoPhaseAdmission` 拒绝码里哪几个可以被类型取代、
 > 哪几个必须留在运行期、以及怎么**可证伪地**验证"取代"没有改变语义。
 

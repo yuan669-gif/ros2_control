@@ -151,6 +151,35 @@ O(N²) 的父名扫描重新推导"哪些节点是叶子"，并在缺少接口�
 
 ---
 
+## 3.2 另已落地：声明式两阶段树的编译期描述层（F5 的第一步）
+
+**新增** `hierarchical_control/include/hierarchical_control/static_two_phase_admission.hpp`
+（纯描述，不改变任何行为），对一棵**整树编译进来**的两阶段树给出：
+
+| 事实 | 实现 | 运行期对应物 |
+|---|---|---|
+| 每个节点都实现 `TwoPhaseControllerInterface` | `subtree_all_members<Binding>`（递归 over `children_types`） | 管理器的 `dynamic_cast`（`cross_mode_dependency`） |
+| 成员名（先序） | `tree_description<Binding>::members` | 控制器列表的名字序列 |
+| 参考边 `(parent, child)` | `edges`，由**节点类型**导出 | 管理器按 `"<owner>/"` 前缀切分推断 |
+| 父先于子 | `index_of()` + `static_assert(edges_are_ordered())` | `parent_index < child_index`（`unschedulable_order`） |
+
+**不做**（设计文档 §2 的结论）：`update_rate` 分桶与指针别名**必须留在运行期**——前者的输入是
+YAML、后者是控制器**列表**的性质；静态树里它们要么不可表达（别名），要么与部署绑定（速率）。
+
+**验证**：
+
+| 项 | 结果 |
+|---|---|
+| `test_static_two_phase_admission`（3 用例） | 通过；其核心是**等价性**：编译期边集必须等于"把子节点生成的运行期接口字符串按 `/` 切 owner"得到的边集 |
+| 负向编译语料 | **18/18**；新增 `must_compile_two_phase_tree.cpp`（控制，必须编译）与 `compile_fail_two_phase_non_member.cpp`（节点不实现接口，必须被预期诊断拒绝） |
+| `hierarchical_control` ctest | **14/14** |
+
+**未做且有风险的部分**：新增管理器入口 `set_two_phase_execution_static<Binding>()`、
+把静态顺序交给管理器（F6）。设计文档 §3/§5 已写明"仍跑运行期准入并把命中 F5 已取代的四类
+视为内部错误"这一可证伪契约，但**尚未实现**。
+
+---
+
 ## 4. 结论：编译期到底能推到哪
 
 把上面的 A/B 做成分界线，可以给论文一个可辩护的**枚举式**结论：
@@ -177,7 +206,7 @@ O(N²) 的父名扫描重新推导"哪些节点是叶子"，并在缺少接口�
 | 编译内置控制器注册表 | `./build/controller_manager/test_static_controller_registry` | **9/9 通过**（含 `TypedForkCompositeController` 路径） |
 | 复合插件与 manifest 对照 | `./build/controller_manager/test_hierarchy_comparison` | 已跑的 **10/10 通过**（含叶子集前置后的激活路径）；进程在该 fixture 的 `TearDownTestCase` 崩溃（见下） |
 | 叶子集前置（F4 一部分） | `./build/controller_manager/test_static_controller_registry`（9/9）、`test_hierarchy_comparison`（10/10）、`ctest --test-dir build/hierarchical_control`（13/13） | 通过 |
-| F5/F6 设计 | `STATIC_ADMISSION_DESIGN_2026-10.md` | **设计文档（未实现）** |
+| F5/F6 设计与描述层 | `STATIC_ADMISSION_DESIGN_2026-10.md`（设计）；`static_two_phase_admission.hpp` + `test_static_two_phase_admission.cpp`（描述层**已实现**） | 设计为文档；描述层 **3/3 用例通过**，负向语料 **18/18**，`hierarchical_control` ctest **14/14** |
 | 重新构建 | `colcon build --packages-select hierarchical_control controller_manager` | 通过（仅上游既有的 unused-parameter 警告） |
 
 > **环境性崩溃（与本改动无关）**：本机所有使用 `ControllerManagerFixture` 的 gmock 可执行文件在
