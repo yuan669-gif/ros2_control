@@ -332,6 +332,16 @@ public:
     "typed_fork: the declared controller tree must be well formed (one root, unique node names, "
     "parents that name a node, acyclic parent chains, at most one port per role)");
 
+  /// The LEAF nodes, derived from the declaration TYPE at compile time (zero for a manifestless
+  /// type, but a declared tree has at least one). The activation path consumes these instead of
+  /// rescanning the manifest's parent names, because leafness does not depend on the activation.
+  static constexpr auto manifest_leaf_names =
+    hierarchical_control::static_manifest::leaf_names(manifest);
+  static constexpr std::size_t manifest_leaf_count =
+    hierarchical_control::static_manifest::leaf_count(manifest);
+  static_assert(
+    manifest_leaf_count >= 1, "typed_fork: a declared controller tree must have at least one leaf");
+
 private:
   bool build_kernel();
   bool resolve_interface_slots();

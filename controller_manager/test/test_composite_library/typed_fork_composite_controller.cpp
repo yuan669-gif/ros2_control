@@ -160,50 +160,53 @@ std::vector<std::string> TypedForkCompositeController::interfaces_of(
 
 bool TypedForkCompositeController::resolve_interface_slots()
 {
-  // The manifest says which hardware interfaces the leaves need; the names come from there, not
-  // from a second hand-written list. This step turns names into the SLOT INDICES of this
-  // activation's loaned set: indices are a property of the activation, so they are resolved here
-  // and never baked into the compile-time description.
-  std::vector<std::string> leaf_names;
-  for (const auto & node : manifest.nodes)
+  // WHICH nodes are leaves is a compile-time fact of the declaration (`manifest_leaf_names` /
+  // `manifest_leaf_count`); only the name -> loaned-slot INDICES are a property of this activation,
+  // so only those are resolved here. The previous shape rediscovered leafness with an O(N^2)
+  // parent-name scan on every activation and returned a bare `false` when an interface was missing.
+  state_slots_.assign(manifest_leaf_count, {});
+  command_slots_.assign(manifest_leaf_count, {});
+  for (std::size_t leaf = 0; leaf < manifest_leaf_count; ++leaf)
   {
-    bool is_parent = false;
-    for (const auto & other : manifest.nodes)
-    {
-      if (other.parent == node.name) {is_parent = true; break;}
-    }
-    if (!is_parent) {leaf_names.emplace_back(node.name);}
-  }
-  if (leaf_names.empty()) {return false;}
-
-  state_slots_.assign(leaf_names.size(), {});
-  command_slots_.assign(leaf_names.size(), {});
-  for (std::size_t leaf = 0; leaf < leaf_names.size(); ++leaf)
-  {
+    const std::string_view leaf_name = manifest_leaf_names[leaf];
     for (const auto & wanted :
-         interfaces_of(leaf_names[leaf], hierarchical_control::static_manifest::PortRole::actuator))
+         interfaces_of(leaf_name, hierarchical_control::static_manifest::PortRole::actuator))
     {
       const auto it = std::find_if(
         command_interfaces_.begin(), command_interfaces_.end(),
         [&wanted](const hardware_interface::LoanedCommandInterface & itf)
         {return itf.get_name() == wanted;});
-      if (it == command_interfaces_.end()) {return false;}
+      if (it == command_interfaces_.end())
+      {
+        RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "leaf '%s' requires command interface '%s', which was not loaned to this controller",
+          std::string(leaf_name).c_str(), wanted.c_str());
+        return false;
+      }
       command_slots_[leaf].push_back(
         static_cast<std::size_t>(std::distance(command_interfaces_.begin(), it)));
     }
     for (const auto & wanted : interfaces_of(
-           leaf_names[leaf], hierarchical_control::static_manifest::PortRole::hardware_state))
+           leaf_name, hierarchical_control::static_manifest::PortRole::hardware_state))
     {
       const auto it = std::find_if(
         state_interfaces_.begin(), state_interfaces_.end(),
         [&wanted](const hardware_interface::LoanedStateInterface & itf)
         {return itf.get_name() == wanted;});
-      if (it == state_interfaces_.end()) {return false;}
+      if (it == state_interfaces_.end())
+      {
+        RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "leaf '%s' requires state interface '%s', which was not loaned to this controller",
+          std::string(leaf_name).c_str(), wanted.c_str());
+        return false;
+      }
       state_slots_[leaf].push_back(
         static_cast<std::size_t>(std::distance(state_interfaces_.begin(), it)));
     }
   }
-  committed_value_.assign(leaf_names.size(), 0.0);
+  committed_value_.assign(manifest_leaf_count, 0.0);
   return true;
 }
 

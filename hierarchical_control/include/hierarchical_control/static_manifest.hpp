@@ -414,6 +414,53 @@ constexpr bool manifest_is_well_formed() noexcept
   return manifest_problem(manifest_of_v<Binding>).empty();
 }
 
+/// The nodes that are LEAVES (no node names them as its parent), in the manifest's pre-order.
+/**
+ * "Which nodes are leaves" is a property of the DECLARATION TYPE, not of an activation: a controller
+ * with no children is one for every run, on every machine, for every YAML file. Deriving it here
+ * keeps it a `constexpr` fact, so the activation path never scans the manifest to rediscover it
+ * (the previous shape was an O(N^2) runtime parent-name scan).
+ *
+ * The array is padded with empty views: a manifest cannot carry its leaf count as a separate
+ * template parameter, and node names are never empty (see the invariants), so padding is
+ * unambiguous. Use `leaf_count()` for the meaningful length.
+ */
+template <std::size_t N, std::size_t P, std::size_t C, std::size_t S>
+constexpr std::array<std::string_view, N> leaf_names(
+  const StaticManifest<N, P, C, S> & manifest) noexcept
+{
+  std::array<std::string_view, N> leaves{};
+  std::size_t written = 0;
+  for (std::size_t i = 0; i < N; ++i)
+  {
+    bool is_parent = false;
+    for (std::size_t j = 0; j < N; ++j)
+    {
+      if (manifest.nodes[j].parent == manifest.nodes[i].name)
+      {
+        is_parent = true;
+        break;
+      }
+    }
+    if (!is_parent)
+    {
+      leaves[written] = manifest.nodes[i].name;
+      ++written;
+    }
+  }
+  return leaves;
+}
+
+/// How many entries of `leaf_names()` are real. Zero for an empty manifest.
+template <std::size_t N, std::size_t P, std::size_t C, std::size_t S>
+constexpr std::size_t leaf_count(const StaticManifest<N, P, C, S> & manifest) noexcept
+{
+  const auto leaves = leaf_names(manifest);
+  std::size_t count = 0;
+  while (count < N && !leaves[count].empty()) {++count;}
+  return count;
+}
+
 /// Compile-time ENFORCEMENT of the manifest invariants, for use inside a checked entry point.
 /**
  * `manifest_is_well_formed<Binding>()` answers the question but enforces nothing: it was written and

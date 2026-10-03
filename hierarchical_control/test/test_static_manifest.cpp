@@ -159,6 +159,11 @@ static_assert(kManifest.has_state_interface("joint3/position"));
 static_assert(kManifest.parent_of("m_a") == std::string_view("m_root"));
 static_assert(kManifest.parent_of("m_root").empty());
 static_assert(kManifest.parent_of("m_b") == std::string_view("m_root"));
+// Leaf enumeration is a COMPILE-time fact of the declaration type, not a runtime scan.
+static_assert(sm::leaf_count(kManifest) == 2, "the two children are the leaves");
+static_assert(sm::leaf_names(kManifest)[0] == std::string_view("m_a"));
+static_assert(sm::leaf_names(kManifest)[1] == std::string_view("m_b"));
+static_assert(sm::leaf_names(kManifest)[2].empty(), "the array is padded with empty views");
 }  // namespace
 
 /// The manifest is enumerable at run time too, in a stable order (nodes pre-order).
@@ -194,6 +199,37 @@ TEST(StaticManifest, describes_the_tree_and_its_hardware_requirements)
   }
   EXPECT_TRUE(saw_hardware_state);
   EXPECT_TRUE(saw_actuator);
+}
+
+/// Leafness is derived from the declaration TYPE, so an activation never has to rescan the manifest.
+TEST(StaticManifest, leaf_enumeration_is_a_compile_time_fact)
+{
+  constexpr auto leaves = sm::leaf_names(kManifest);
+  EXPECT_EQ(2u, sm::leaf_count(kManifest));
+  EXPECT_EQ("m_a", leaves[0]);
+  EXPECT_EQ("m_b", leaves[1]);
+  // The array is sized by the NODE count and padded with empty views; a node name is never empty
+  // (an invariant the checker enforces), so the padding is unambiguous.
+  EXPECT_TRUE(leaves[2].empty());
+  EXPECT_EQ(3u, leaves.size());
+
+  // Independent derivation from the manifest itself: exactly the nodes no one names as a parent.
+  std::vector<std::string_view> derived;
+  for (const auto & node : kManifest.nodes)
+  {
+    bool is_parent = false;
+    for (const auto & other : kManifest.nodes)
+    {
+      if (other.parent == node.name)
+      {
+        is_parent = true;
+        break;
+      }
+    }
+    if (!is_parent) {derived.push_back(node.name);}
+  }
+  std::vector<std::string_view> enumerated(leaves.begin(), leaves.begin() + 2);
+  EXPECT_EQ(derived, enumerated);
 }
 
 /// The hardware requirements can be GENERATED, which is what removes the hand-written string lists.
