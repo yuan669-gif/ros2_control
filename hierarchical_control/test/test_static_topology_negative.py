@@ -30,6 +30,8 @@ This script compiles a small corpus and asserts each file's outcome:
     compile_fail_typed_wrong_dimension.cpp -> must FAIL (typed reference edge, dimension)
     compile_fail_typed_wrong_name.cpp      -> must FAIL (typed state edge, same length, other port)
     compile_fail_manifest_claim_conflict.cpp -> must FAIL (manifest: two nodes claim one interface)
+    must_compile_two_phase_tree.cpp       -> must COMPILE (control for the declared two-phase tree)
+    compile_fail_two_phase_non_member.cpp -> must FAIL (a node without the two-phase interface)
 
 If a "compile_fail" file ever starts compiling, a guarantee has regressed and this test fails.
 If the control file stops compiling, the test infrastructure is broken and this test also fails --
@@ -91,6 +93,12 @@ CORPUS = {
     # per ROLE) are enforced by the checked entry point `to_library_spec`. The case below is the one
     # a string-name topology cannot see at all: two nodes claiming the SAME hardware interface.
     "compile_fail_manifest_claim_conflict.cpp": (False, "INTERFACE CLAIM CONFLICT"),
+    # The compile-time counterpart of the two-phase `cross_mode_dependency` admission: a declared
+    # tree whose nodes do not implement the two-phase interface must not be expressible. The control
+    # is the same topology with two-phase nodes.
+    "must_compile_two_phase_tree.cpp": (True, None),
+    "compile_fail_two_phase_non_member.cpp": (
+        False, "declared two-phase tree must implement"),
 }
 
 

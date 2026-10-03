@@ -76,6 +76,11 @@ if(BUILD_TESTING)
   target_include_directories(test_contract_regression PRIVATE include)
   ament_target_dependencies(test_contract_regression ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
+  # Compile-time description of a DECLARED two-phase tree: membership, edges and pre-order.
+  ament_add_gmock(test_static_two_phase_admission test/test_static_two_phase_admission.cpp)
+  target_include_directories(test_static_two_phase_admission PRIVATE include)
+  ament_target_dependencies(test_static_two_phase_admission ${THIS_PACKAGE_INCLUDE_DEPENDS})
+
   # The cycle guarantee can only be tested by compiling files that MUST FAIL, so it runs as a
   # script rather than a gtest. CXX is forwarded so the corpus uses the same compiler as the build.
   find_package(Python3 COMPONENTS Interpreter QUIET)
