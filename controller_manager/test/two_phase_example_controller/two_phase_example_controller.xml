@@ -1,0 +1,13 @@
+<library path="two_phase_example_controller">
+
+  <class name="controller_manager/two_phase_example_controller"
+         type="two_phase_example_controller::TwoPhaseExampleController"
+         base_class_type="controller_interface::ChainableControllerInterface">
+    <description>
+      Reference cascade controller for the two-phase execution feature: one implementation that runs
+      under either the native single-pass update() or the opt-in two passes (update_phase backward,
+      handle_phase forward). See controller_manager/doc/two_phase_execution.md.
+    </description>
+  </class>
+
+</library>

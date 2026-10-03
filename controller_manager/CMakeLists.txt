@@ -188,6 +188,55 @@ if(BUILD_TESTING)
     ros2_control_test_assets::ros2_control_test_assets
   )
 
+  # Two-phase execution: the example cascade controller (also the YAML demo plugin) and the
+  # manager-level test suite. The controller library is a plugin, so one binary serves the tests,
+  # `ros2_control_node` and the spawner.
+  add_library(two_phase_example_controller SHARED
+    test/two_phase_example_controller/two_phase_example_controller.cpp
+  )
+  target_link_libraries(two_phase_example_controller PUBLIC controller_manager)
+  target_compile_definitions(two_phase_example_controller PRIVATE "CONTROLLER_MANAGER_BUILDING_DLL")
+  pluginlib_export_plugin_description_file(
+    controller_interface test/two_phase_example_controller/two_phase_example_controller.xml)
+  install(
+    TARGETS two_phase_example_controller
+    DESTINATION lib
+  )
+
+  ament_add_gmock(test_two_phase_execution
+    test/test_two_phase_execution.cpp
+    APPEND_ENV AMENT_PREFIX_PATH=${ament_index_build_path}_$<CONFIG>
+  )
+  target_link_libraries(test_two_phase_execution
+    controller_manager
+    two_phase_example_controller
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+
+  # Runnable demo: an in-memory system so `ros2_control_node` + `spawner` work with no simulator.
+  add_library(two_phase_demo_system SHARED
+    test/two_phase_demo/two_phase_demo_system.cpp
+  )
+  target_link_libraries(two_phase_demo_system PUBLIC controller_manager)
+  target_compile_definitions(two_phase_demo_system PRIVATE "CONTROLLER_MANAGER_BUILDING_DLL")
+  pluginlib_export_plugin_description_file(
+    hardware_interface test/two_phase_demo/two_phase_demo_system.xml)
+  install(
+    TARGETS two_phase_demo_system
+    DESTINATION lib
+  )
+  install(
+    DIRECTORY test/two_phase_demo/
+    DESTINATION share/${PROJECT_NAME}/two_phase_demo
+    FILES_MATCHING
+    PATTERN "*.urdf"
+    PATTERN "*.yaml"
+  )
+  install(
+    FILES test/two_phase_demo/two_phase_demo.launch.py
+    DESTINATION share/${PROJECT_NAME}/launch
+  )
+
   ament_add_gmock(test_spawner_unspawner
     test/test_spawner_unspawner.cpp
     TIMEOUT 120

@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<!--
+  Minimal robot for the two-phase execution demo.
+
+  The hardware is the in-memory system that ships with this demo, so `ros2_control_node` needs no
+  simulator. joint2 and joint3 are the cascade's actuator joints; joint1 is present only so the URDF
+  is a valid robot description.
+-->
+<robot name="two_phase_demo">
+  <link name="world"/>
+  <joint name="world_joint" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+  </joint>
+  <link name="base_link"/>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.2"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+  <link name="link1"/>
+
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.5"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+  <link name="link2"/>
+
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.5"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+  <link name="link3"/>
+
+  <ros2_control name="TwoPhaseDemoSystem" type="system">
+    <hardware>
+      <plugin>controller_manager/two_phase_demo_system</plugin>
+    </hardware>
+    <joint name="joint2">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint3">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+</robot>

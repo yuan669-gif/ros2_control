@@ -1,0 +1,34 @@
+# Two-phase execution demo configuration.
+#
+# The cascade is   tp_root -> tp_mid -> tp_leaf  and the leaf drives joint2.
+# Switch it on/off by editing `two_phase_execution` below (or with
+#   ros2 param set /controller_manager two_phase_execution false
+# after the controllers are running).
+#
+# `children` is what makes the parent claim `<child>/target` (write) and `<child>/estimate` (read);
+# `command_interfaces` / `state_interfaces` are the hardware-facing interfaces of a leaf.
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    two_phase_execution: true
+
+tp_leaf:
+  ros__parameters:
+    type: controller_manager/two_phase_example_controller
+    update_rate: 0            # 0 = follow the controller manager
+    command_interfaces: ["joint2/position"]
+    state_interfaces: ["joint2/position"]
+    children: []
+
+tp_mid:
+  ros__parameters:
+    type: controller_manager/two_phase_example_controller
+    update_rate: 0
+    children: ["tp_leaf"]
+
+tp_root:
+  ros__parameters:
+    type: controller_manager/two_phase_example_controller
+    update_rate: 0
+    children: ["tp_mid"]

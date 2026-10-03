@@ -15,6 +15,8 @@
 #ifndef CONTROLLER_MANAGER__CONTROLLER_MANAGER_HPP_
 #define CONTROLLER_MANAGER__CONTROLLER_MANAGER_HPP_
 
+#include <atomic>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -26,6 +28,7 @@
 #include "controller_interface/chainable_controller_interface.hpp"
 #include "controller_interface/controller_interface.hpp"
 #include "controller_interface/controller_interface_base.hpp"
+#include "controller_interface/two_phase_controller_interface.hpp"
 
 #include "controller_manager/controller_spec.hpp"
 #include "controller_manager/visibility_control.h"
@@ -187,6 +190,79 @@ public:
    */
   CONTROLLER_MANAGER_PUBLIC
   void write(const rclcpp::Time & time, const rclcpp::Duration & period);
+
+  /// Opt-in two-phase execution: controllers implementing `TwoPhaseControllerInterface` are run as
+  /// two passes over the SAME ordered controller list (reverse for `update_phase`, forward for
+  /// `handle_phase`) instead of the native single-pass loop.
+  /**
+   * This is the smallest useful form of the bidirectional-tree execution model: one linearization,
+   * two opposite traversals. It adds no new package, no group membership and no per-cycle frames.
+   *
+   * ENABLING IS ALL-OR-NOTHING. The request is refused, and nothing is changed, when ANY controller
+   * that implements the interface cannot be run by this path (see `two_phase_rejected_controllers()`
+   * for the possible reasons). A silently excluded controller would keep running through the native
+   * loop with an order its two-phase neighbours do not share, while the mode flag still said
+   * "enabled".
+   *
+   * INSTALLING IS REFUSED WHILE A CYCLE IS IN FLIGHT (`control_loop_busy()`), because the admission
+   * decision is taken against the controller list, which is published separately from the execution
+   * generation. REMOVING the path (`set_two_phase_execution(false)`) is always accepted: a cycle
+   * already running holds its own snapshot of the state and finishes with it.
+   *
+   * The mode and the member set are published as ONE immutable snapshot with a single atomic store,
+   * so a control cycle can never observe "enabled but no members".
+   *
+   * The feature can also be switched on from the controller_manager's own YAML section with the
+   * `two_phase_execution` parameter (default: false). Membership is resolved from the controller
+   * list, so controllers loaded later must still pass the same admission checks.
+   *
+   * \return `return_type::OK` when the requested state was applied, `ERROR` when it was refused (the
+   * offending controller and the reason are logged).
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  controller_interface::return_type set_two_phase_execution(bool enabled);
+
+  /// Whether the two-phase execution path is currently enabled.
+  CONTROLLER_MANAGER_PUBLIC
+  bool two_phase_execution() const;
+
+  /// True while a control cycle is inside `update()` on another thread.
+  /**
+   * Installing an execution path while this is true is refused, because the admission decision would
+   * race the controller-list publication. Removing a path is always accepted.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  bool control_loop_busy() const noexcept;
+
+  /// One controller that implements `TwoPhaseControllerInterface` but is NOT executing through the
+  /// two-phase passes, with the reason it was excluded.
+  struct TwoPhaseRejection
+  {
+    std::string name;
+    std::string reason;
+  };
+
+  /// The controllers that implement the interface but cannot join the two-phase path, in list order.
+  /**
+   * The verdict is computed on demand from the CURRENT controller list and does NOT depend on the
+   * mode flag, so a caller can ask before enabling. An empty result means every implementing
+   * controller was admitted (or none implements the interface).
+   *
+   * Returns BY VALUE: the set is derived from the controller list, which the non-real-time thread
+   * replaces whenever membership changes, so a reference could race that replacement. Call it from
+   * the non-real-time thread.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  std::vector<TwoPhaseRejection> two_phase_rejected_controllers() const;
+
+  /// Identifier of the currently published execution generation (mode + member set).
+  /**
+   * It changes exactly when the mode or the member set changes, and each publication is a single
+   * atomic store, so a client can tell "the same configuration state" from "a new one" without
+   * reading two fields.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  std::uint64_t execution_generation() const noexcept;
 
   /// Deterministic (real-time safe) callback group, e.g., update function.
   /**
@@ -484,6 +560,129 @@ private:
 
   std::unique_ptr<rclcpp::PreShutdownCallbackHandle> preshutdown_cb_handle_{nullptr};
   RTControllerListWrapper rt_controllers_wrapper_;
+
+  // ---------------------------------------------------------------------------------------------
+  // Two-phase execution (opt-in). The membership vector is rebuilt only outside the control loop and
+  // published atomically; the passes do one binary search per controller and never allocate.
+  // ---------------------------------------------------------------------------------------------
+
+  /// Sentinel returned by the entry lookup when a controller is not a two-phase member.
+  static constexpr std::size_t no_two_phase = std::numeric_limits<std::size_t>::max();
+  struct TwoPhaseEntry
+  {
+    const controller_interface::ControllerInterfaceBase * base;
+    controller_interface::TwoPhaseControllerInterface * instance;
+    /// Rate bucket: this member's passes run once every `factor` manager cycles with a period of
+    /// `factor` manager periods, exactly as the native loop rate-gates a controller. 1 = every cycle.
+    ///
+    /// A traversal cannot rate-gate *individual* controllers, so a declared period becomes a bucket
+    /// and each bucket gets its own pair of passes. A reference edge whose two ends fall into
+    /// different buckets would be ordered by two schedules with no fixed relation, so it is refused
+    /// (`cross_rate_dependency`) instead of being left silently stale.
+    unsigned int factor = 1;
+  };
+  /// Why a controller that implements `TwoPhaseControllerInterface` may not join the two-phase path.
+  enum class TwoPhaseAdmission
+  {
+    accepted,
+    /// Declares an update rate that is neither "follow the manager" nor an exact divisor of the
+    /// manager's rate, so no bucket can run it at the rate it asked for.
+    unsupported_update_rate,
+    /// Takes part in a reference edge whose two ends are in DIFFERENT rate buckets.
+    cross_rate_dependency,
+    /// Takes part in a reference edge that crosses the two-phase / native boundary, so the two ends
+    /// would be ordered by different schedules.
+    cross_mode_dependency,
+    /// The controller list puts a reference edge's two ends in the wrong order, so both passes would
+    /// walk that edge in the wrong direction and it would silently use the previous cycle's value.
+    unschedulable_order,
+    /// Two names in the controller list refer to ONE controller object, so a pass would advance that
+    /// object once per name in the same cycle.
+    duplicate_instance
+  };
+
+  /// Control cycles currently inside `update()` (0 or 1 in practice). Written by the control loop,
+  /// read by the configuration setters to refuse installing a path mid-cycle.
+  std::atomic<int> cycles_in_flight_{0};
+
+  /// RAII marker so every `return` inside `update()` clears the in-flight count.
+  class CycleGuard
+  {
+  public:
+    explicit CycleGuard(std::atomic<int> & counter) noexcept : counter_(counter)
+    {
+      counter_.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~CycleGuard() {counter_.fetch_sub(1, std::memory_order_relaxed);}
+    CycleGuard(const CycleGuard &) = delete;
+    CycleGuard & operator=(const CycleGuard &) = delete;
+
+  private:
+    std::atomic<int> & counter_;
+  };
+
+  /// ONE immutable snapshot of everything `update()` needs to know about HOW to execute.
+  /**
+   * The two-phase flag and the member set used to be separately published values, so a cycle could
+   * observe a mixture of two configuration states. They are built into one object and published with
+   * ONE atomic store, so every cycle sees a coherent generation. The controller LIST is deliberately
+   * NOT folded in here: it is upstream's own double-buffered publication with its own handshake.
+   */
+  struct ExecutionGeneration
+  {
+    bool two_phase_enabled = false;
+    /// Immutable once published, so a reader in `update()` may dereference it without locking.
+    std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries;
+    /// Distinct rate buckets of `two_phase_entries`, ascending, precomputed at publication time so
+    /// the control loop never has to derive them (and never allocates).
+    std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets;
+    /// Bumped on every publication; lets a caller (and a test) name the state it saw.
+    std::uint64_t id = 0;
+  };
+  /// `mutable` because the atomic accessors take a non-const pointer.
+  mutable std::shared_ptr<const ExecutionGeneration> generation_;
+
+  /// Publish a complete new generation with ONE atomic store (non-real-time thread only).
+  void publish_generation(
+    bool two_phase_enabled, std::shared_ptr<const std::vector<TwoPhaseEntry>> entries);
+  /// The published generation (never null after construction).
+  std::shared_ptr<const ExecutionGeneration> current_generation() const noexcept;
+  /// The published entry set BY VALUE: the caller must own the snapshot for as long as it uses it.
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries() const noexcept;
+  /// Build the two-phase member set for a controller list. Never locks; non-real-time only.
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> build_two_phase_entries(
+    const std::vector<ControllerSpec> & controllers, bool admission_enabled) const;
+  /// Build membership from a controller list the caller already owns, then publish a new generation.
+  void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);
+  /// Same, but with admission applied regardless of the current mode.
+  void rebuild_two_phase_entries(
+    const std::vector<ControllerSpec> & controllers, bool admission_enabled);
+  /// Index of `controller` in `entries`, or `no_two_phase`.
+  std::size_t two_phase_index(
+    const std::vector<TwoPhaseEntry> & entries,
+    const controller_interface::ControllerInterfaceBase * controller) const noexcept;
+  /// The rate bucket of a controller that declares `controller_rate`: 1 when it follows the manager
+  /// or asks for at least the manager's rate, otherwise `update_rate_ / controller_rate`.
+  unsigned int two_phase_factor(unsigned int controller_rate) const noexcept;
+  /// The distinct buckets of `entries`, ascending. Non-real-time: called when a generation is built.
+  static std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets_of(
+    const std::vector<TwoPhaseEntry> & entries);
+  /// Human-readable reason, with the offending owner name where one is relevant.
+  std::string two_phase_admission_reason(TwoPhaseAdmission admission, const std::string & detail) const;
+  TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
+  /// The command interfaces a controller claims, for the scheduling checks.
+  std::vector<std::string> claimed_command_interfaces(const ControllerSpec & controller) const;
+  /// Every controller that implements the interface but is not admitted, in list order.
+  /**
+   * `active_mask` restricts the verdict to the controllers that will actually run: index i is judged
+   * only when `(*active_mask)[i] != 0`. `nullptr` judges the WHOLE list. A mask is what lets
+   * `switch_controller()` judge the PROSPECTIVE active set before it applies anything.
+   */
+  std::vector<TwoPhaseRejection> two_phase_rejections(
+    const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask) const;
+  /// The mask accepted by `two_phase_rejections`: 1 where `is_controller_active()` holds.
+  std::vector<char> controller_active_mask(const std::vector<ControllerSpec> & controllers) const;
+
   /// mutex copied from ROS1 Control, protects service callbacks
   /// not needed if we're guaranteed that the callbacks don't come from multiple threads
   std::mutex services_lock_;

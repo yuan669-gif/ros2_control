@@ -1,0 +1,11 @@
+<library path="two_phase_demo_system">
+
+  <class name="controller_manager/two_phase_demo_system"
+         type="two_phase_demo::TwoPhaseDemoSystem"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      In-memory two-joint system used by the two-phase execution demo (controller_manager/test/two_phase_demo).
+    </description>
+  </class>
+
+</library>
