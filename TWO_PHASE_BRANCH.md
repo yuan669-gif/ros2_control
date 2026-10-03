@@ -31,7 +31,7 @@
 | 准入与安全检查：跨模式边、列表顺序、同实例两名、速率桶、成员绝不被原生循环接管 | 编译期类型层（拓扑/量纲/契约/typed ports/manifest） |
 | `two_phase_execution` 参数 + `set_two_phase_execution()` + `two_phase_rejected_controllers()` + `control_loop_busy()` | 编译内置控制器注册表（`StaticControllerRegistry`） |
 | 执行状态**一个不可变快照**（模式 + 成员表 + 桶表，一次原子发布） | 声明的 WCET 可调度性报告、`atomic_activation` 回滚 |
-| 测试（23 例）+ 可运行示例控制器 + 可运行 demo（URDF/YAML/launch） | 论文级分析层（`ΔPM`、`κ(D)`、Gazebo 测量脚手架）、TSan 脚本 |
+| 测试（22 例）+ 可运行示例控制器 + 可运行 demo（URDF/YAML/launch） | 论文级分析层（`ΔPM`、`κ(D)`、Gazebo 测量脚手架）、TSan 脚本 |
 
 **安全相关、不可裁剪的部分**（缺一个就会"静默出错"）：
 
@@ -125,9 +125,9 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 | 相对 `469f3055` 的 diff 只落在 `controller_interface`（1 个头）与 `controller_manager` | ✅（见 `git diff --stat 469f3055 HEAD`） |
 | 没有新包 | ✅ |
 | `colcon build --packages-select controller_interface controller_manager` 在干净 Humble 上通过 | ✅ |
-| 两趟核心测试 ≥ 20 例全绿 | ✅ 23 例（`test_two_phase_execution`） |
+| 两趟核心测试 ≥ 20 例全绿 | ✅ 22 例（`test_two_phase_execution`，ctest 通过） |
 | 默认关闭时上游行为不变 | ✅（`the_feature_is_off_by_default`、`native_single_pass_never_calls_a_two_phase_stage`；并单独跑上游 `test_controllers_chaining_with_controller_manager`） |
-| 示例控制器 + YAML + launch 可跑 | ⚠️ 文件已提供并安装；完整 launch 未在本机验证（本机无 GUI/时间），测试通过真实 `ControllerManager` 覆盖同一控制器 |
+| 示例控制器 + YAML + launch 可跑 | ⚠️ **部分验证**：`ros2 launch controller_manager two_phase_demo.launch.py` 能启动，硬件 `TwoPhaseDemoSystem` 激活成功，日志出现 `Two-phase execution requested by parameter: enabled`；但本机 DDS 服务发现被沙箱阻断（`spawner` / `ros2 control` 都联系不上 `~/load_controller`，与上游已知 flaky 的 `test_spawner_unspawner` 同因），因此 spawner 那一段未跑通。同一控制器已被 22 例测试通过真实 `ControllerManager` 覆盖 |
 | 分支说明 `TWO_PHASE_BRANCH.md` | ✅ 本文件 |
 | ABI 风险登记 | ✅ §4.7 |
 
