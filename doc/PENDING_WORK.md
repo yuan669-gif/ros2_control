@@ -172,7 +172,11 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 
 ### 2.1 P0-2：论文 Thm 3 的对应物（时延上界）→ 允许跨速率桶的边
 
-> **部分完成（2026-10-03）**：**公式与推导已给出**，见 `CROSS_RATE_BOUND.md` +
+> **已完成（2026-10-03）**：公式与推导（`CROSS_RATE_BOUND.md` + 自校验模型）**以及有界接纳与
+> 实测**（分支 `feature/two-phase-manager`，提交 `7f8b19d`；`test_two_phase_execution` 28 例全绿，
+> ctest 通过；实测 0/2、2/0、5/1 与闭式逐值相等；**默认预算 0 与旧的"两端必须同桶"语义等价**）。
+> 仍缺：预算是逐边的，**没有端到端（多边串联）上界**，也未换算成时间/相位裕度。
+> 以下保留原计划作为记录。**公式与推导已给出**，见 `CROSS_RATE_BOUND.md` +
 > 可执行自校验模型 `research/cross_rate_bound/cross_rate_lag.py`。结论：最坏滞后**精确可达**
 > （非松上界），且 **参考边同周期新鲜 ⟺ `f_P | f_C`**、**状态边同周期新鲜 ⟺ `f_C | f_P`**
 > ——即父快且调和、或子快且调和时，其中一个方向本来就是零滞后，现在的**一律拒绝过严**。
@@ -187,7 +191,7 @@ controller_interface/include/controller_interface/two_phase_controller_interface
   3. 在准入报告里给出"这条边的滞后上界"，并加一个测量用例验证（把声明上界与实测滞后对比）；
   4. 决定是否仍然拒绝**非调和**（任意比例）的边。
 - **为什么值**：这是两趟路径唯一"缺一块"的地方，也是与论文差异最大的一处；补上后多速率树可以完整使用。
-- **DoD**：公式 + 推导说明（✅ 已完成，见 `CROSS_RATE_BOUND.md`）+ 上界随周期比变化的测试（❌ 未做）+ 准入放宽的
+- **DoD**：公式 + 推导说明（✅ `CROSS_RATE_BOUND.md`）+ 上界随周期比变化的测试（✅ 调和两方向 + 非调和，含实测）+ 准入放宽的
   用例（跨桶边被接受且滞后 ≤ 声明上界）+ `PAPER_ALIGNMENT` §6 更新。
 
 ### 2.2 P1-1：执行组的 ROS 入口
