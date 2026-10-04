@@ -89,14 +89,51 @@ cycle that is already running holds its own snapshot and finishes with it.
 | rejection | meaning |
 |---|---|
 | `unsupported_update_rate` | the declared `update_rate` is neither "follow the manager" nor an exact divisor of it, so no rate bucket can run it at the rate it asked for |
-| `cross_rate_dependency` | a reference edge whose two ends are in different rate buckets; the two schedules have no fixed relation, so the edge would silently age |
+| `cross_rate_dependency` | a reference edge whose exact worst-case staleness **exceeds the configured lag budget**; the refusal names the computed lag (see §5.1) |
 | `cross_mode_dependency` | a reference edge between a two-phase member and a controller that does **not** implement the interface; the two ends would be ordered by different schedules |
 | `unschedulable_order` | the manager's controller list puts a parent **after** its child, so both passes would walk that edge in the wrong direction |
 | `duplicate_instance` | two names in the controller list refer to one controller object; a pass would advance it twice per cycle |
 
-Rate buckets: a controller whose `update_rate` divides the manager's runs in its own bucket, once
-every `manager_rate / controller_rate` cycles, and receives the **bucket's** period. Reference edges
-are only admitted **within** one bucket.
+### 5.1 Rate buckets and the lag budget
+
+A controller whose `update_rate` divides the manager's runs in its own bucket, once every
+`manager_rate / controller_rate` cycles, and receives the **bucket's** period. One pair of passes is
+run per bucket, in ascending bucket order, so the two ends of an edge are only guaranteed to be
+served in the same cycle when they share a bucket.
+
+Rather than refuse every cross-bucket edge outright, the admission computes its **exact** worst-case
+staleness and compares it with `two_phase_max_lag_cycles` (default **0**, i.e. "same cycle in both
+directions", which reproduces the strict same-bucket rule). With `g = gcd(f_parent, f_child)` and the
+factors being `manager_rate / controller_rate`:
+
+| edge direction | `f_C > f_P` | `f_C == f_P` | `f_C < f_P` |
+|---|---|---|---|
+| state (child → parent) | `f_C` | `0` | `f_C − g` |
+| reference (parent → child) | `f_P − g` | `0` | `f_P` |
+
+Both values are **attained**, not loose bounds: the schedule repeats with period
+`lcm(f_P, f_C)`. The asymmetry is the useful part — a reference edge is same-cycle fresh exactly when
+`f_P | f_C`, and a state edge exactly when `f_C | f_P`. The derivation, its assumptions and the
+closed-form-vs-model check are in [`cross_rate_bound.md`](cross_rate_bound.md).
+
+Both directions are charged because the interface layer cannot tell them apart: a parent claiming
+`<child>/x` may be writing a reference *into* the child or reading a state value the child publishes,
+so the admission compares `max(state, reference)` against the budget.
+
+```cpp
+manager->set_two_phase_execution(true, /*max_lag_cycles=*/2);
+manager->two_phase_max_lag_cycles();
+manager->two_phase_edge_lags();   // per-edge {parent, child, factors, state, reference, worst}
+```
+
+In YAML, next to `two_phase_execution`:
+
+```yaml
+controller_manager:
+  ros__parameters:
+    two_phase_execution: true
+    two_phase_max_lag_cycles: 2
+```
 
 ## 6. Failure semantics
 
@@ -120,7 +157,9 @@ The demo brings up an in-memory two-joint system and a three-level cascade
 ## 8. Limitations
 
 * No whole-group atomic commit, no per-cycle frame semantics, no rollback of already-written commands.
-* A reference edge across rate buckets is **refused**, not bounded.
+* The lag budget is **per edge**, expressed in manager cycles, and is not converted to a control
+  quantity (ms of delay, phase margin). A chain of cross-rate edges accumulates the per-edge
+  lags; there is no end-to-end bound.
 * Mode and membership are one execution generation, but the **controller list** is not: installing an
   execution path requires the control loop to be stopped.
 * This path is a manager-level feature only; it does not include the compile-time topology layer of

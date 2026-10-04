@@ -31,7 +31,7 @@
 | 准入与安全检查：跨模式边、列表顺序、同实例两名、速率桶、成员绝不被原生循环接管 | 编译期类型层（拓扑/量纲/契约/typed ports/manifest） |
 | `two_phase_execution` 参数 + `set_two_phase_execution()` + `two_phase_rejected_controllers()` + `control_loop_busy()` | 编译内置控制器注册表（`StaticControllerRegistry`） |
 | 执行状态**一个不可变快照**（模式 + 成员表 + 桶表，一次原子发布） | 声明的 WCET 可调度性报告、`atomic_activation` 回滚 |
-| 测试（22 例）+ 可运行示例控制器 + 可运行 demo（URDF/YAML/launch） | 论文级分析层（`ΔPM`、`κ(D)`、Gazebo 测量脚手架）、TSan 脚本 |
+| 测试（28 例）+ 可运行示例控制器 + 可运行 demo（URDF/YAML/launch） | 论文级分析层（`ΔPM`、`κ(D)`、Gazebo 测量脚手架）、TSan 脚本 |
 
 **安全相关、不可裁剪的部分**（缺一个就会"静默出错"）：
 
@@ -42,7 +42,7 @@
 | 同实例两名拒绝 | 同一对象一周期被推进两次 |
 | 两趟成员绝不被原生循环接管（切换期间也跳过） | 切换的几个周期里悄悄退回单趟语义 |
 | 任一 `update_phase` 失败 → 本周期不跑命令阶段 | 控制器在它刚刚拒绝的数据上继续算命令 |
-| 速率规则（同桶才能成边） | 跨桶边被两个调度排序，静默改变离散化 |
+| 速率规则（预算内才成边，默认同桶） | 跨桶边的精确滞后超过声明预算，静默超出可接受范围 |
 
 ---
 
@@ -106,7 +106,10 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 
 1. **没有整组原子提交**：跨控制器的中间失败不会回滚已写出的命令。命令接口只保证"不被本周期
    命令阶段覆盖"。
-2. **跨速率桶的边被拒绝**，不做有界退化（论文 Thm 3 的对应物尚未实现；见 `PENDING_WORK.md` §2.1）。
+2. **跨速率桶的边按「滞后预算」有界接纳**：准入计算每条边的**精确**最坏滞后（见
+   `controller_manager/doc/cross_rate_bound.md`），与 `two_phase_max_lag_cycles` 比较。
+   **默认 0 = 两向同周期 = 与「两端必须同桶」完全等价**，所以没有 opt-in 的部署行为不变。
+   仍未做：预算是**逐边**的，不构成端到端（多边串联）上界；也未换算成时间/相位裕度。
 3. **模式/成员是一个执行代，控制器列表不是**：因此"安装执行路径"必须在控制循环停止时做。
 4. **只有管理器模式**：没有编译期类型层、没有 typed composite、没有静态注册表。
 5. 依赖库未做 TSan 插桩；本分支未附带 `run_tsan_real_manager.sh`。
@@ -125,7 +128,7 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 | 相对 `469f3055` 的 diff 只落在 `controller_interface`（1 个头）与 `controller_manager` | ✅（见 `git diff --stat 469f3055 HEAD`） |
 | 没有新包 | ✅ |
 | `colcon build --packages-select controller_interface controller_manager` 在干净 Humble 上通过 | ✅ |
-| 两趟核心测试 ≥ 20 例全绿 | ✅ 22 例（`test_two_phase_execution`，ctest 通过） |
+| 两趟核心测试 ≥ 20 例全绿 | ✅ 28 例（`test_two_phase_execution`，ctest 通过），含跨速率桶滞后上界的**实测** |
 | 默认关闭时上游行为不变 | ✅（`the_feature_is_off_by_default`、`native_single_pass_never_calls_a_two_phase_stage`；并单独跑上游 `test_controllers_chaining_with_controller_manager`） |
 | 示例控制器 + YAML + launch 可跑 | ⚠️ **部分验证**：`ros2 launch controller_manager two_phase_demo.launch.py` 能启动，硬件 `TwoPhaseDemoSystem` 激活成功，日志出现 `Two-phase execution requested by parameter: enabled`；但本机 DDS 服务发现被沙箱阻断（`spawner` / `ros2 control` 都联系不上 `~/load_controller`，与上游已知 flaky 的 `test_spawner_unspawner` 同因），因此 spawner 那一段未跑通。同一控制器已被 22 例测试通过真实 `ControllerManager` 覆盖 |
 | 分支说明 `TWO_PHASE_BRANCH.md` | ✅ 本文件 |

@@ -520,24 +520,29 @@ TEST_F(TestTwoPhaseExecution, a_lower_rate_member_joins_its_own_bucket)
   EXPECT_EQ(20000000, solo_->last_period_ns());
 }
 
-TEST_F(TestTwoPhaseExecution, an_edge_across_rate_buckets_is_refused)
+TEST_F(TestTwoPhaseExecution, a_cross_bucket_edge_is_refused_by_the_default_budget_and_quantified)
 {
   const auto half_rate = cm_->get_update_rate() / 2;
   ASSERT_GE(half_rate, 1u);
 
-  // The leaf runs at half rate while mid claims its interfaces: the two ends would be ordered by two
-  // schedules with no fixed relation, so the whole mode is refused (both ends reported).
+  // mid runs at the manager's rate (factor 1) and claims the leaf's interfaces, while the leaf runs
+  // at half rate (factor 2): state lag 2, reference lag 0, so the default budget of 0 refuses it.
   BuildChain(half_rate);
   ASSERT_EQ(static_cast<unsigned int>(half_rate), leaf_->get_update_rate());
 
   EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
   EXPECT_FALSE(cm_->two_phase_execution());
-  bool mentions_rate = false;
+  bool quantified = false;
   for (const auto & rejection : cm_->two_phase_rejected_controllers())
   {
-    mentions_rate |= rejection.reason.find("DIFFERENT rate buckets") != std::string::npos;
+    quantified |= rejection.reason.find("worst 2 cycle(s)") != std::string::npos;
   }
-  EXPECT_TRUE(mentions_rate);
+  EXPECT_TRUE(quantified) << "the refusal must quantify the staleness it refuses";
+
+  // The SAME configuration is admissible once the budget covers the lag it just reported.
+  EXPECT_EQ(Return::OK, cm_->set_two_phase_execution(true, 2));
+  EXPECT_TRUE(cm_->two_phase_execution());
+  EXPECT_EQ(2u, cm_->two_phase_max_lag_cycles());
 }
 
 TEST_F(TestTwoPhaseExecution, a_deactivated_member_is_skipped_while_others_continue)
@@ -631,6 +636,231 @@ TEST_F(TestTwoPhaseExecution, a_branching_tree_propagates_within_one_cycle)
   EXPECT_DOUBLE_EQ(1.0, left_->estimate());
   EXPECT_DOUBLE_EQ(1.0, right_->estimate());
   EXPECT_DOUBLE_EQ(0.5, root_->estimate());
+}
+
+// ---------------------------------------------------------------------------------------------
+// 9. Rate buckets: the exact lag reported by the admission, measured in the REAL manager.
+//
+// `doc/CROSS_RATE_BOUND.md` derives the worst-case staleness of a two-phase edge from the two rate
+// buckets; the values are ATTAINED, not loose bounds. The tests below read the age of the value each
+// end CONSUMED (the controller's cycle-stamp instrument), so they compare the derivation against the
+// real ControllerManager rather than against a model of it. That comparison is the prerequisite for
+// admitting cross-bucket edges at all.
+// ---------------------------------------------------------------------------------------------
+
+/// The age, in manager cycles, of the value each end of one edge consumed, worst case over a window.
+struct MeasuredLag
+{
+  unsigned int state = 0;      ///< child published -> parent ingested
+  unsigned int reference = 0;  ///< parent wrote     -> child consumed
+};
+
+TEST_F(TestTwoPhaseExecution, the_exact_lag_of_every_edge_is_reported_before_enabling)
+{
+  // parent rate 50 (factor 2), child rate 100 (factor 1): the parent is slower.
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 100});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
+  root_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  // Reported whether or not the mode is on, so a configuration can be judged before enabling.
+  EXPECT_FALSE(cm_->two_phase_execution());
+  const auto lags = cm_->two_phase_edge_lags();
+  ASSERT_EQ(1u, lags.size());
+  EXPECT_EQ(kRoot, lags[0].parent);
+  EXPECT_EQ(kLeaf, lags[0].child);
+  EXPECT_EQ(2u, lags[0].parent_factor);
+  EXPECT_EQ(1u, lags[0].child_factor);
+  // f_P = 2, f_C = 1, g = 1: state f_C - g = 0 (the faster child is served same-cycle),
+  //                          reference f_P = 2 (the child's bucket runs first in the command pass).
+  EXPECT_EQ(0u, lags[0].state_lag_cycles);
+  EXPECT_EQ(2u, lags[0].reference_lag_cycles);
+  EXPECT_EQ(2u, lags[0].worst_lag_cycles);
+}
+
+TEST_F(TestTwoPhaseExecution, the_default_budget_reproduces_the_strict_same_bucket_rule)
+{
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 100});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
+  root_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  EXPECT_EQ(0u, cm_->two_phase_max_lag_cycles()) << "the default budget is zero";
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true))
+    << "factor 2 vs factor 1 is not same-cycle in both directions, so the default budget refuses it";
+  EXPECT_FALSE(cm_->two_phase_execution());
+
+  // The refusal must state the EXACT lag it computed, not just "different buckets".
+  bool mentions_lag = false;
+  for (const auto & rejection : cm_->two_phase_rejected_controllers())
+  {
+    mentions_lag |= rejection.reason.find("worst 2 cycle(s)") != std::string::npos;
+  }
+  EXPECT_TRUE(mentions_lag) << "the rejection must quantify the staleness it refuses";
+}
+
+TEST_F(TestTwoPhaseExecution, raising_the_budget_admits_the_edge_it_quantifies)
+{
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 100});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
+  root_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  // Budget 1 is still short of the computed worst case of 2 ...
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true, 1));
+  // ... and 2 admits it.
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true, 2));
+  EXPECT_TRUE(cm_->two_phase_execution());
+  EXPECT_EQ(2u, cm_->two_phase_max_lag_cycles());
+}
+
+TEST_F(TestTwoPhaseExecution, the_measured_lag_matches_the_declared_bound_for_a_slower_parent)
+{
+  // f_P = 2 (parent rate 50), f_C = 1 (child rate 100).
+  constexpr unsigned int kBudget = 2;
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 100});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
+  root_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  leaf_->set_cycle_stamp_mode(true);
+  root_->set_cycle_stamp_mode(true);
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true, kBudget));
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kRoot}, {});
+
+  unsigned int max_state = 0;
+  unsigned int max_reference = 0;
+  // One GLOBAL stamp per cycle, given to every node: a node only advances on the cycles its own
+  // bucket is due, so a per-node counter is not a common time base.
+  for (std::int64_t stamp = 1; stamp <= 24; ++stamp)
+  {
+    leaf_->set_cycle_stamp(stamp);
+    root_->set_cycle_stamp(stamp);
+    const auto root_ingests_before = root_->update_phase_calls();
+    const auto leaf_consumes_before = leaf_->handle_phase_calls();
+    cm_->read(TIME, PERIOD);
+    ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+    cm_->write(TIME, PERIOD);
+    if (stamp <= 4) {continue;}  // warm up: until both producers have stamped
+    // The age of a consumed value is only defined on the cycles the CONSUMER actually ran; sampling
+    // on an idle cycle measures "time since it last ran" instead, which is not staleness.
+    if (root_->update_phase_calls() != root_ingests_before)
+    {
+      max_state = std::max(
+        max_state,
+        static_cast<unsigned int>(
+          stamp - static_cast<std::int64_t>(root_->last_child_estimate_seen())));
+    }
+    if (leaf_->handle_phase_calls() != leaf_consumes_before)
+    {
+      max_reference = std::max(
+        max_reference,
+        static_cast<unsigned int>(
+          stamp - static_cast<std::int64_t>(leaf_->last_target_seen())));
+    }
+  }
+
+  // The declared bound is what the admission computed; the measurement is what the manager did.
+  EXPECT_LE(max_state, kBudget);
+  EXPECT_LE(max_reference, kBudget);
+  // ATTAINED, not merely bounded: the faster child is served same-cycle, and the slower parent's
+  // reference reaches it two cycles later on the cycles where the child's bucket runs first.
+  EXPECT_EQ(0u, max_state);
+  EXPECT_EQ(2u, max_reference);
+}
+
+TEST_F(TestTwoPhaseExecution, the_measured_lag_matches_the_declared_bound_for_a_slower_child)
+{
+  // The mirror configuration: f_P = 1 (parent every cycle), f_C = 2 (child at half rate).
+  constexpr unsigned int kBudget = 2;
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
+  root_->get_node()->set_parameter({"update_rate", 100});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  const auto lags = cm_->two_phase_edge_lags();
+  ASSERT_EQ(1u, lags.size());
+  EXPECT_EQ(2u, lags[0].state_lag_cycles) << "a slower child's state is one child period old";
+  EXPECT_EQ(0u, lags[0].reference_lag_cycles) << "the parent writes every cycle, before the child";
+  EXPECT_EQ(2u, lags[0].worst_lag_cycles);
+
+  leaf_->set_cycle_stamp_mode(true);
+  root_->set_cycle_stamp_mode(true);
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true, kBudget));
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kRoot}, {});
+
+  unsigned int max_state = 0;
+  unsigned int max_reference = 0;
+  // One GLOBAL stamp per cycle, given to every node: a node only advances on the cycles its own
+  // bucket is due, so a per-node counter is not a common time base.
+  for (std::int64_t stamp = 1; stamp <= 24; ++stamp)
+  {
+    leaf_->set_cycle_stamp(stamp);
+    root_->set_cycle_stamp(stamp);
+    const auto root_ingests_before = root_->update_phase_calls();
+    const auto leaf_consumes_before = leaf_->handle_phase_calls();
+    cm_->read(TIME, PERIOD);
+    ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+    cm_->write(TIME, PERIOD);
+    if (stamp <= 4) {continue;}  // warm up: until both producers have stamped
+    // The age of a consumed value is only defined on the cycles the CONSUMER actually ran; sampling
+    // on an idle cycle measures "time since it last ran" instead, which is not staleness.
+    if (root_->update_phase_calls() != root_ingests_before)
+    {
+      max_state = std::max(
+        max_state,
+        static_cast<unsigned int>(
+          stamp - static_cast<std::int64_t>(root_->last_child_estimate_seen())));
+    }
+    if (leaf_->handle_phase_calls() != leaf_consumes_before)
+    {
+      max_reference = std::max(
+        max_reference,
+        static_cast<unsigned int>(
+          stamp - static_cast<std::int64_t>(leaf_->last_target_seen())));
+    }
+  }
+
+  EXPECT_LE(max_state, kBudget);
+  EXPECT_LE(max_reference, kBudget);
+  EXPECT_EQ(2u, max_state);
+  EXPECT_EQ(0u, max_reference);
+}
+
+TEST_F(TestTwoPhaseExecution, a_non_harmonic_edge_needs_its_exact_worst_lag)
+{
+  // f_P = 2 (parent rate 50), f_C = 5 (child rate 20), g = 1:
+  //   state = f_C = 5 (the parent bucket runs first, so even a coincident cycle costs 5),
+  //   reference = f_P - g = 1.
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 20});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
+  root_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  const auto lags = cm_->two_phase_edge_lags();
+  ASSERT_EQ(1u, lags.size());
+  EXPECT_EQ(5u, lags[0].state_lag_cycles);
+  EXPECT_EQ(1u, lags[0].reference_lag_cycles);
+  EXPECT_EQ(5u, lags[0].worst_lag_cycles);
+
+  EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true, 4))
+    << "a budget below the computed worst case must be refused";
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true, 5));
+  EXPECT_EQ(5u, cm_->two_phase_max_lag_cycles());
 }
 
 }  // namespace

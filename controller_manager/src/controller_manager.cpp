@@ -15,6 +15,7 @@
 #include "controller_manager/controller_manager.hpp"
 
 #include <algorithm>
+#include <numeric>
 #include <list>
 #include <memory>
 #include <string>
@@ -291,10 +292,16 @@ ControllerManager::ControllerManager(
   bool two_phase = false;
   if (get_parameter("two_phase_execution", two_phase))
   {
-    publish_generation(two_phase, nullptr);
+    // The budget is only meaningful together with the mode, and it is published with it.
+    int max_lag_cycles = 0;
+    if (!get_parameter("two_phase_max_lag_cycles", max_lag_cycles) || max_lag_cycles < 0)
+    {
+      max_lag_cycles = 0;
+    }
+    publish_generation(two_phase, static_cast<unsigned int>(max_lag_cycles), nullptr);
     RCLCPP_INFO(
-      get_logger(), "Two-phase execution requested by parameter: %s",
-      two_phase ? "enabled" : "disabled");
+      get_logger(), "Two-phase execution requested by parameter: %s (lag budget %d cycle(s))",
+      two_phase ? "enabled" : "disabled", max_lag_cycles);
   }
 
   std::string robot_description = "";
@@ -339,10 +346,16 @@ ControllerManager::ControllerManager(
   bool two_phase = false;
   if (get_parameter("two_phase_execution", two_phase))
   {
-    publish_generation(two_phase, nullptr);
+    // The budget is only meaningful together with the mode, and it is published with it.
+    int max_lag_cycles = 0;
+    if (!get_parameter("two_phase_max_lag_cycles", max_lag_cycles) || max_lag_cycles < 0)
+    {
+      max_lag_cycles = 0;
+    }
+    publish_generation(two_phase, static_cast<unsigned int>(max_lag_cycles), nullptr);
     RCLCPP_INFO(
-      get_logger(), "Two-phase execution requested by parameter: %s",
-      two_phase ? "enabled" : "disabled");
+      get_logger(), "Two-phase execution requested by parameter: %s (lag budget %d cycle(s))",
+      two_phase ? "enabled" : "disabled", max_lag_cycles);
   }
 
   if (!resource_manager_->is_urdf_already_loaded())
@@ -948,7 +961,8 @@ controller_interface::return_type ControllerManager::configure_controller(
   // silently left to the native loop with an order its two-phase neighbours do not share.
   if (current_generation()->two_phase_enabled)
   {
-    const auto rejections = two_phase_rejections(to, nullptr);
+    const auto rejections =
+      two_phase_rejections(to, nullptr, current_generation()->max_lag_cycles);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -1364,7 +1378,8 @@ controller_interface::return_type ControllerManager::switch_controller(
       else if (will_deactivate) {prospective[i] = 0;}
     }
 
-    const auto rejections = two_phase_rejections(controllers, &prospective);
+    const auto rejections =
+      two_phase_rejections(controllers, &prospective, current_generation()->max_lag_cycles);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -1481,7 +1496,8 @@ controller_interface::return_type ControllerManager::switch_controller(
     current_generation()->two_phase_enabled)
   {
     const auto active_now = controller_active_mask(to);
-    const auto rejections = two_phase_rejections(to, &active_now);
+    const auto rejections =
+      two_phase_rejections(to, &active_now, current_generation()->max_lag_cycles);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -2308,13 +2324,15 @@ ControllerManager::current_generation() const noexcept
 }
 
 void ControllerManager::publish_generation(
-  bool two_phase_enabled, std::shared_ptr<const std::vector<TwoPhaseEntry>> entries)
+  bool two_phase_enabled, unsigned int max_lag_cycles,
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> entries)
 {
   // Copy-then-store: the published object is never mutated afterwards, so a cycle that already
   // loaded it keeps a coherent view while a newer generation is built off to the side.
   const auto previous = current_generation();
   auto next = std::make_shared<ExecutionGeneration>();
   next->two_phase_enabled = two_phase_enabled;
+  next->max_lag_cycles = max_lag_cycles;
   next->two_phase_entries = std::move(entries);
   // The bucket list is derived HERE, once, so the control loop only reads it (and never allocates).
   next->two_phase_buckets =
@@ -2322,6 +2340,24 @@ void ControllerManager::publish_generation(
                             : std::make_shared<const std::vector<unsigned int>>();
   next->id = previous->id + 1;
   std::atomic_store(&generation_, std::shared_ptr<const ExecutionGeneration>(std::move(next)));
+}
+
+unsigned int ControllerManager::two_phase_reference_lag(
+  unsigned int parent_factor, unsigned int child_factor) noexcept
+{
+  const unsigned int g = std::gcd(parent_factor, child_factor);
+  if (parent_factor < child_factor) {return parent_factor - g;}
+  if (parent_factor == child_factor) {return 0u;}
+  return parent_factor;
+}
+
+unsigned int ControllerManager::two_phase_state_lag(
+  unsigned int parent_factor, unsigned int child_factor) noexcept
+{
+  const unsigned int g = std::gcd(parent_factor, child_factor);
+  if (child_factor > parent_factor) {return child_factor;}
+  if (child_factor == parent_factor) {return 0u;}
+  return child_factor - g;
 }
 
 std::uint64_t ControllerManager::execution_generation() const noexcept
@@ -2341,11 +2377,11 @@ std::string ControllerManager::two_phase_admission_reason(
              "divisor of it, so no rate bucket could run it at the rate it asked for (a bucket has "
              "to divide the manager's cycle count exactly, see TwoPhaseEntry::factor)";
     case TwoPhaseAdmission::cross_rate_dependency:
-      return "takes part in a reference edge with '" + detail +
-             "' whose two ends are in DIFFERENT rate buckets, so that edge would be ordered by two "
-             "schedules with no fixed relation and would silently use an older value. This "
-             "implementation guarantees same-cycle freshness in BOTH directions on every admitted "
-             "edge, so it refuses such an edge instead of degrading it";
+      return "sits on a reference edge whose exact worst-case staleness (" + detail +
+             ") exceeds the configured lag budget, so the edge would silently use a value older "
+             "than the configuration declared acceptable. Raise 'two_phase_max_lag_cycles' to accept "
+             "that staleness, or make the two ends share a rate bucket; 'two_phase_edge_lags()' "
+             "reports the exact lag of every edge";
     case TwoPhaseAdmission::cross_mode_dependency:
       return "takes part in a reference edge that crosses the two-phase/native boundary with '" +
              detail +
@@ -2447,7 +2483,8 @@ std::vector<char> ControllerManager::controller_active_mask(
 }
 
 std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_rejections(
-  const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask) const
+  const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask,
+  unsigned int max_lag_cycles) const
 {
   // `judged(i)`: is controller i in the set this verdict is about?
   const auto judged = [&](const std::size_t i)
@@ -2579,53 +2616,51 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
       if (!judged(i)) {is_member[i] = 0;}
     }
 
-    bool edge_broken = false;
-    for (std::size_t parent = 0; parent < controllers.size() && !edge_broken; ++parent)
+    // One walk computes every edge AND its exact lag; the verdict below only compares it with the
+    // budget, so the report and the admission can never disagree about what the lag is.
+    for (const auto & lag : two_phase_edge_lags_of(controllers))
     {
-      if (!is_member[parent]) {continue;}
-      for (const auto & port : claimed_command_interfaces(controllers[parent]))
+      const auto parent_it = by_name.find(lag.parent);
+      const auto child_it = by_name.find(lag.child);
+      if (parent_it == by_name.end() || child_it == by_name.end()) {continue;}
+      const std::size_t parent = parent_it->second;
+      const std::size_t child = child_it->second;
+      if (!is_member[parent] || !is_member[child]) {continue;}
+
+      // RATE BUCKETS. The exact worst-case staleness of the edge is compared with the budget. With
+      // the default budget of 0 this is "both directions must be same-cycle", i.e. the two ends must
+      // share a bucket -- exactly the behaviour of a build without a budget.
+      if (lag.worst_lag_cycles > max_lag_cycles)
       {
-        const auto split = port.find_first_of('/');
-        if (split == std::string::npos) {continue;}
-        const auto owner = port.substr(0, split);
-        const auto child_it = by_name.find(owner);
-        if (child_it == by_name.end() || !is_member[child_it->second]) {continue;}
-        const std::size_t child = child_it->second;
-        if (child == parent) {continue;}  // a controller's own port is not an edge
-
-        // RATE BUCKETS. The passes run once per bucket, so the two ends of one edge must be in the
-        // SAME bucket; otherwise the edge is ordered by two schedules with no fixed relation and its
-        // value silently ages. Both ends are reported, so the caller can never keep one end of an
-        // edge the schedule cannot order.
-        if (
-          two_phase_factor(controllers[parent].c->get_update_rate()) !=
-          two_phase_factor(controllers[child].c->get_update_rate()))
-        {
-          rejections.push_back(
-            TwoPhaseRejection{
-              controllers[parent].info.name,
-              two_phase_admission_reason(TwoPhaseAdmission::cross_rate_dependency, owner)});
-          rejections.push_back(
-            TwoPhaseRejection{
-              controllers[child].info.name,
-              two_phase_admission_reason(TwoPhaseAdmission::cross_rate_dependency, owner)});
-          edge_broken = true;  // one report is enough; the caller fails the whole operation
-          break;
-        }
-
-        if (parent < child) {continue;}  // the required order
-
+        const std::string detail =
+          "edge " + lag.parent + " -> " + lag.child + ": worst " +
+          std::to_string(lag.worst_lag_cycles) + " cycle(s) [state " +
+          std::to_string(lag.state_lag_cycles) + ", reference " +
+          std::to_string(lag.reference_lag_cycles) + "], budget " +
+          std::to_string(max_lag_cycles);
+        // Both ends are reported, so a caller that can only exclude never keeps half an edge.
         rejections.push_back(
           TwoPhaseRejection{
             controllers[parent].info.name,
-            two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, owner)});
+            two_phase_admission_reason(TwoPhaseAdmission::cross_rate_dependency, detail)});
         rejections.push_back(
           TwoPhaseRejection{
             controllers[child].info.name,
-            two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, owner)});
-        edge_broken = true;  // one report is enough; the caller fails the whole operation
+            two_phase_admission_reason(TwoPhaseAdmission::cross_rate_dependency, detail)});
         break;
       }
+
+      if (parent < child) {continue;}  // the required order
+
+      rejections.push_back(
+        TwoPhaseRejection{
+          controllers[parent].info.name,
+          two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, lag.child)});
+      rejections.push_back(
+        TwoPhaseRejection{
+          controllers[child].info.name,
+          two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, lag.child)});
+      break;
     }
   }
 
@@ -2640,11 +2675,66 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
   return unique;
 }
 
+std::vector<ControllerManager::TwoPhaseEdgeLag> ControllerManager::two_phase_edge_lags_of(
+  const std::vector<ControllerSpec> & controllers) const
+{
+  std::unordered_map<std::string, std::size_t> by_name;
+  by_name.reserve(controllers.size());
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    by_name.emplace(controllers[i].info.name, i);
+  }
+
+  std::vector<TwoPhaseEdgeLag> lags;
+  std::unordered_map<std::string, bool> seen;
+  for (std::size_t parent = 0; parent < controllers.size(); ++parent)
+  {
+    for (const auto & port : claimed_command_interfaces(controllers[parent]))
+    {
+      const auto split = port.find_first_of('/');
+      if (split == std::string::npos) {continue;}
+      const auto owner = port.substr(0, split);
+      const auto child_it = by_name.find(owner);
+      if (child_it == by_name.end()) {continue;}  // hardware or an unloaded controller
+      const std::size_t child = child_it->second;
+      if (child == parent) {continue;}  // a controller's own port is not an edge
+
+      // A parent claiming several ports of one child is ONE edge, so the pair de-duplicates.
+      const std::string pair = controllers[parent].info.name + "\x1f" + controllers[child].info.name;
+      if (!seen.emplace(pair, true).second) {continue;}
+
+      TwoPhaseEdgeLag lag;
+      lag.parent = controllers[parent].info.name;
+      lag.child = controllers[child].info.name;
+      lag.parent_factor = two_phase_factor(controllers[parent].c->get_update_rate());
+      lag.child_factor = two_phase_factor(controllers[child].c->get_update_rate());
+      lag.reference_lag_cycles = two_phase_reference_lag(lag.parent_factor, lag.child_factor);
+      lag.state_lag_cycles = two_phase_state_lag(lag.parent_factor, lag.child_factor);
+      lag.worst_lag_cycles = std::max(lag.reference_lag_cycles, lag.state_lag_cycles);
+      lags.push_back(std::move(lag));
+    }
+  }
+  return lags;
+}
+
+std::vector<ControllerManager::TwoPhaseEdgeLag> ControllerManager::two_phase_edge_lags() const
+{
+  std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
+  return two_phase_edge_lags_of(rt_controllers_wrapper_.get_updated_list(guard));
+}
+
+unsigned int ControllerManager::two_phase_max_lag_cycles() const
+{
+  return current_generation()->max_lag_cycles;
+}
+
 std::vector<ControllerManager::TwoPhaseRejection>
 ControllerManager::two_phase_rejected_controllers() const
 {
   std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
-  return two_phase_rejections(rt_controllers_wrapper_.get_updated_list(guard), nullptr);
+  return two_phase_rejections(
+    rt_controllers_wrapper_.get_updated_list(guard), nullptr,
+    current_generation()->max_lag_cycles);
 }
 
 std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
@@ -2657,7 +2747,8 @@ ControllerManager::two_phase_entries() const noexcept
 
 std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
 ControllerManager::build_two_phase_entries(
-  const std::vector<ControllerSpec> & controllers, bool admission_enabled) const
+  const std::vector<ControllerSpec> & controllers, bool admission_enabled,
+  unsigned int max_lag_cycles) const
 {
   auto entries = std::make_shared<std::vector<TwoPhaseEntry>>();
   if (!admission_enabled) {return entries;}
@@ -2667,7 +2758,7 @@ ControllerManager::build_two_phase_entries(
   // Rejections are computed ONCE, up front, so the log and the published set cannot disagree: the
   // same verdict decides both. A rejected member is left out because the native loop rate-gates it,
   // which is what makes "no controller runs twice per cycle" true.
-  const auto rejections = two_phase_rejections(controllers, nullptr);
+  const auto rejections = two_phase_rejections(controllers, nullptr, max_lag_cycles);
   std::unordered_map<std::string, std::string> rejected_names;
   rejected_names.reserve(rejections.size());
   for (const auto & rejection : rejections)
@@ -2735,10 +2826,12 @@ void ControllerManager::rebuild_two_phase_entries(
   if (!admission_enabled)
   {
     if (!generation->two_phase_enabled) {return;}
-    publish_generation(false, nullptr);
+    publish_generation(false, 0u, nullptr);
     return;
   }
-  publish_generation(true, build_two_phase_entries(controllers, true));
+  publish_generation(
+    true, generation->max_lag_cycles,
+    build_two_phase_entries(controllers, true, generation->max_lag_cycles));
 }
 
 std::size_t ControllerManager::two_phase_index(
@@ -2753,14 +2846,15 @@ std::size_t ControllerManager::two_phase_index(
   return static_cast<std::size_t>(std::distance(entries.begin(), it));
 }
 
-controller_interface::return_type ControllerManager::set_two_phase_execution(bool enabled)
+controller_interface::return_type ControllerManager::set_two_phase_execution(
+  bool enabled, unsigned int max_lag_cycles)
 {
   const auto generation = current_generation();
   if (!enabled)
   {
     // ONE store that both clears the mode and drops the member set: there is no window in which a
     // cycle could see "enabled" with members left over, or members without the mode.
-    publish_generation(false, nullptr);
+    publish_generation(false, 0u, nullptr);
     RCLCPP_INFO(get_logger(), "Two-phase execution disabled.");
     return controller_interface::return_type::OK;
   }
@@ -2771,7 +2865,8 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
     std::lock_guard<std::recursive_mutex> guard(rt_controllers_wrapper_.controllers_lock_);
     const std::vector<ControllerSpec> & controllers =
       rt_controllers_wrapper_.get_updated_list(guard);
-    const auto rejections = two_phase_rejections(controllers, nullptr);
+    // Judged against the budget being REQUESTED, not the one currently published.
+    const auto rejections = two_phase_rejections(controllers, nullptr, max_lag_cycles);
     if (!rejections.empty())
     {
       for (const auto & rejection : rejections)
@@ -2796,13 +2891,17 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(boo
       return controller_interface::return_type::ERROR;
     }
 
-    // Mode and members in ONE store, so no cycle can observe "enabled but no entries".
-    publish_generation(true, build_two_phase_entries(controllers, true));
+    // Mode, budget and members in ONE store, so no cycle can observe "enabled but no entries", or
+    // members admitted under one budget while the mode reports another.
+    publish_generation(
+      true, max_lag_cycles, build_two_phase_entries(controllers, true, max_lag_cycles));
   }
   const auto entries = two_phase_entries();
   RCLCPP_INFO(
-    get_logger(), "Two-phase execution enabled (%zu controller(s) implement the interface).",
-    entries ? entries->size() : 0u);
+    get_logger(),
+    "Two-phase execution enabled (%zu controller(s) implement the interface, lag budget %u "
+    "cycle(s)).",
+    entries ? entries->size() : 0u, max_lag_cycles);
   return controller_interface::return_type::OK;
 }
 

@@ -154,6 +154,36 @@ public:
   CONTROLLER_MANAGER_PUBLIC
   bool update_phase_entered() const noexcept;
 
+  /// Test instrument: when ON, a node writes the SUPPLIED cycle stamp instead of the control law
+  /// (into its children's targets and its actuators) and publishes it on its `estimate` channel. A
+  /// consumer records the producer's stamp, so a test can read the AGE of the value it consumed.
+  ///
+  /// The stamp is supplied by the TEST rather than derived from a per-node counter, because a node
+  /// only advances on the cycles its own bucket is due: a factor-1 node and a factor-2 node would
+  /// otherwise be counting different clocks and their difference would be meaningless. One global
+  /// stamp is the common time base the age is measured on.
+  ///
+  /// That age is exactly the quantity `doc/CROSS_RATE_BOUND.md` predicts, and reading it is the only
+  /// way to compare the bound against the REAL controller manager rather than against a model of it.
+  /// The control law is still computed, so nothing else about the controller changes.
+  CONTROLLER_MANAGER_PUBLIC
+  void set_cycle_stamp_mode(bool enabled) noexcept;
+
+  /// Set the stamp this node writes/publishes while cycle-stamp mode is on. Called by the test before
+  /// each `update()`; must be the SAME value for every node of the configuration.
+  CONTROLLER_MANAGER_PUBLIC
+  void set_cycle_stamp(std::int64_t stamp) noexcept;
+
+  /// The value of this node's `target` reference the last time it computed a command: in cycle-stamp
+  /// mode, the stamp the parent had when it last wrote.
+  CONTROLLER_MANAGER_PUBLIC
+  double last_target_seen() const noexcept;
+
+  /// The mean of the children's `estimate` channel the last time this node ingested state: in
+  /// cycle-stamp mode, the stamp the child had when it last published.
+  CONTROLLER_MANAGER_PUBLIC
+  double last_child_estimate_seen() const noexcept;
+
 protected:
   std::vector<hardware_interface::CommandInterface> on_export_reference_interfaces() override;
 
@@ -199,6 +229,13 @@ private:
   bool fail_next_update_phase_ = false;
   std::atomic<bool> hold_update_phase_{false};
   std::atomic<bool> update_phase_entered_{false};
+
+  /// Measurement instrument (see set_cycle_stamp_mode).
+  bool cycle_stamp_mode_ = false;
+  std::int64_t cycle_ = 0;
+  std::int64_t cycle_stamp_ = 0;
+  double last_target_seen_ = 0.0;
+  double last_child_estimate_seen_ = 0.0;
 
   std::int64_t update_phase_calls_ = 0;
   std::int64_t handle_phase_calls_ = 0;

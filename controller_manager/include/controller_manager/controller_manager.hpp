@@ -216,15 +216,65 @@ public:
    * `two_phase_execution` parameter (default: false). Membership is resolved from the controller
    * list, so controllers loaded later must still pass the same admission checks.
    *
+   * RATE BUCKETS AND THE LAG BUDGET. A reference edge whose two ends run in different rate buckets
+   * cannot be served in the same cycle by one pair of passes. Instead of refusing every such edge
+   * outright, the budget below states how many manager cycles of staleness the configuration
+   * accepts; the admission computes the EXACT worst-case lag of each edge and compares it.
+   *
+   * `max_lag_cycles = 0` (the default) means "same cycle in both directions", which is exactly the
+   * behaviour of a build without the budget: an edge is admissible only when both ends share a
+   * bucket. Raising it admits harmonic cross-rate configurations that are provably bounded, e.g.
+   * parent factor 2 / child factor 1 has state lag 0 and reference lag 2
+   * (`doc/CROSS_RATE_BOUND.md`, verified against the model in `research/cross_rate_bound/`).
+   *
+   * \param[in] enabled whether the two-phase passes are used.
+   * \param[in] max_lag_cycles accepted worst-case staleness per admitted edge, in manager cycles.
    * \return `return_type::OK` when the requested state was applied, `ERROR` when it was refused (the
    * offending controller and the reason are logged).
    */
   CONTROLLER_MANAGER_PUBLIC
-  controller_interface::return_type set_two_phase_execution(bool enabled);
+  controller_interface::return_type set_two_phase_execution(
+    bool enabled, unsigned int max_lag_cycles = 0);
 
   /// Whether the two-phase execution path is currently enabled.
   CONTROLLER_MANAGER_PUBLIC
   bool two_phase_execution() const;
+
+  /// The lag budget the published execution state was admitted with, in manager cycles.
+  CONTROLLER_MANAGER_PUBLIC
+  unsigned int two_phase_max_lag_cycles() const;
+
+  /// One reference edge (a parent that claims interfaces owned by a child) and its exact lag.
+  /**
+   * Both directions are reported because the interface layer cannot tell them apart: a parent
+   * claiming `<child>/x` may be writing a reference INTO the child or reading a state value the
+   * child publishes, and the admission charges the WORSE of the two so that neither direction can
+   * exceed the budget.
+   *
+   * The values are computed from the two buckets, not measured: they are the exact worst case of
+   * the schedule (`doc/CROSS_RATE_BOUND.md`), in manager cycles.
+   */
+  struct TwoPhaseEdgeLag
+  {
+    std::string parent;
+    std::string child;
+    unsigned int parent_factor = 1;
+    unsigned int child_factor = 1;
+    /// Worst-case age of the reference the parent produces before the child consumes it.
+    unsigned int reference_lag_cycles = 0;
+    /// Worst-case age of the state the child publishes before the parent ingests it.
+    unsigned int state_lag_cycles = 0;
+    /// `max(reference, state)`; this is what the budget is compared against.
+    unsigned int worst_lag_cycles = 0;
+  };
+
+  /// The lag of every detected edge of the current controller list, whether or not it is admitted.
+  /**
+   * Exposes what the admission computes anyway, so a configuration can be judged (and a paper's
+   * bound checked) without enabling the mode. Empty when there are no edges.
+   */
+  CONTROLLER_MANAGER_PUBLIC
+  std::vector<TwoPhaseEdgeLag> two_phase_edge_lags() const;
 
   /// True while a control cycle is inside `update()` on another thread.
   /**
@@ -631,6 +681,10 @@ private:
   struct ExecutionGeneration
   {
     bool two_phase_enabled = false;
+    /// The lag budget this member set was admitted with, in manager cycles. Published WITH the mode
+    /// and the members, so a later configuration operation (configure/switch) judges the list
+    /// against the same budget the mode was enabled with.
+    unsigned int max_lag_cycles = 0;
     /// Immutable once published, so a reader in `update()` may dereference it without locking.
     std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries;
     /// Distinct rate buckets of `two_phase_entries`, ascending, precomputed at publication time so
@@ -644,14 +698,16 @@ private:
 
   /// Publish a complete new generation with ONE atomic store (non-real-time thread only).
   void publish_generation(
-    bool two_phase_enabled, std::shared_ptr<const std::vector<TwoPhaseEntry>> entries);
+    bool two_phase_enabled, unsigned int max_lag_cycles,
+    std::shared_ptr<const std::vector<TwoPhaseEntry>> entries);
   /// The published generation (never null after construction).
   std::shared_ptr<const ExecutionGeneration> current_generation() const noexcept;
   /// The published entry set BY VALUE: the caller must own the snapshot for as long as it uses it.
   std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries() const noexcept;
   /// Build the two-phase member set for a controller list. Never locks; non-real-time only.
   std::shared_ptr<const std::vector<TwoPhaseEntry>> build_two_phase_entries(
-    const std::vector<ControllerSpec> & controllers, bool admission_enabled) const;
+    const std::vector<ControllerSpec> & controllers, bool admission_enabled,
+    unsigned int max_lag_cycles) const;
   /// Build membership from a controller list the caller already owns, then publish a new generation.
   void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);
   /// Same, but with admission applied regardless of the current mode.
@@ -664,6 +720,19 @@ private:
   /// The rate bucket of a controller that declares `controller_rate`: 1 when it follows the manager
   /// or asks for at least the manager's rate, otherwise `update_rate_ / controller_rate`.
   unsigned int two_phase_factor(unsigned int controller_rate) const noexcept;
+  /// EXACT worst-case age, in manager cycles, of the reference a parent in bucket `parent_factor`
+  /// produces before a child in bucket `child_factor` consumes it.
+  /**
+   * Derived from the pass order (`doc/CROSS_RATE_BOUND.md`, checked against the model in
+   * `research/cross_rate_bound/cross_rate_lag.py`): the bucket loop is ascending in both passes, so
+   * the producer's bucket must be the smaller one for a same-cycle read. The value is ATTAINED, not
+   * a loose bound, because the schedule repeats with period lcm(f_P, f_C).
+   */
+  static unsigned int two_phase_reference_lag(
+    unsigned int parent_factor, unsigned int child_factor) noexcept;
+  /// The same for the state direction (child publishes, parent ingests).
+  static unsigned int two_phase_state_lag(
+    unsigned int parent_factor, unsigned int child_factor) noexcept;
   /// The distinct buckets of `entries`, ascending. Non-real-time: called when a generation is built.
   static std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets_of(
     const std::vector<TwoPhaseEntry> & entries);
@@ -672,14 +741,21 @@ private:
   TwoPhaseAdmission two_phase_admission(const ControllerSpec & controller) const noexcept;
   /// The command interfaces a controller claims, for the scheduling checks.
   std::vector<std::string> claimed_command_interfaces(const ControllerSpec & controller) const;
+  /// The lag of every detected edge of a controller list. Never locks; non-real-time only.
+  std::vector<TwoPhaseEdgeLag> two_phase_edge_lags_of(
+    const std::vector<ControllerSpec> & controllers) const;
   /// Every controller that implements the interface but is not admitted, in list order.
   /**
    * `active_mask` restricts the verdict to the controllers that will actually run: index i is judged
    * only when `(*active_mask)[i] != 0`. `nullptr` judges the WHOLE list. A mask is what lets
    * `switch_controller()` judge the PROSPECTIVE active set before it applies anything.
+   *
+   * `max_lag_cycles` is passed in rather than read from the generation, because the enable path has
+   * to judge the list against the budget it is ABOUT to publish, not the one currently in force.
    */
   std::vector<TwoPhaseRejection> two_phase_rejections(
-    const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask) const;
+    const std::vector<ControllerSpec> & controllers, const std::vector<char> * active_mask,
+    unsigned int max_lag_cycles) const;
   /// The mask accepted by `two_phase_rejections`: 1 where `is_controller_active()` holds.
   std::vector<char> controller_active_mask(const std::vector<ControllerSpec> & controllers) const;
 

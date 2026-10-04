@@ -202,6 +202,9 @@ bool TwoPhaseExampleController::resolve_interfaces(std::string * reason)
 
 void TwoPhaseExampleController::ingest() noexcept
 {
+  // One increment per cycle in EITHER execution path, because both call `ingest()` exactly once.
+  ++cycle_;
+
   const double previous = estimate_;
   if (children_.empty())
   {
@@ -226,19 +229,25 @@ void TwoPhaseExampleController::ingest() noexcept
       sum += command_interfaces_[index].get_value();
     }
     const double mean = sum / static_cast<double>(child_estimate_index_.size());
+    // The measurement instrument records what the children had PUBLISHED when they were last read.
+    last_child_estimate_seen_ = mean;
     estimate_ = 0.5 * previous + 0.5 * mean;
   }
 
   // Publish the estimate. In the two-phase path this happens in `update_phase`, i.e. BEFORE the
   // parent's own `update_phase` because the manager walks the list backward.
-  reference_interfaces_[k_estimate] = estimate_;
+  reference_interfaces_[k_estimate] =
+    cycle_stamp_mode_ ? static_cast<double>(cycle_stamp_) : estimate_;
 }
 
 void TwoPhaseExampleController::compute_and_write() noexcept
 {
+  // In the two-phase path this is `handle_phase`, i.e. the moment the node CONSUMES its reference.
+  last_target_seen_ = reference_interfaces_[k_target];
   command_ = reference_interfaces_[k_target] - estimate_;
-  for (const auto index : actuator_index_) {command_interfaces_[index].set_value(command_);}
-  for (const auto index : child_target_index_) {command_interfaces_[index].set_value(command_);}
+  const double written = cycle_stamp_mode_ ? static_cast<double>(cycle_stamp_) : command_;
+  for (const auto index : actuator_index_) {command_interfaces_[index].set_value(written);}
+  for (const auto index : child_target_index_) {command_interfaces_[index].set_value(written);}
 }
 
 controller_interface::return_type TwoPhaseExampleController::update_phase(
@@ -357,6 +366,23 @@ void TwoPhaseExampleController::hold_update_phase(bool hold) noexcept
 bool TwoPhaseExampleController::update_phase_entered() const noexcept
 {
   return update_phase_entered_.load(std::memory_order_acquire);
+}
+
+void TwoPhaseExampleController::set_cycle_stamp_mode(bool enabled) noexcept
+{
+  cycle_stamp_mode_ = enabled;
+}
+
+void TwoPhaseExampleController::set_cycle_stamp(std::int64_t stamp) noexcept
+{
+  cycle_stamp_ = stamp;
+}
+
+double TwoPhaseExampleController::last_target_seen() const noexcept {return last_target_seen_;}
+
+double TwoPhaseExampleController::last_child_estimate_seen() const noexcept
+{
+  return last_child_estimate_seen_;
 }
 
 }  // namespace two_phase_example_controller
