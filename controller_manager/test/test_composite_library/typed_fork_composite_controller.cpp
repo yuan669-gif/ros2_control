@@ -14,6 +14,7 @@
 #include "test_composite_library/typed_fork_declaration.hpp"
 
 #include "hierarchical_control/static_manifest.hpp"
+#include "hierarchical_control/static_two_phase_admission.hpp"
 #include "hierarchical_control/static_topology.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
 
@@ -224,6 +225,20 @@ bool TypedForkCompositeController::build_kernel()
   const auto binding = tc::compose<tf::root_node, tp::contract_of_t<tf::root_ports>>(
     &root_object.get(), a_leaf, b_leaf);
 
+  // The execution ORDER is a compile-time fact of the declaration, not something discovered at
+  // activation: verify that the plan the kernel is about to receive agrees with it. A disagreement
+  // would make every compile-time guarantee about this tree worthless, so it is fatal and named.
+  const auto rows = tc::build_spec_rows(binding);
+  std::string plan_reason;
+  if (!hierarchical_control::static_two_phase::plan_matches_description<binding_type>(
+        rows, &plan_reason))
+  {
+    RCLCPP_FATAL(
+      get_node()->get_logger(),
+      "The plan disagrees with the compile-time description of this tree: %s", plan_reason.c_str());
+    return false;
+  }
+
   std::shared_ptr<hierarchical_control::StagedExecutionGroup> group;
   try
   {
@@ -234,7 +249,7 @@ bool TypedForkCompositeController::build_kernel()
     return false;
   }
 
-  plan_names_ = tc::build_spec_rows(binding).names;
+  plan_names_ = rows.names;
   kernel_ = std::move(group);
   ++build_allocations;
   return true;

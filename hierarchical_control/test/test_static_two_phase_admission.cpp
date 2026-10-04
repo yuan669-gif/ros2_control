@@ -229,3 +229,60 @@ TEST(StaticTwoPhaseAdmission, the_entry_point_accepts_a_declared_two_phase_tree)
   s2::require_two_phase_tree<binding_type>();
   SUCCEED();
 }
+
+/// The plan the kernel consumes is built from the same type as the description, so the two must
+/// agree: the description's pre-order IS the execution order, and its edges ARE the plan's parents.
+///
+/// This is the check that has to be able to fail, because a silent disagreement would make every
+/// compile-time fact about the tree worthless while still compiling.
+TEST(StaticTwoPhaseAdmission, the_runtime_plan_matches_the_compile_time_description)
+{
+  const auto tree = tc::compose<root_node, tp::contract_of_t<root_ports>>(
+    &g_root, tc::make_leaf<left_node, tp::contract_of_t<left_ports>>(&g_left),
+    tc::make_leaf<right_node, tp::contract_of_t<right_ports>>(&g_right));
+  const auto rows = tc::build_spec_rows(tree);
+
+  std::string reason;
+  EXPECT_TRUE(s2::plan_matches_description<binding_type>(rows, &reason)) << reason;
+  EXPECT_TRUE(reason.empty());
+
+  // The plan's order is exactly the description's pre-order, and its parents are its edges.
+  ASSERT_EQ(description::member_count, rows.names.size());
+  for (std::size_t i = 0; i < rows.names.size(); ++i)
+  {
+    EXPECT_EQ(std::string(description::members[i]), rows.names[i]) << "node " << i;
+  }
+}
+
+/// A PERMUTED plan must be rejected: the node set would still be right, and both passes would then
+/// walk the edge the wrong way -- the runtime `unschedulable_order` case, caught at plan build time.
+TEST(StaticTwoPhaseAdmission, a_permuted_plan_is_rejected_and_names_the_first_difference)
+{
+  const auto tree = tc::compose<root_node, tp::contract_of_t<root_ports>>(
+    &g_root, tc::make_leaf<left_node, tp::contract_of_t<left_ports>>(&g_left),
+    tc::make_leaf<right_node, tp::contract_of_t<right_ports>>(&g_right));
+  auto rows = tc::build_spec_rows(tree);
+  ASSERT_GE(rows.names.size(), 3u);
+  std::swap(rows.names[1], rows.names[2]);
+
+  std::string reason;
+  EXPECT_FALSE(s2::plan_matches_description<binding_type>(rows, &reason));
+  EXPECT_NE(std::string::npos, reason.find("node 1")) << "reason: " << reason;
+}
+
+/// An edge the description does not contain must be rejected as well, so the check is not only an
+/// order comparison.
+TEST(StaticTwoPhaseAdmission, a_plan_edge_outside_the_description_is_rejected)
+{
+  const auto tree = tc::compose<root_node, tp::contract_of_t<root_ports>>(
+    &g_root, tc::make_leaf<left_node, tp::contract_of_t<left_ports>>(&g_left),
+    tc::make_leaf<right_node, tp::contract_of_t<right_ports>>(&g_right));
+  auto rows = tc::build_spec_rows(tree);
+  ASSERT_GE(rows.parents.size(), 2u);
+  // Point the second child at a node that is not its parent in the declaration.
+  rows.parents[2] = rows.names[1];
+
+  std::string reason;
+  EXPECT_FALSE(s2::plan_matches_description<binding_type>(rows, &reason));
+  EXPECT_NE(std::string::npos, reason.find("does not contain")) << "reason: " << reason;
+}

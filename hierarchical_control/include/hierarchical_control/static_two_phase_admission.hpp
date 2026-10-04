@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -127,16 +128,15 @@ constexpr std::array<Edge, sizeof...(Entries)> edges_array(tc::TypeList<Entries.
 // The description.
 // ---------------------------------------------------------------------------------------------
 
+/// The STRUCTURE of a declared tree: its members in pre-order, and its parent/child edges.
+/**
+ * Deliberately says nothing about what the nodes implement, because the structure is what a runtime
+ * PLAN can be checked against, and that check applies to every compiled-in tree -- including one that
+ * is executed by the staged kernel rather than by the two-phase passes.
+ */
 template <typename Binding>
-struct tree_description
+struct structure_description
 {
-  static_assert(
-    subtree_all_members<Binding>::value,
-    "static_two_phase: every node of a declared two-phase tree must implement "
-    "TwoPhaseControllerInterface. A tree that mixes the two execution paths cannot be ordered by "
-    "one pair of passes -- that is the runtime admission's cross_mode_dependency, and here it is "
-    "not expressible");
-
   static constexpr std::size_t member_count = Binding::subtree_size;
   static constexpr auto members = names_of(typename Binding::subtree_names{});
 
@@ -170,6 +170,93 @@ struct tree_description
     "passes walk that edge in the same (wrong) direction -- the runtime admission's "
     "unschedulable_order");
 };
+
+/// A declared tree that is EXECUTED by the two-phase passes: the structure above, plus the
+/// requirement that every node implements the two-phase interface.
+/**
+ * Membership is a `static_assert` rather than a runtime check: a tree that mixes the two execution
+ * paths cannot be ordered by one pair of passes. That is the manager's runtime
+ * `cross_mode_dependency`, and here the configuration is not expressible at all.
+ */
+template <typename Binding>
+struct tree_description : structure_description<Binding>
+{
+  static_assert(
+    subtree_all_members<Binding>::value,
+    "static_two_phase: every node of a declared two-phase tree must implement "
+    "TwoPhaseControllerInterface. A tree that mixes the two execution paths cannot be ordered by "
+    "one pair of passes -- that is the runtime admission's cross_mode_dependency, and here it is "
+    "not expressible");
+};
+
+/// Does the runtime plan of a compiled-in tree agree with the STRUCTURE of its TYPE?
+/**
+ * The description's `members` ARE the execution order (the pre-order the two passes rely on), and its
+ * `edges` are the topology edges. The plan the kernel consumes is built from the same type, so the
+ * two must agree -- and that agreement is the whole reason the compile-time facts can stand in for
+ * the manager's runtime admission (membership, edges, order). If they ever disagree, the static
+ * guarantee is worthless, so this function exists to be able to FAIL.
+ *
+ * Runtime because the plan's instances and their generated port strings only exist once a controller
+ * is activated; the comparison is a handful of string compares per node and is on no per-cycle path.
+ */
+template <typename Binding>
+bool plan_matches_description(const tc::SpecRows & rows, std::string * reason = nullptr)
+{
+  using description = structure_description<Binding>;
+  constexpr auto members = description::members;
+  constexpr auto edges = description::edges;
+
+  if (rows.names.size() != members.size())
+  {
+    if (reason != nullptr)
+    {
+      *reason = "the plan has " + std::to_string(rows.names.size()) +
+                " node(s), the description has " + std::to_string(members.size());
+    }
+    return false;
+  }
+
+  // ORDER: the description's pre-order is the order both passes walk, so a permutation is fatal even
+  // though the node SET would still be right.
+  for (std::size_t i = 0; i < members.size(); ++i)
+  {
+    if (rows.names[i] != members[i])
+    {
+      if (reason != nullptr)
+      {
+        *reason = "node " + std::to_string(i) + " is '" + rows.names[i] +
+                  "' in the plan but '" + std::string(members[i]) + "' in the description";
+      }
+      return false;
+    }
+  }
+
+  // EDGES: every parent the plan names must be one of the declared edges, with this node as child.
+  for (std::size_t i = 0; i < rows.parents.size(); ++i)
+  {
+    if (rows.parents[i].empty()) {continue;}
+    bool found = false;
+    for (std::size_t e = 0; e < edges.size(); ++e)
+    {
+      if (edges[e].parent == rows.parents[i] && edges[e].child == rows.names[i])
+      {
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+    {
+      if (reason != nullptr)
+      {
+        *reason = "the plan has the edge '" + rows.parents[i] + "' -> '" + rows.names[i] +
+                  "', which the description does not contain";
+      }
+      return false;
+    }
+  }
+  return true;
+}
 
 /// Entry-point form, so a call site reads as one requirement instead of two traits.
 template <typename Binding>
