@@ -237,6 +237,17 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 
 ### 2.6 明确不做（写在这里避免反复讨论）
 
+- **`set_two_phase_execution_static<Binding>()`（F5 的管理器入口）**：它是 **C++ 模板 API**，
+  而要服务的用户诉求是「YAML 加一行」（已由 `two_phase_execution: true` 满足）。它想省的
+  只是配置期的字符串比较（非实时路径），代价却是"编进二进制 + 注册 + 声明 binding + 调模板"。
+  **不做**——编译期能力保留为**校验**（`plan_matches_description` 每次激活生效），不变成新路径。
+  理由全文见 `STATIC_ADMISSION_DESIGN_2026-10.md` §8。
+- **用静态顺序替换 `controller_sorting()`（F6 的替换部分）**：它对**所有**配置生效，
+  替换即全局行为变更；而两趟路径**已经校验**顺序并在会把边走反时**拒绝整个模式**
+  （`unschedulable_order`，两端都报告），错顺序不会被静默执行。**不做**；改为把拒绝信息变成
+  可执行的修复指引 + 用户文档的「启用被拒怎么办」对照表。理由全文同上。
+
+
 - **多频/异步回调**（不同控制率的执行组）：模型与内核都假定单频同步；不做。
 - **动态拓扑**（运行期增删树成员）：描述是类型/配置期固定的；不做。
 - **把控制器做成全局对象/singleton**：与多实例隔离、析构顺序、插件卸载冲突；不做（见
