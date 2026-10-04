@@ -1,5 +1,13 @@
 # 与 FineMote 论文的逐条对照（arXiv:2608.04600v1）
 
+> ⚠️ **2026-10-03 修正（阅读前必看）**：本文件写于 `LITERATURE_SURVEY_2026-10.md` 之前，
+> 其中"两趟调度/双向同周期是本文机制或贡献"的叙事**已被取代**——FineMote
+> （arXiv:2608.04600）**§III-B 式 (2)** 已给出同一规则（本地 PDF 逐行核对：
+> `log/finemote_paper.txt:315`），且上游 `ros2_control` 也**已经**维护一条树导出的线性化
+> （issue #853 已关闭；本地源码 `controller_manager.cpp` 的 `controller_sorting()` 即此）。
+> 贡献列表、摘要与相关工作请以 **`PAPER_REPOSITIONING_2026-10.md`** 为准；
+> 本文件仅作为**过程记录**保留，引用其结论前必须按重定位文档改写。
+
 日期：2026-09-28　论文：*Static Timing Orchestration for Tree-Structured Robot Control Firmware*
 （Wang Xi, Feiran Wei, Mo Deng, Weiheng Lin, Pangkit Fong, Jianping He；SJTU；arXiv:2608.04600v1，2026-08-05）
 本地文件：`2608.04600v1.pdf`（`pdftotext -layout` 抽取文本放在 `log/finemote_paper.txt`，不入库）

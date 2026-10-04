@@ -348,6 +348,11 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 
 ## 7. 论文定位与文献（2026-10 新增）
 
+**可执行的改写方案在 `PAPER_REPOSITIONING_2026-10.md`**（逐条处置 C1–C9、三条新贡献、
+可直接搬用的摘要草稿、必引清单、审稿人攻击与回答、投稿去向）。
+`PAPER_SKELETON.md` / `PAPER_ALIGNMENT_2026-09-28.md` / `FINAL_REPORT_2026-09-28.md` 顶部已加
+「叙事已被取代」横幅，引用其结论前必须按重定位文档改写。
+
 见 `LITERATURE_SURVEY_2026-10.md`。**结论对本项目不利，但必须正视**：
 
 1. **创新点 1（树状双向两趟调度）在机制层面不是新的**：所引的 FineMote
