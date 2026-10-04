@@ -99,6 +99,7 @@ Two independent checks, because a derivation that only agrees with itself is wor
    | `f_P = 2`, `f_C = 1` (slower parent) | 0 / 2 | **0 / 2** | `the_measured_lag_matches_the_declared_bound_for_a_slower_parent` |
    | `f_P = 1`, `f_C = 2` (slower child) | 2 / 0 | **2 / 0** | `..._for_a_slower_child` |
    | `f_P = 2`, `f_C = 5` (non-harmonic) | 5 / 1 | refused at budget 4, admitted at 5 | `a_non_harmonic_edge_needs_its_exact_worst_lag` |
+   | chain leaf 4 <- mid 2 <- root 1 | per-edge 4 and 2 | end-to-end **6** (= the sum) | `a_chain_accumulates_per_edge_lags_so_the_budget_is_not_end_to_end` |
 
    The measured values are READ from the manager, and the declared values are asserted separately, so
    the two columns agreeing is a result rather than a tautology. Two measurement mistakes were found
@@ -129,13 +130,57 @@ controller_manager:
 A configuration that stays at the default `0` behaves exactly as a build without the budget: the
 admission requires same-cycle freshness in both directions, i.e. one bucket per edge.
 
-## 6. What is still NOT provided
+## 6. End-to-end: a chain accumulates, the budget does not
 
-* The budget is expressed in **manager cycles**, not in time, and is not converted to a control-level
-  quantity (phase margin, sampling delay in ms). For a paper that comparison has to be made
-  explicitly against the manager period.
-* Multi-edge interactions are not modelled: each edge is charged independently, which is correct for
-  the staleness of a single value but says nothing about error accumulation along a chain of
-  cross-rate edges.
-* A chain of cross-rate edges can therefore accumulate `sum` of the per-edge lags; the budget is
-  per-edge, **not** end-to-end.
+The budget is **per edge**. A chain of cross-rate state edges accumulates, and the per-edge budget
+does not bound the result. The honest statement, and the one the tests check:
+
+> For a state path `leaf -> ... -> root` in which every node **republishes what it ingested in the
+> same state stage**, the age of the leaf's value at the root is at most the **SUM** of the per-edge
+> state lags.
+
+Why: the root reads the intermediate node's most recent publish, whose age is bounded by that edge's
+lag, and the value that publish carried was itself bounded by the lag below it. The assumed
+"republish in the same state stage" is what the example controller does in stamp mode; a controller
+that published in a *different* stage would need its own accounting.
+
+The sum is an upper bound because the per-edge maxima need not coincide — but they can, and in the
+measured configuration they do:
+
+| configuration | per-edge state lags | sum | measured end-to-end |
+|---|---|---|---|
+| leaf factor 4, mid factor 2, root factor 1 | 4 (mid←leaf) and 2 (root←mid) | 6 | **6** |
+
+`a_chain_accumulates_per_edge_lags_so_the_budget_is_not_end_to_end` asserts `measured ≤ sum`,
+`measured > the worst single edge` (so the accumulation is real, not incidental) and, for this
+configuration, the exact value 6. With a per-edge budget of 4 the chain is admitted, and the value at
+the root can then be **6** manager cycles old — 1.5 times the number the budget states. That gap is
+the reason a per-edge budget must not be presented as a system-level guarantee.
+
+## 7. Time, and a control quantity
+
+The schedule's natural unit is the manager cycle, but a control argument needs time. Every reported
+lag therefore carries both:
+
+```cpp
+manager->two_phase_edge_lags();   // ..._lag_cycles AND ..._lag_ns
+```
+
+`lag_ns = lag_cycles * 1e9 / update_rate`, so at a 100 Hz manager period a 2-cycle lag is 20 ms.
+Feeding that into the framework's existing cost law (`doc/CONTROL_COST_OF_LAG.md` in the research
+line, `ΔPM = 360 · f_c · Δt`) turns a budget into a phase-margin loss at a given crossover frequency
+`f_c` — e.g. 6 cycles at 100 Hz is 60 ms.
+
+Still **not** provided: the conversion is exposed, not applied. Nothing in the manager checks a
+phase-margin or bandwidth requirement, and the cost law's applicability is a control-engineering
+statement, not a scheduling one.
+
+## 8. What is still NOT provided
+
+* The budget is **per edge, not end-to-end** — see §6, which derives the sum bound, measures it, and
+  shows the chain reaching 1.5x the admitted per-edge budget.
+* The time conversion is exposed (§7) but nothing enforces a control-level requirement; the
+  phase-margin link relies on the cost law of the research line and on a control-engineering
+  argument rather than on anything this code checks.
+* Edges are charged independently and in isolation: branch interactions (one node with several
+  children at different rates) are bounded per edge, and no joint bound is derived.

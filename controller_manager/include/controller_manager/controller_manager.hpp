@@ -266,6 +266,12 @@ public:
     unsigned int state_lag_cycles = 0;
     /// `max(reference, state)`; this is what the budget is compared against.
     unsigned int worst_lag_cycles = 0;
+    /// The same three ages in nanoseconds, i.e. cycles times the controller manager's period. The
+    /// cycles are the natural unit of the schedule; the nanoseconds are what a control-level argument
+    /// needs, and they make the bound comparable with formulations stated in time.
+    std::int64_t reference_lag_ns = 0;
+    std::int64_t state_lag_ns = 0;
+    std::int64_t worst_lag_ns = 0;
   };
 
   /// The lag of every detected edge of the current controller list, whether or not it is admitted.

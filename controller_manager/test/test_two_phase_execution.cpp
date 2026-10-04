@@ -678,6 +678,11 @@ TEST_F(TestTwoPhaseExecution, the_exact_lag_of_every_edge_is_reported_before_ena
   EXPECT_EQ(0u, lags[0].state_lag_cycles);
   EXPECT_EQ(2u, lags[0].reference_lag_cycles);
   EXPECT_EQ(2u, lags[0].worst_lag_cycles);
+  // The same ages in time, so the bound can be compared with formulations stated in microseconds:
+  // at a 100 Hz manager period, 2 manager cycles are 20 ms.
+  EXPECT_EQ(0, lags[0].state_lag_ns);
+  EXPECT_EQ(20000000, lags[0].reference_lag_ns);
+  EXPECT_EQ(20000000, lags[0].worst_lag_ns);
 }
 
 TEST_F(TestTwoPhaseExecution, the_default_budget_reproduces_the_strict_same_bucket_rule)
@@ -861,6 +866,85 @@ TEST_F(TestTwoPhaseExecution, a_non_harmonic_edge_needs_its_exact_worst_lag)
     << "a budget below the computed worst case must be refused";
   ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true, 5));
   EXPECT_EQ(5u, cm_->two_phase_max_lag_cycles());
+}
+
+/// The budget is PER EDGE, so a chain of cross-rate edges accumulates. This test states the
+/// conservative end-to-end bound and measures the real chain against it.
+///
+/// The bound: for a state path leaf -> ... -> root in which every node REPUBLISHES what it ingested
+/// in the same state stage, the age of the leaf's value at the root is at most the SUM of the
+/// per-edge state lags. Proof sketch: the root reads the intermediate node's last publish, whose age
+/// is bounded by that edge's lag, and the value that publish carried was itself bounded by the lag
+/// below it. The per-edge maxima need not coincide, so the sum is an upper bound and is not
+/// generally attained.
+TEST_F(TestTwoPhaseExecution, a_chain_accumulates_per_edge_lags_so_the_budget_is_not_end_to_end)
+{
+  // Factors leaf 4, mid 2, root 1 -- chosen so BOTH edges contribute a non-zero state lag.
+  leaf_ = MakeNode(kLeaf, {"joint2/velocity"}, {"joint2/position"}, {});
+  leaf_->get_node()->set_parameter({"update_rate", 25});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  mid_ = MakeNode(kMid, {}, {}, {kLeaf});
+  mid_->get_node()->set_parameter({"update_rate", 50});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kMid));
+  root_ = MakeNode(kRoot, {}, {}, {kMid});
+  root_->get_node()->set_parameter({"update_rate", 100});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
+
+  const auto lags = cm_->two_phase_edge_lags();
+  ASSERT_EQ(2u, lags.size());
+  unsigned int sum_state_lags = 0;
+  for (const auto & lag : lags)
+  {
+    sum_state_lags += lag.state_lag_cycles;
+    if (lag.child == kLeaf)
+    {
+      EXPECT_EQ(2u, lag.parent_factor) << "the leaf's parent is mid, at half the manager's rate";
+      EXPECT_EQ(4u, lag.child_factor);
+      EXPECT_EQ(4u, lag.state_lag_cycles) << "a slower child costs its whole period";
+      EXPECT_EQ(0u, lag.reference_lag_cycles) << "the parent's bucket runs first in the command pass";
+    }
+    if (lag.child == kMid)
+    {
+      EXPECT_EQ(2u, lag.state_lag_cycles);
+      EXPECT_EQ(0u, lag.reference_lag_cycles);
+    }
+  }
+  EXPECT_EQ(6u, sum_state_lags) << "the two per-edge state lags to be summed";
+
+  // The per-edge budget admits the chain (the worst single edge is 4) ...
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true, 4));
+
+  leaf_->set_cycle_stamp_mode(true);
+  mid_->set_cycle_stamp_mode(true);
+  root_->set_cycle_stamp_mode(true);
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kMid}, {});
+  SwitchNow({kRoot}, {});
+
+  unsigned int max_end_to_end = 0;
+  for (std::int64_t stamp = 1; stamp <= 48; ++stamp)
+  {
+    leaf_->set_cycle_stamp(stamp);
+    mid_->set_cycle_stamp(stamp);
+    root_->set_cycle_stamp(stamp);
+    const auto ingests_before = root_->update_phase_calls();
+    cm_->read(TIME, PERIOD);
+    ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+    cm_->write(TIME, PERIOD);
+    if (stamp <= 8) {continue;}
+    if (root_->update_phase_calls() == ingests_before) {continue;}  // the root did not run
+    // The stamp propagates, so what the root ingested is the stamp of the ORIGIN (the leaf).
+    max_end_to_end = std::max(
+      max_end_to_end,
+      static_cast<unsigned int>(
+        stamp - static_cast<std::int64_t>(root_->last_child_estimate_seen())));
+  }
+
+  // The sum is the honest bound, and the chain really does accumulate: it is worse than the worst
+  // single edge (4), which is exactly what a per-edge budget does NOT capture.
+  EXPECT_LE(max_end_to_end, sum_state_lags);
+  EXPECT_GT(max_end_to_end, 4u) << "the chain must be worse than its worst single edge";
+  EXPECT_EQ(6u, max_end_to_end) << "measured end-to-end lag, in manager cycles";
 }
 
 }  // namespace

@@ -2711,6 +2711,13 @@ std::vector<ControllerManager::TwoPhaseEdgeLag> ControllerManager::two_phase_edg
       lag.reference_lag_cycles = two_phase_reference_lag(lag.parent_factor, lag.child_factor);
       lag.state_lag_cycles = two_phase_state_lag(lag.parent_factor, lag.child_factor);
       lag.worst_lag_cycles = std::max(lag.reference_lag_cycles, lag.state_lag_cycles);
+      // One manager period, in ns. `update_rate_` is the manager's rate, so a factor-f member's
+      // period is f times this; the LAG is always expressed in manager cycles.
+      const auto ns_per_cycle =
+        update_rate_ == 0u ? 0 : static_cast<std::int64_t>(1e9) / static_cast<std::int64_t>(update_rate_);
+      lag.reference_lag_ns = static_cast<std::int64_t>(lag.reference_lag_cycles) * ns_per_cycle;
+      lag.state_lag_ns = static_cast<std::int64_t>(lag.state_lag_cycles) * ns_per_cycle;
+      lag.worst_lag_ns = static_cast<std::int64_t>(lag.worst_lag_cycles) * ns_per_cycle;
       lags.push_back(std::move(lag));
     }
   }

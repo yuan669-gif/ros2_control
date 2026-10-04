@@ -236,8 +236,15 @@ void TwoPhaseExampleController::ingest() noexcept
 
   // Publish the estimate. In the two-phase path this happens in `update_phase`, i.e. BEFORE the
   // parent's own `update_phase` because the manager walks the list backward.
+  // In stamp mode a node REPUBLISHES what it ingested from its children, so the stamp travels with
+  // the data: a leaf stamps the observer's value, and every node above it forwards the stamp of the
+  // ORIGIN rather than its own. That is what makes the END-TO-END age of a chain observable, instead
+  // of only the per-edge age.
   reference_interfaces_[k_estimate] =
-    cycle_stamp_mode_ ? static_cast<double>(cycle_stamp_) : estimate_;
+    cycle_stamp_mode_
+      ? (children_.empty() ? static_cast<double>(cycle_stamp_)
+                           : last_child_estimate_seen_)
+      : estimate_;
 }
 
 void TwoPhaseExampleController::compute_and_write() noexcept

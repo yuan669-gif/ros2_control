@@ -123,8 +123,13 @@ so the admission compares `max(state, reference)` against the budget.
 ```cpp
 manager->set_two_phase_execution(true, /*max_lag_cycles=*/2);
 manager->two_phase_max_lag_cycles();
-manager->two_phase_edge_lags();   // per-edge {parent, child, factors, state, reference, worst}
+// per-edge {parent, child, factors, state lag, reference lag, worst} in cycles AND in nanoseconds
+manager->two_phase_edge_lags();
 ```
+
+The budget is **per edge**. A chain of cross-rate edges accumulates its per-edge lags (bounded by
+their sum, and a measured three-node chain reaches 1.5x the per-edge budget), so a per-edge budget is
+not a system-level latency guarantee; see [`cross_rate_bound.md`](cross_rate_bound.md) §6.
 
 In YAML, next to `two_phase_execution`:
 
