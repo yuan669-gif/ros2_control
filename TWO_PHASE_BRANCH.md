@@ -61,7 +61,7 @@ controller_interface::return_type handle_phase (time, period) noexcept;  // 产�
 控制器的原生 `update()` 仍然必须可用（它是关闭该模式时的路径）。示例见
 `controller_manager/test/two_phase_example_controller/`。
 
-### 2.2 打开
+### 2.2 打开（**一行 YAML，不需要改 C++、不需要新包**）
 
 YAML：
 
@@ -72,12 +72,23 @@ controller_manager:
     two_phase_execution: true
 ```
 
-或运行期：
+这一行就是全部采用成本：控制器怎么写、怎么加载、怎么配都不变；不实现该接口的控制器继续走原生
+单趟循环，该模式只接管**主动实现接口**的那些控制器。
+
+或用 C++（等价，便于部署脚本/测试）：
 
 ```cpp
 manager->set_two_phase_execution(true);   // 全有或全无：任一控制器不满足准入就整体拒绝
 manager->two_phase_rejected_controllers(); // 先问"现在哪些控制器进不来、为什么"
 ```
+
+**启用被拒怎么办**：每条拒绝都点名控制器与原因，用户文档
+（`controller_manager/doc/two_phase_execution.md` §4.2）有一张"拒绝码 → 你要改什么"的对照表。
+
+> 设计决定（2026-10-03）：**不提供** `set_two_phase_execution_static<Binding>()` 这类模板入口，
+> 也**不替换** `controller_sorting()`。理由见 `humble-work` 的
+> `doc/STATIC_ADMISSION_DESIGN_2026-10.md` §8：前者是 C++ API 而用户的诉求是一行配置，
+> 后者是全局行为变更而两趟路径已用"拒绝"代替"静默"。
 
 ### 2.3 跑 demo
 

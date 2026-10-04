@@ -84,6 +84,39 @@ because the admission decision is taken against the controller list, which is pu
 from the execution state. Removing the path (`set_two_phase_execution(false)`) is always accepted: a
 cycle that is already running holds its own snapshot and finishes with it.
 
+### 4.1 Adopting it is one line
+
+You do **not** have to change how the controllers are written, loaded or configured. Put the line in
+the `controller_manager` section, keep spawning your controllers as usual, and that is the whole
+adoption:
+
+```yaml
+controller_manager:
+  ros__parameters:
+    two_phase_execution: true
+```
+
+The mode is off unless that line (or the setter) says otherwise, so a configuration that does not
+mention it behaves exactly as upstream. Controllers that do **not** implement the interface keep
+running through the native loop; the mode only takes over the controllers that opt in by
+implementing it.
+
+### 4.2 If enabling is refused
+
+Nothing is changed when the request is refused, and every refusal names the offending controller.
+The fix is per rule:
+
+| refusal | what to do |
+|---|---|
+| `unsupported_update_rate` | set the controller's `update_rate` to `0` (follow the manager) or to an exact divisor of the manager's rate |
+| `cross_rate_dependency` | raise `two_phase_max_lag_cycles` to the lag the message reports, or give the two ends the same `update_rate` |
+| `cross_mode_dependency` | the neighbour on that edge must also implement `TwoPhaseControllerInterface`, or the edge must go away |
+| `unschedulable_order` | give the child a command interface (a cascade leaf normally drives hardware, so it has one), or load it after its parent |
+| `duplicate_instance` | two names refer to one controller object; remove one of them |
+
+`two_phase_rejected_controllers()` answers "what would be refused, and why" **before** you enable
+anything, which is the cheapest way to check a configuration.
+
 ## 5. Admission rules
 
 | rejection | meaning |

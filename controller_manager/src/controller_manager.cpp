@@ -2393,7 +2393,9 @@ std::string ControllerManager::two_phase_admission_reason(
              "reference edge in the wrong direction (the backwards state pass would visit the parent "
              "first and the forwards command pass the child first), silently using the previous "
              "cycle's value. Upstream `controller_sorting()` places a chainable controller that "
-             "claims NO command interface BEFORE its parent, which is the usual cause";
+             "claims NO command interface BEFORE its parent, which is the usual cause: give that "
+             "controller a command interface (a cascade leaf normally drives hardware, so it has "
+             "one), or load it after its parent";
     case TwoPhaseAdmission::duplicate_instance:
       return "shares ONE controller object with '" + detail +
              "' (the manager only rejects duplicate names, so the same instance can be added under "
