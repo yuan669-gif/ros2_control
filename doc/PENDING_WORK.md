@@ -175,7 +175,9 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 > **已完成（2026-10-03）**：公式与推导（`CROSS_RATE_BOUND.md` + 自校验模型）**以及有界接纳与
 > 实测**（分支 `feature/two-phase-manager`，提交 `7f8b19d`；`test_two_phase_execution` 28 例全绿，
 > ctest 通过；实测 0/2、2/0、5/1 与闭式逐值相等；**默认预算 0 与旧的"两端必须同桶"语义等价**）。
-> 仍缺：预算是逐边的，**没有端到端（多边串联）上界**，也未换算成时间/相位裕度。
+> **端到端与时间口径亦已补**（`1b7aba0`）：链式上界 = 逐边之和（实测 4+2 -> **6**，而预算是 4，
+> 即**逐边预算不是系统级保证**）；每条滞后同时给**纳秒**，可代入 `ΔPM = 360·f_c·Δt`。
+> 仍缺：管理器不检查相位裕度/带宽（转换只暴露不施加）。
 > 以下保留原计划作为记录。**公式与推导已给出**，见 `CROSS_RATE_BOUND.md` +
 > 可执行自校验模型 `research/cross_rate_bound/cross_rate_lag.py`。结论：最坏滞后**精确可达**
 > （非松上界），且 **参考边同周期新鲜 ⟺ `f_P | f_C`**、**状态边同周期新鲜 ⟺ `f_C | f_P`**
