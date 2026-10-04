@@ -2,11 +2,19 @@
 
 日期：2026-10-03　分支：`humble-work`　前置：`COMPILETIME_AUDIT_2026-10.md`（审计 §3 的 F5/F6）
 
-> **状态（2026-10-03 更新）**：§3 的 `tree_description` 描述层**已实现并验证**
-> （`hierarchical_control/include/hierarchical_control/static_two_phase_admission.hpp`，
-> `test_static_two_phase_admission.cpp` 3/3，负向语料 18/18，`hierarchical_control` ctest 14/14）。
-> §3 的**管理器入口** `set_two_phase_execution_static<Binding>()` 与 F6（把静态顺序交给管理器）
-> **仍未实现**；§5 的等价性验证已在描述层与运行期字符串之间完成，接管器顺序的那一步没有做。
+> **状态（2026-10-03 更新）**：§3 的描述层**已实现并验证**（`static_two_phase_admission.hpp`），
+> §3 第 3 步「仍跑运行期准入、并把命中已被取代的拒绝码视为内部错误」的**可证伪内核**也已实现，
+> 但形式是 **plan 等价性校验**而不是管理器入口：
+> `plan_matches_description<Binding>()` 把运行期 plan 的 names 先序与 parents 边**逐项**与类型描述
+> 比较（`test_static_two_phase_admission` 6/6，含两个必须失败的负向用例），并在
+> `TypedForkCompositeController::build_kernel()` 里对每次激活生效（复合插件套件 9/9 + 10/10）。
+> 过程中还把描述**拆成两层**：`structure_description`（结构，适用于任何编译进去的树）与
+> `tree_description`（额外要求两阶段成员性）——因为把成员性要求压到结构校验上会立刻在
+> **staged** 的 fork 复合控制器上编译失败。
+>
+> **仍未实现**：§3 的管理器入口 `set_two_phase_execution_static<Binding>()`，以及 F6 的
+> 「用静态顺序替换 `controller_sorting()`」（那要动管理器排序的来源，需单独评估回归面）。
+>
 >
 > 这份文档的其余部分是**设计**。目的：把审计里"真正的能力缺口"写清楚——
 > 对**静态声明的树**，管理器的六个 `TwoPhaseAdmission` 拒绝码里哪几个可以被类型取代、

@@ -114,8 +114,8 @@ file proves the check is not vacuous.
 | **F2** | 树内**接口认领冲突** | **A** | `controller_manager.cpp:2103-2122`、`resource_manager.cpp:907-926`（激活时抛） | 由 F1 的"每 role 一端口"直接给出 | F1 + 1 个负向用例 | **已完成** |
 | **F3** | 类型化路径上的**计划二次校验**（一根/唯一名/实例唯一/无环） | **A** | `topology_binding.hpp:85-115`、`staged_execution_group.hpp:115-139` | typed 路径加 `static_assert`；内核校验保留为纵深防御 | ~15 行 | 建议做 |
 | **F4** | 复合控制器里的残余**运行期分派**（`node_at` switch、`is_leaf` O(n²) 扫描、失败不带名） | **A** | `typed_fork_composite_controller.{hpp:333-342,cpp:167-201}`、`generic_composite_controller.cpp:193-287` | 叶子集已前移（见 §3.1）；`node_at` switch 与 generic composite 未做 | 40–60 行（只在插件内） | **部分已做** |
-| **F5** | 管理器**两趟准入**全靠字符串 + RTTI | **B** | `controller_manager.cpp:2940-3107`（`dynamic_cast`、按 `/` 切 owner、指针比、`parent<child` 下标比较） | 引入 `StaticTree<Binding>` 作为**一个准入单元**：成员性 `is_base_of_v`、边与先序下标编译期可得 | 300–500 行，动管理器 | 真正的缺口 |
-| **F6** | `controller_sorting()` 的字符串启发式 | **B** | `controller_manager.cpp:4088-4211`；已知缺陷"无命令接口的 chainable 被排到父之前" | 静态树自带顺序向量，并断言管理器排序与之相等 | F5 的一部分 | 与 F5 同批 |
+| **F5** | 管理器**两趟准入**全靠字符串 + RTTI | **B** | `controller_manager.cpp:2940-3107`（`dynamic_cast`、按 `/` 切 owner、指针比、`parent<child` 下标比较） | **描述层 + plan 等价性校验已落地**（§3.2/§3.3）；把描述接进管理器、替换 `controller_sorting` 的静态入口**未做** | 已做 ~330 行；管理器入口 300–500 行（未做） | **部分已做** |
+| **F6** | `controller_sorting()` 的字符串启发式 | **B** | `controller_manager.cpp:4088-4211`；已知缺陷"无命令接口的 chainable 被排到父之前" | **顺序向量已编译期化、且 plan 被逐项校验**（§3.3）；**管理器模式的排序仍未被替换** | F5 的一部分 | **部分已做** |
 | **F7** | **更新周期/分桶一致性** | **B** | `two_phase_admission` 的 `unsupported_update_rate`、`cross_rate_dependency` | `template<unsigned Hz> RateTag` 每节点携带 + 边的 factor `static_assert` | 120–180 行 | 部分可行；会把部署频率写进二进制，**不能夸大成通用保证** |
 | **F8** | **整链量纲/单位一致性** | **B** | 现在只做**逐边**名字+量纲；单位（m vs mm）明确不在范围 | 只能要求**显式标注**关系（`Integral<From,To>` / `Gain<...>`）再断言量纲匹配；**不能推断**（P 控制器合法地把 m 误差映射成 m/s 指令） | 150–250 行，假阳性风险中 | 谨慎 |
 | **F11** | **实时路径零分配**的"类型级事实" | **B** | typed 路径稳态已零分配（实测），但 plan/buffer 是 `std::vector` | `std::array` + `binding_depth<Binding>()` / `Ports::count` 尺寸化，使 plan 成为 constexpr 对象 | 200–350 行，动内核 `Spec` | 可选 |
@@ -180,6 +180,36 @@ YAML、后者是控制器**列表**的性质；静态树里它们要么不可表
 
 ---
 
+## 3.3 又已落地：执行顺序成为编译期事实，并在每次 checked 构造时校验（F5/F6 的一部分）
+
+**问题**：两趟与分阶段执行都依赖「父先于子」的顺序。这个顺序在研究线里由 `compose` / `fill_spec_rows`
+在**运行期**产出（虽然来源是类型），而管理器模式还要靠 `controller_sorting()` 的字符串启发式去猜。
+
+**改动**：
+
+| 文件 | 改动 |
+|---|---|
+| `static_two_phase_admission.hpp` | 拆成 `structure_description<Binding>`（成员先序 + 边 + 先序下标 + `edges_are_ordered()`，**不提节点实现了什么**）与 `tree_description<Binding>`（在结构之上加「每个节点都实现两阶段接口」的 `static_assert`）；新增 `plan_matches_description<Binding>(rows)`，把运行期 plan 的 names 顺序与 parents 边**逐项**与类型描述比较，失败时**点名第一处差异** |
+| `typed_fork_composite_controller.cpp` | `build_kernel()` 在构建内核**之前**校验 plan，不一致就 `RCLCPP_FATAL` 并拒绝激活 |
+
+`plan_matches_description` 是**必须能失败**的检查：静态保证的全部价值取决于「描述 == 运行期 plan」。
+它作用于 `structure_description`，因此对**任何**编译进去的树都适用（包括交给 staged 内核的复合插件），
+而不只对两阶段树。
+
+**验证**：`test_static_two_phase_admission` **6 例**（新增 3 例：plan 一致；**置换 plan 被拒并点名
+`node 1`**；plan 里出现描述中不存在的边被拒）；`test_hierarchy_comparison` **10/10** 与
+`test_static_controller_registry` **9/9**（这两个套件的每次激活都会走该校验）；`hierarchical_control`
+ctest **14/14**。
+
+**分层修正（构建时暴露的真实发现）**：最初把 plan 校验写在 `tree_description` 上（即要求所有节点实现
+两阶段接口），`static_assert` 立刻在 fork 复合控制器上触发——**那棵树是 staged 的、不是两阶段的**。
+这正说明「结构」与「两阶段成员性」是两件事：结构校验属于任何编译进去的树，成员性只属于两阶段路径。
+拆开之后两者都能用，且负向用例仍然能失败。
+
+**未做**：管理器模式（每个节点是插件控制器）的静态入口，以及用静态顺序替换 `controller_sorting()`
+——那要动控制器的排序来源，风险需单独评估（见 `STATIC_ADMISSION_DESIGN_2026-10.md` §3 第 2/3 步）。
+
+
 ## 4. 结论：编译期到底能推到哪
 
 把上面的 A/B 做成分界线，可以给论文一个可辩护的**枚举式**结论：
@@ -206,7 +236,7 @@ YAML、后者是控制器**列表**的性质；静态树里它们要么不可表
 | 编译内置控制器注册表 | `./build/controller_manager/test_static_controller_registry` | **9/9 通过**（含 `TypedForkCompositeController` 路径） |
 | 复合插件与 manifest 对照 | `./build/controller_manager/test_hierarchy_comparison` | 已跑的 **10/10 通过**（含叶子集前置后的激活路径）；进程在该 fixture 的 `TearDownTestCase` 崩溃（见下） |
 | 叶子集前置（F4 一部分） | `./build/controller_manager/test_static_controller_registry`（9/9）、`test_hierarchy_comparison`（10/10）、`ctest --test-dir build/hierarchical_control`（13/13） | 通过 |
-| F5/F6 设计与描述层 | `STATIC_ADMISSION_DESIGN_2026-10.md`（设计）；`static_two_phase_admission.hpp` + `test_static_two_phase_admission.cpp`（描述层**已实现**） | 设计为文档；描述层 **3/3 用例通过**，负向语料 **18/18**，`hierarchical_control` ctest **14/14** |
+| F5/F6 设计与描述层 | `STATIC_ADMISSION_DESIGN_2026-10.md`（设计）；`static_two_phase_admission.hpp` + `test_static_two_phase_admission.cpp` | 描述层与 **plan 等价性校验**已实现：该套件 **6/6**、复合插件 **9/9 + 10/10**、负向语料 **18/18**、`hierarchical_control` ctest **14/14** |
 | 重新构建 | `colcon build --packages-select hierarchical_control controller_manager` | 通过（仅上游既有的 unused-parameter 警告） |
 
 > **环境性崩溃（与本改动无关）**：本机所有使用 `ControllerManagerFixture` 的 gmock 可执行文件在

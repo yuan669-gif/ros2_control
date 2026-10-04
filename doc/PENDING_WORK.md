@@ -161,6 +161,10 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 - **另已落地**：声明式两阶段树的**编译期描述层**（`static_two_phase_admission.hpp`）——
   会员性、成员先序、参考边、父先于子全部由类型导出；核心验证是**等价性**：
   编译期边集 == 运行时按 `"<owner>/"` 切分推断出的边集（审计 §3.2）。
+- **另已落地**：**执行顺序成为编译期事实并被逐项校验**（审计 §3.3）：
+  `structure_description`（结构，适用于任何编译进去的树）与 `tree_description`（加两阶段成员性）
+  分层；`plan_matches_description()` 把运行期 plan 与类型描述逐项比较、失败点名首处差异，
+  并接进 `build_kernel()`（每次激活生效）。负向用例证明该检查**能失败**。
 - 剩余的 A 类（F4 里的 `node_at` switch、generic composite）与 B 类（**F5 的管理器入口**、
   F6 编译期顺序、F7 RateTag、F8 标注式链关系、F11 constexpr 容器）**未做**。
   **F5/F6 已出设计**：`STATIC_ADMISSION_DESIGN_2026-10.md`（含"六个拒绝码里三个由类型取代、
