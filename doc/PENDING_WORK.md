@@ -404,6 +404,8 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 | 分配 / 周期（3 成员，预热后） | 单趟 14、两趟 **8** | 回应"第二趟要多少钱"；**两趟更省**（缓存了 `is_controller_active`） |
 | 时间 / 周期（2 核 VM，仅报告） | 单趟 8 µs、两趟 3 µs | 同上；**不得**当作跨平台结论 |
 | 真实加载路径（pluginlib 按类型 + `<name>.params_file` + demo URDF） | 三级链同周期 `1.0 → 0.5 → 0.25` | N2 的端到端证据（**不含** service/DDS 那一段） |
+| **Gazebo 级端到端复现**（真实 `GazeboSystem` + 真实 DDS + 真实 spawner） | 单趟 lag **0,1,2**；两趟 **0,0,0**；控制周期 10.00 ms | N2 的**真实系统**证据（此前只有进程内 mock 硬件）+ 一行 YAML 启用 |
+| **Gazebo 暴露的两个真问题**：chained 成员在 `on_configure` 建的发布器会丢失；单趟路径没有周期时间戳导致"单趟也 lag 0"的**假结论** | 都已修 + 文档化 | 说明"契约 ≠ 上游 `update()` 分解"与"不实测不算数"这两条论文论点 |
 | **上游隐患**：unload chainable 不移除导出的 reference 接口（悬垂指针） | 复现 + 公开 API 钉住 | **新的一类实证贡献**：运行期接口模型有生命周期洞，正是"类型化的静态描述"能避免的那一类（支撑 N1/N3） |
 
 细节与复现见该分支的 `TWO_PHASE_BRANCH.md` §4b 与
