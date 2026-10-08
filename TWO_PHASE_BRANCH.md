@@ -147,6 +147,18 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 | **真实加载路径**：pluginlib 按类型字符串加载 + 参数经**真实的 `<name>.params_file` 机制**（spawner 用的那条）来自 demo YAML，管理器用 **demo 自己的 URDF** 构建 | 三级链阶跃 `1.0 → 0.5 → 0.25` **同周期**达成，说明 demo 的 YAML/URDF/插件三者一致 |
 | **上游隐患**：卸载 chainable 控制器不会移除它导出的 reference 接口 | 见 `controller_manager/doc/upstream_finding_stale_reference_interfaces.md`；测试用公开 API 钉住，**不触碰悬垂指针** |
 
+**证据驱动的第三个改动——而且它是个功能缺口（最重要的一条）**：
+链根（非 chained）的**外部参考输入在两趟模式下被冻结**。上游只有一个地方调用
+`ChainableControllerInterface::update_reference_from_subscribers()`——**融合的 `update()`**——而两趟路径
+**按设计绕过**它；该方法又是 `protected`，管理器自己够不到。后果：一个由话题驱动的链根会**永远**命令它
+最后一次看到的参考值，**没有任何报错、没有任何拒绝**，真实机器人只是不理会输入。
+所有原测试都用了 `set_external_reference()`（直接设值），所以**全都漏了**；是 Gazebo 暴露的。
+
+修法是把上游 `update()` 的**第三步**补进契约：`refresh_reference_phase()`，管理器在命令趟对该成员
+（`chainable == nullptr || !is_in_chained_mode()`）**先刷新再 `handle_phase`**。
+**验证过测试不是空转**：把刷新调用临时改成 `if (false && ...)` 后，单趟测试**通过**、两趟测试**失败**（值 0），
+恢复后两者都通过。
+
 **由这些证据驱动的两个改动**（都在本分支）：
 1. 成员的活动状态**缓存进执行代**（`TwoPhaseEntry::active`），实时两趟不再调用
    `is_controller_active()`；这是上面"分配更少"的来源（改前是 **26 vs 14**，即两趟**更差**）。

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "controller_manager/controller_manager.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "controller_manager_test_common.hpp"
 #include "two_phase_example_controller/two_phase_example_controller.hpp"
 
@@ -148,6 +149,43 @@ public:
   }
 
   /// One control cycle through the real read/update/write sequence.
+  /// Drive the chain ROOT's own input topic and return the leaf's resulting command.
+  ///
+  /// The topic is the deployment path for a chain root: upstream refreshes a chainable controller's
+  /// reference inside the FUSED `ChainableControllerInterface::update()`, which the two-phase path
+  /// bypasses by design -- and `update_reference_from_subscribers()` is `protected`, so the manager
+  /// cannot call it itself. Without the contract's third step (`refresh_reference_phase`) a root holds
+  /// whatever reference it last saw and commands it forever, SILENTLY. Every other test in this file
+  /// sets the reference through `set_external_reference()`, which is why they all passed while this
+  /// was broken; it was found in Gazebo.
+  ///
+  /// This fixture does not spin the executor in the background (only the SRVS fixture does), so the
+  /// callbacks are delivered here explicitly and deterministically.
+  double DriveRootReference(bool two_phase, double value)
+  {
+    BuildChain();
+    EXPECT_EQ(Return::OK, cm_->set_two_phase_execution(two_phase));
+    if (two_phase)
+    {
+      EXPECT_TRUE(cm_->two_phase_execution()) << "the chain should be admitted";
+    }
+    ActivateChain();
+    Cycle(3);
+
+    executor_->add_node(cm_);
+    auto publisher_node = rclcpp::Node::make_shared("tp_reference_publisher");
+    auto publisher = publisher_node->create_publisher<std_msgs::msg::Float64>(
+      std::string("/") + kRoot + "/reference", 10);
+    for (int i = 0; i < 40; ++i)
+    {
+      publisher->publish(std_msgs::msg::Float64().set__data(value));
+      executor_->spin_some();
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    Cycle(3);
+    return leaf_->command();
+  }
+
   void Cycle(int count)
   {
     for (int i = 0; i < count; ++i)
@@ -232,6 +270,18 @@ public:
 // ---------------------------------------------------------------------------------------------
 // 1. The default is the upstream single pass, unchanged.
 // ---------------------------------------------------------------------------------------------
+
+/// A chain ROOT driven by its own topic must keep following that topic in BOTH modes: the reference
+/// direction (parent -> child) is same-cycle in either, so the value must reach the leaf's command.
+TEST_F(TestTwoPhaseExecution, a_root_follows_its_reference_topic_with_native_single_pass)
+{
+  EXPECT_DOUBLE_EQ(0.75, DriveRootReference(false, 0.75));
+}
+
+TEST_F(TestTwoPhaseExecution, a_root_follows_its_reference_topic_in_two_phase_mode)
+{
+  EXPECT_DOUBLE_EQ(0.75, DriveRootReference(true, 0.75));
+}
 
 TEST_F(TestTwoPhaseExecution, the_feature_is_off_by_default)
 {

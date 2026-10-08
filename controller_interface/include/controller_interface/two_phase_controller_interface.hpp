@@ -67,6 +67,28 @@ public:
   /** Runs while the manager walks its controller list FORWARD (parents before children). */
   virtual return_type handle_phase(
     const rclcpp::Time & time, const rclcpp::Duration & period) noexcept = 0;
+
+  /// Refresh this controller's reference inputs from its OWN subscribers.
+  ///
+  /// The manager calls this once per cycle, BEFORE the command pass, for every member that is NOT in
+  /// chained mode (a chain ROOT, or a chainable controller nobody claims). It exists because upstream
+  /// reaches `ChainableControllerInterface::update_reference_from_subscribers()` only through the
+  /// fused `update()`, which the two-phase path bypasses by design -- and that method is `protected`,
+  /// so the manager cannot reach it itself.
+  ///
+  /// WHY THIS IS PART OF THE CONTRACT RATHER THAN THE IMPLEMENTATION'S BUSINESS: leaving it out is
+  /// SILENT. A root driven by a topic keeps whatever reference it last had and commands it forever;
+  /// nothing fails, nothing is refused, and on a real deployment the robot simply ignores its input.
+  /// Found exactly that way, in Gazebo, after every in-process test passed (they set the reference
+  /// through a test hook instead of a subscription).
+  ///
+  /// The default does nothing, which is correct for a controller with no input topic and for every
+  /// member whose reference is written by its parent.
+  virtual return_type refresh_reference_phase(
+    const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+  {
+    return return_type::OK;
+  }
 };
 
 }  // namespace controller_interface

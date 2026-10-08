@@ -645,6 +645,10 @@ private:
     /// the generation, outside the loop, and a switch republishes the generation BEFORE it releases
     /// the passes, so a running cycle never sees a stale one.
     bool active = false;
+    /// The same controller seen as a chainable one, or null. Cached at generation-build time so the
+    /// real-time path never casts; used to ask whether its reference is written by a parent (then it
+    /// must NOT be refreshed from a subscriber) and to reach `refresh_reference_phase` correctly.
+    controller_interface::ChainableControllerInterface * chainable = nullptr;
   };
   /// Why a controller that implements `TwoPhaseControllerInterface` may not join the two-phase path.
   enum class TwoPhaseAdmission

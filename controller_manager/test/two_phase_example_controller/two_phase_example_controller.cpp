@@ -99,6 +99,15 @@ CallbackReturn TwoPhaseExampleController::on_init()
   read_string_array("state_interfaces", state_interface_names_);
   read_string_array("children", children_);
 
+  if (get_node()->has_parameter("publish_cycle_diagnostics"))
+  {
+    const auto parameter = get_node()->get_parameter("publish_cycle_diagnostics");
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
+    {
+      publish_diagnostics_ = parameter.as_bool();
+    }
+  }
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -110,6 +119,17 @@ CallbackReturn TwoPhaseExampleController::on_configure(
   reference_interfaces_.assign(k_reference_count, 0.0);
   estimate_ = 0.0;
   command_ = 0.0;
+  if (publish_diagnostics_)
+  {
+    diagnostics_message_.data.resize(3);
+    diagnostics_publisher_ =
+      get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/cycle_diagnostics", 100);
+  }
+  // A chain ROOT is driven from here; a chained node never reads it (its parent writes its target).
+  reference_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64>(
+    "~/reference", 10,
+    [this](const std_msgs::msg::Float64::SharedPtr message)
+    {subscribed_reference_.store(message->data, std::memory_order_relaxed);});
   return CallbackReturn::SUCCESS;
 }
 
@@ -134,6 +154,8 @@ CallbackReturn TwoPhaseExampleController::on_deactivate(
   state_index_.clear();
   child_target_index_.clear();
   child_estimate_index_.clear();
+  diagnostics_publisher_.reset();
+  reference_subscription_.reset();
   return CallbackReturn::SUCCESS;
 }
 
@@ -245,6 +267,26 @@ void TwoPhaseExampleController::ingest() noexcept
       ? (children_.empty() ? static_cast<double>(cycle_stamp_)
                            : last_child_estimate_seen_)
       : estimate_;
+
+  publish_cycle_diagnostics();
+}
+
+void TwoPhaseExampleController::publish_cycle_diagnostics() noexcept
+{
+  if (diagnostics_publisher_ == nullptr) {return;}
+  // No allocation beyond what serialization needs; the buffer is reused. A diagnostic run trades
+  // real-time purity for observability on purpose, and the parameter is off by default.
+  try
+  {
+    diagnostics_message_.data[0] = static_cast<double>(cycle_);
+    diagnostics_message_.data[1] = estimate_;
+    diagnostics_message_.data[2] = last_child_estimate_seen_;
+    diagnostics_publisher_->publish(diagnostics_message_);
+  }
+  catch (...)
+  {
+    // A diagnostic must never take the control loop down.
+  }
 }
 
 void TwoPhaseExampleController::compute_and_write() noexcept
@@ -298,9 +340,18 @@ controller_interface::return_type TwoPhaseExampleController::update_and_write_co
 controller_interface::return_type
 TwoPhaseExampleController::update_reference_from_subscribers()
 {
-  // No subscriber in this example: the reference is either written by a parent (chained mode) or set
-  // externally through `set_external_reference()`.
+  // The fused path calls this only when NOT chained, so the value is ours to take.
+  reference_interfaces_[k_target] = subscribed_reference_.load(std::memory_order_relaxed);
   return controller_interface::return_type::OK;
+}
+
+controller_interface::return_type TwoPhaseExampleController::refresh_reference_phase(
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+{
+  // Same rule as upstream's fused path: a chained node's target belongs to its parent. The manager
+  // only calls this for non-chained members, so the check is a belt-and-braces confirmation.
+  if (is_in_chained_mode()) {return controller_interface::return_type::OK;}
+  return update_reference_from_subscribers();
 }
 
 std::vector<hardware_interface::CommandInterface>

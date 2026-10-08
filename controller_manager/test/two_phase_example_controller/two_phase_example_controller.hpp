@@ -5,6 +5,8 @@
 #define TWO_PHASE_EXAMPLE_CONTROLLER__TWO_PHASE_EXAMPLE_CONTROLLER_HPP_
 
 #include <atomic>
+#include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -195,8 +197,15 @@ protected:
     const rclcpp::Time & time, const rclcpp::Duration & period) override;
 
 private:
+  /// Refresh the reference from our own input topic (see the interface's documentation for why this
+  /// step must exist in the two-phase contract at all).
+  controller_interface::return_type refresh_reference_phase(
+    const rclcpp::Time & time, const rclcpp::Duration & period) override;
+
   /// Ingest state and publish the estimate. Shared by `update_phase` and the fused path.
   void ingest() noexcept;
+  /// Optional deployment instrument: publish `[cycle, estimate, child_published]` once per cycle.
+  void publish_cycle_diagnostics() noexcept;
   /// Compute the command from the reference and the estimate, then write it. Shared likewise.
   void compute_and_write() noexcept;
 
@@ -241,6 +250,17 @@ private:
   std::int64_t handle_phase_calls_ = 0;
   std::int64_t native_update_calls_ = 0;
   std::int64_t last_period_ns_ = 0;
+
+  /// Deployment instrument, OFF unless the `publish_cycle_diagnostics` parameter is set. It exists
+  /// so a real deployment (a simulator or hardware, not a hand-pumped test) can be measured from
+  /// outside: one message per cycle, carrying the cycle index and this node's estimate, so an
+  /// observer can reconstruct WHO saw WHAT on WHICH cycle after the fact.
+  bool publish_diagnostics_ = false;
+  /// Latest value received on `~/reference`; a chain ROOT is driven from here.
+  std::atomic<double> subscribed_reference_{0.0};
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr reference_subscription_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr diagnostics_publisher_;
+  std_msgs::msg::Float64MultiArray diagnostics_message_;
 };
 }  // namespace two_phase_example_controller
 

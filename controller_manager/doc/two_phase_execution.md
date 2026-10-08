@@ -117,6 +117,19 @@ The fix is per rule:
 `two_phase_rejected_controllers()` answers "what would be refused, and why" **before** you enable
 anything, which is the cheapest way to check a configuration.
 
+## 4c. 实现 `TwoPhaseControllerInterface` 时不要漏掉参考刷新
+
+契约有三个步骤，不是一个：`update_phase`（状态趟，反向遍历）、`handle_phase`（命令趟，正向遍历），
+以及 **`refresh_reference_phase`**（管理器在命令趟、对该成员 `handle_phase` **之前**调用；仅对
+**非 chained** 成员调用，即链根或其他无人认领的控制器）。
+
+为什么它是契约的一部分而不是实现细节：上游只在**融合的 `update()`** 里调用
+`ChainableControllerInterface::update_reference_from_subscribers()`，而两趟路径按设计绕过 `update()`；
+该方法又是 `protected`，管理器无法代劳。**漏掉它是静默的**——由话题驱动的链根会一直命令最后一次收到的
+参考值，不报错、不拒绝，真实部署上就是"机器人不理输入"。本分支的 Gazebo 验证正是这样发现的。
+
+默认实现是空操作，对"没有输入话题的控制器"和"参考由父节点写入的成员"都正确。
+
 ## 5. Admission rules
 
 | rejection | meaning |

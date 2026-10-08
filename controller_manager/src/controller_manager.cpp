@@ -2787,9 +2787,10 @@ ControllerManager::build_two_phase_entries(
       ++rejected_members;
       continue;
     }
-    entries->push_back(
-      TwoPhaseEntry{controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate()),
-                    is_controller_active(*controller.c)});
+    entries->push_back(TwoPhaseEntry{
+      controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate()),
+      is_controller_active(*controller.c),
+      dynamic_cast<controller_interface::ChainableControllerInterface *>(controller.c.get())});
   }
 
   std::sort(
@@ -3075,6 +3076,25 @@ controller_interface::return_type ControllerManager::update(
         const auto index = two_phase_index(entries, spec.c.get());
         if (index == no_two_phase || entries[index].factor != factor) {continue;}
         if (!entries[index].active) {continue;}
+        // The step upstream performs inside `ChainableControllerInterface::update()` and which the
+        // split would otherwise lose: a member whose reference is NOT written by a parent reads it
+        // from its own subscribers. `is_in_chained_mode()` is public and final, so this is a direct
+        // call on a pointer resolved outside the loop.
+        if (
+          entries[index].chainable == nullptr || !entries[index].chainable->is_in_chained_mode())
+        {
+          if (entries[index].instance->refresh_reference_phase(time, bucket_period) !=
+              controller_interface::return_type::OK)
+          {
+            // Matches the handle-phase failure style above: report and keep going, because the
+            // members after this one still execute and a refusal here has no safe rollback.
+            RCLCPP_ERROR(
+              get_logger(),
+              "Two-phase reference refresh failed for controller '%s'; the command pass continues "
+              "so the remaining members still execute.",
+              spec.info.name.c_str());
+          }
+        }
         if (
           entries[index].instance->handle_phase(time, bucket_period) !=
           controller_interface::return_type::OK)
