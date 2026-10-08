@@ -318,6 +318,13 @@ TEST_F(TestTwoPhaseExecution, single_pass_lags_by_one_cycle_at_every_level)
 TEST_F(TestTwoPhaseExecution, single_pass_command_uses_the_previous_cycles_reference)
 {
   const auto values = RunStep(false);
+  // The parent runs BEFORE the child here, so at the step cycle it ingests what the child published
+  // LAST cycle, which was zero. Asserted, not merely argued: this row is the comparison the paper's
+  // central table prints against the two-pass row, and a table whose "before" column is derived rather
+  // than tested is exactly the kind of number that turns out to be wrong.
+  EXPECT_DOUBLE_EQ(1.0, values.leaf);
+  EXPECT_DOUBLE_EQ(0.0, values.mid) << "the parent cannot have seen this cycle's child estimate";
+  EXPECT_DOUBLE_EQ(0.0, values.root);
   // target was 0 in this cycle for the leaf, so command = 0 - 1 = -1: the parent's fresh command has
   // not reached the leaf yet either.
   EXPECT_DOUBLE_EQ(-1.0, values.leaf_command);
