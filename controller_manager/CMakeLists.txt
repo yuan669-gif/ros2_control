@@ -213,6 +213,18 @@ if(BUILD_TESTING)
     ros2_control_test_assets::ros2_control_test_assets
   )
 
+  # Evidence harness: the measurements the write-up cites (lag vs depth, cost per cycle, and the
+  # real pluginlib + params_file load path). Kept separate from the functional suite on purpose.
+  ament_add_gmock(test_two_phase_evidence
+    test/test_two_phase_evidence.cpp
+    APPEND_ENV AMENT_PREFIX_PATH=${ament_index_build_path}_$<CONFIG>
+  )
+  target_link_libraries(test_two_phase_evidence
+    controller_manager
+    two_phase_example_controller
+    ros2_control_test_assets::ros2_control_test_assets
+  )
+
   # Runnable demo: an in-memory system so `ros2_control_node` + `spawner` work with no simulator.
   add_library(two_phase_demo_system SHARED
     test/two_phase_demo/two_phase_demo_system.cpp

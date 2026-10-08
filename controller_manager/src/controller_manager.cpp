@@ -2788,8 +2788,8 @@ ControllerManager::build_two_phase_entries(
       continue;
     }
     entries->push_back(
-      TwoPhaseEntry{
-        controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate())});
+      TwoPhaseEntry{controller.c.get(), instance, two_phase_factor(controller.c->get_update_rate()),
+                    is_controller_active(*controller.c)});
   }
 
   std::sort(
@@ -2976,7 +2976,7 @@ controller_interface::return_type ControllerManager::update(
         auto & spec = rt_controller_list[slot];
         const auto index = two_phase_index(entries, spec.c.get());
         if (index == no_two_phase || entries[index].factor != factor) {continue;}
-        if (!is_controller_active(*spec.c)) {continue;}
+        if (!entries[index].active) {continue;}
         if (
           entries[index].instance->update_phase(time, bucket_period) !=
           controller_interface::return_type::OK)
@@ -2999,22 +2999,26 @@ controller_interface::return_type ControllerManager::update(
 
   for (auto loaded_controller : rt_controller_list)
   {
+    // Drive-by-one-path invariant, checked BEFORE the lifecycle query: with two-phase execution
+    // ENABLED, a member is never executed by the native single-pass loop -- not even while a switch
+    // is pending and the passes are paused. Gating this on `run_two_phase` would silently switch
+    // such a controller back to the fused single-pass semantics for the few cycles a switch takes,
+    // which is exactly the behaviour the feature exists to replace (and would double-advance the
+    // state of a controller that implements both entry points).
+    //
+    // The order also matters for ALLOCATION: on Humble `is_controller_active()` copies a lifecycle
+    // State whose label is a std::string, so querying it for a member that is about to be skipped is
+    // pure cost. A member's own activity is the cached `entry.active` flag instead.
+    if (
+      generation->two_phase_enabled &&
+      two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
+    {
+      continue;
+    }
     // TODO(v-lopez) we could cache this information
     // https://github.com/ros-controls/ros2_control/issues/153
     if (is_controller_active(*loaded_controller.c))
     {
-      // Drive-by-one-path invariant: with two-phase execution ENABLED, a member is never executed
-      // by the native single-pass loop -- not even while a switch is pending and the passes are
-      // paused. Gating this on `run_two_phase` instead would silently switch such a controller back
-      // to the fused single-pass semantics for the few cycles a switch takes, which is exactly the
-      // scheduling behaviour the feature exists to replace (and would double-advance the state of a
-      // controller that implements both entry points).
-      if (
-        generation->two_phase_enabled &&
-        two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
-      {
-        continue;
-      }
       const auto controller_update_rate = loaded_controller.c->get_update_rate();
       const auto controller_update_factor =
         (controller_update_rate == 0) || (controller_update_rate >= update_rate_)
@@ -3070,7 +3074,7 @@ controller_interface::return_type ControllerManager::update(
       {
         const auto index = two_phase_index(entries, spec.c.get());
         if (index == no_two_phase || entries[index].factor != factor) {continue;}
-        if (!is_controller_active(*spec.c)) {continue;}
+        if (!entries[index].active) {continue;}
         if (
           entries[index].instance->handle_phase(time, bucket_period) !=
           controller_interface::return_type::OK)

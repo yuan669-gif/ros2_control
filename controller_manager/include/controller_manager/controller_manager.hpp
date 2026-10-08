@@ -636,6 +636,15 @@ private:
     /// different buckets would be ordered by two schedules with no fixed relation, so it is refused
     /// (`cross_rate_dependency`) instead of being left silently stale.
     unsigned int factor = 1;
+    /// Whether this member was ACTIVE when the generation was built.
+    ///
+    /// Cached here so the real-time passes do NOT call `is_controller_active()`, which on Humble
+    /// copies a lifecycle State whose label is a `std::string` and therefore ALLOCATES. Measured:
+    /// querying it once per member per pass cost ~4 allocations per member per cycle (26 vs 14
+    /// allocations/cycle for three members) and ~8 us/cycle. The flag is computed with the rest of
+    /// the generation, outside the loop, and a switch republishes the generation BEFORE it releases
+    /// the passes, so a running cycle never sees a stale one.
+    bool active = false;
   };
   /// Why a controller that implements `TwoPhaseControllerInterface` may not join the two-phase path.
   enum class TwoPhaseAdmission

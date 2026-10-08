@@ -19,7 +19,9 @@ tp_leaf:
     update_rate: 0            # 0 = follow the controller manager
     command_interfaces: ["joint2/position"]
     state_interfaces: ["joint2/position"]
-    children: []
+    # NOTE: no `children:` key here. An EMPTY YAML array cannot be typed by rclcpp, and declaring
+    # the overrides then throws "parameter_value_from failed for parameter 'children': No parameter
+    # value set". A leaf has no children, so the key is simply absent.
 
 tp_mid:
   ros__parameters:

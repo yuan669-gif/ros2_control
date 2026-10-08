@@ -134,6 +134,34 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 
 ---
 
+## 4b. 证据（可复跑的测量，`test_two_phase_evidence`，4 例全绿）
+
+这些是**给论文用的数字**，不是功能测试；跑法：
+`./build/controller_manager/test_two_phase_evidence`（数字同时写进 ctest XML 的 `RecordProperty`）。
+
+| 项 | 结果 |
+|---|---|
+| **滞后 = 距叶子的距离**（单趟）vs **0**（两趟），深度 1..4 | 例：深度 3 时单趟 `[0,1,2]`、两趟 `[0,0,0]`。把"一个数"变成**定律** |
+| **分配 / 周期**（3 成员，400 周期，预热后） | 单趟 **14**，两趟 **8**——两趟**更少**，因为它省掉了每成员的 `is_controller_active()`（Humble 上会复制含 `std::string` 的 lifecycle State） |
+| **时间 / 周期**（2 核 VM，仅报告不断言） | 单趟 **8 µs**，两趟 **3 µs** |
+| **真实加载路径**：pluginlib 按类型字符串加载 + 参数经**真实的 `<name>.params_file` 机制**（spawner 用的那条）来自 demo YAML，管理器用 **demo 自己的 URDF** 构建 | 三级链阶跃 `1.0 → 0.5 → 0.25` **同周期**达成，说明 demo 的 YAML/URDF/插件三者一致 |
+| **上游隐患**：卸载 chainable 控制器不会移除它导出的 reference 接口 | 见 `controller_manager/doc/upstream_finding_stale_reference_interfaces.md`；测试用公开 API 钉住，**不触碰悬垂指针** |
+
+**由这些证据驱动的两个改动**（都在本分支）：
+1. 成员的活动状态**缓存进执行代**（`TwoPhaseEntry::active`），实时两趟不再调用
+   `is_controller_active()`；这是上面"分配更少"的来源（改前是 **26 vs 14**，即两趟**更差**）。
+2. demo YAML 里的 `children: []` **删掉**：**空的 YAML 数组 rclcpp 无法定型**，声明 override 时抛
+   `parameter_value_from failed for parameter 'children': No parameter value set`——也就是说**原来那份
+   demo 配置在真实 spawner 路径上是坏的**，是这次的"真实路径"证据抓出来的。
+
+**踩到并记录下来的坑**（值得写进任何"手泵控制循环"的测试）：上游
+`switch_updated_list()` 会**等待实时线程停止使用它要覆盖的那个列表**
+（`wait_until_rt_not_using(former_index)`），而手泵测试里只有 `update()` 会推进该索引——
+所以列表变更**必须在另一个线程发起、同时持续泵循环**；**事后补泵没用**（等待发生在调用内部）。
+`test_two_phase_evidence.cpp` 的 `WithPump()` 就是为此而写。
+
+---
+
 ## 5. 验收状态
 
 | 验收项 | 状态 |
