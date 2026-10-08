@@ -22,7 +22,7 @@
 | **P1-2** | 把控制器列表纳入执行代（§2.3） | 去掉"安装执行路径必须停止期"这条约束 | 1 周（动上游列表发布协议） | 无 |
 | **P1-3** | 依赖库 TSan（rclcpp/lifecycle/hardware_interface/FastRTPS 插桩）（§3.1） | 现在只能声称"管理器自身无 race" | 1–2 天（含磁盘/时间） | 需要 ≥3 GB 空间与较长构建 |
 | **P1-4** ⬆ | 最小 CI + 文档英文化（§4.2/§4.4） | 决定这份工作能不能被别人接手/给上游；**已推送的分支现在只有「在我机器上验证过一次」**，再往上做 U1（生成 URDF）也需要 CI | 1–2 天 | 无 |
-| **P1-5** | 论文正文：把 `PAPER_REPOSITIONING_2026-10.md` §3 的草稿落成摘要/贡献/相关工作 | **按 (b) 只写创新点 1**（编译期元编程降为未来工作）；材料已齐：运行时移植 + 准入检查集 + 跨速率滞后 + **Gazebo 真实物理** + 接口生命周期洞 | 数天（写作） | 无 |
+| **P1-5** ▶ | 论文正文（**初稿已完成 2026-10-03**，位置：**`feature/two-phase-manager` 的 `doc/PAPER_DRAFT_2026-10.md`**） | **按 (b) 只写创新点 1**；后续在同一分支编辑。待补：作者/单位、期刊格式、参考文献列表（DOI 取本分支的 `LITERATURE_SURVEY_2026-10.md` §4） | 数天（写作+打磨） | 无 |
 | **P2\*** | 其余（U3/U2 等 URDF 侧小项、`Spec::parents` 配置入口、多执行组、缓存一致性、flaky 根治、ctest 超时、ABI 版本化） | 有价值但不阻塞任何结论 | 各 0.5–2 天 | 无 |
 
 "P0"=不做会挡住后面的事；"P1"=明显提升可用/可信度；"P2"=打磨。
@@ -391,6 +391,18 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 | ABI / 覆盖层规则 | `USER_GUIDE.md` §1.4、`FINAL_REPORT_2026-09-28.md` §5 |
 | Gazebo 真值指标不可靠 / 耗时不稳 | `IMPLEMENTATION_GUIDE.md` §12.3 #1/#2 |
 | Jazzy/Rolling 复现（无 Docker） | `IMPLEMENTATION_GUIDE.md` §12.2 |
+
+---
+
+## 6c. 正文的位置（2026-10-03）
+
+**正文只在 `feature/two-phase-manager` 分支：`doc/PAPER_DRAFT_2026-10.md`。**
+本分支（`humble-work`）的 `doc/PAPER_DRAFT_2026-10.md` 已被替换为**指针**，不要在那里恢复副本——
+代码在哪条分支，论文就在哪条分支，否则会出现两份互相矛盾的正文。
+随正文一起移过去的还有它 §6.3 用来验证的模型脚本 `research/cross_rate_bound/cross_rate_lag.py`。
+
+本分支仍然是**研究材料**的家：`LITERATURE_SURVEY_2026-10.md`、`PAPER_REPOSITIONING_2026-10.md`、
+`COMPILETIME_AUDIT_2026-10.md`、`CROSS_RATE_BOUND.md`、本文件。正文引用它们时已注明"研究分支"。
 
 ---
 
