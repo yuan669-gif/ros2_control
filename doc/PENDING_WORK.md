@@ -394,6 +394,23 @@ controller_interface/include/controller_interface/two_phase_controller_interface
 
 ---
 
+## 6b. 论文证据（2026-10-03 新增，可直接引用）
+
+分支 `feature/two-phase-manager` 的 `test_two_phase_evidence`（4 例全绿）产出：
+
+| 证据 | 数字 | 用途 |
+|---|---|---|
+| 滞后 = 距叶子距离（单趟）vs 0（两趟），深度 1..4 | 深度 3：单趟 `[0,1,2]`、两趟 `[0,0,0]` | 把 N2 的"一个数"变成**定律** |
+| 分配 / 周期（3 成员，预热后） | 单趟 14、两趟 **8** | 回应"第二趟要多少钱"；**两趟更省**（缓存了 `is_controller_active`） |
+| 时间 / 周期（2 核 VM，仅报告） | 单趟 8 µs、两趟 3 µs | 同上；**不得**当作跨平台结论 |
+| 真实加载路径（pluginlib 按类型 + `<name>.params_file` + demo URDF） | 三级链同周期 `1.0 → 0.5 → 0.25` | N2 的端到端证据（**不含** service/DDS 那一段） |
+| **上游隐患**：unload chainable 不移除导出的 reference 接口（悬垂指针） | 复现 + 公开 API 钉住 | **新的一类实证贡献**：运行期接口模型有生命周期洞，正是"类型化的静态描述"能避免的那一类（支撑 N1/N3） |
+
+细节与复现见该分支的 `TWO_PHASE_BRANCH.md` §4b 与
+`controller_manager/doc/upstream_finding_stale_reference_interfaces.md`。
+
+---
+
 ## 7. 论文定位与文献（2026-10 新增）
 
 **可执行的改写方案在 `PAPER_REPOSITIONING_2026-10.md`**（逐条处置 C1–C9、三条新贡献、
