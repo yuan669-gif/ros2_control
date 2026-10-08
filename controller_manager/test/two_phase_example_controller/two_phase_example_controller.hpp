@@ -204,7 +204,9 @@ private:
 
   /// Ingest state and publish the estimate. Shared by `update_phase` and the fused path.
   void ingest() noexcept;
-  /// Optional deployment instrument: publish `[cycle, estimate, child_published]` once per cycle.
+  /// Optional deployment instrument: publish `[cycle, estimate, child_published, stamp_s]` once per
+  /// cycle. The stamp is the manager's time for that cycle, shared by every member, which is what
+  /// makes the per-level series comparable across controllers activated at different moments.
   void publish_cycle_diagnostics() noexcept;
   /// Compute the command from the reference and the estimate, then write it. Shared likewise.
   void compute_and_write() noexcept;
@@ -250,12 +252,21 @@ private:
   std::int64_t handle_phase_calls_ = 0;
   std::int64_t native_update_calls_ = 0;
   std::int64_t last_period_ns_ = 0;
+  /// Manager time of the cycle being published, in seconds (diagnostics only).
+  double cycle_stamp_seconds_ = 0.0;
 
   /// Deployment instrument, OFF unless the `publish_cycle_diagnostics` parameter is set. It exists
   /// so a real deployment (a simulator or hardware, not a hand-pumped test) can be measured from
   /// outside: one message per cycle, carrying the cycle index and this node's estimate, so an
   /// observer can reconstruct WHO saw WHAT on WHICH cycle after the fact.
   bool publish_diagnostics_ = false;
+  /// When set, the law is a direct position setpoint (`command = target`) instead of the default
+  /// error law (`command = target - estimate`). A position CONTROLLED joint must be given a
+  /// setpoint; the default law is a rate, which a position interface would read as `position :=
+  /// target - position` and rail into the limits (measured: estimates pinned at +/-3.14).
+  bool position_command_ = false;
+  /// How many times `on_configure` ran, so a silent re-configure is visible in the log.
+  int configure_count_ = 0;
   /// Latest value received on `~/reference`; a chain ROOT is driven from here.
   std::atomic<double> subscribed_reference_{0.0};
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr reference_subscription_;

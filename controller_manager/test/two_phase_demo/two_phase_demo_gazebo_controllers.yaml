@@ -1,0 +1,43 @@
+# Two-phase execution demo configuration.
+#
+# The cascade is   tp_root -> tp_mid -> tp_leaf  and the leaf drives joint2.
+# Switch it on/off by editing `two_phase_execution` below (or with
+#   ros2 param set /controller_manager two_phase_execution false
+# after the controllers are running).
+#
+# `children` is what makes the parent claim `<child>/target` (write) and `<child>/estimate` (read);
+# `command_interfaces` / `state_interfaces` are the hardware-facing interfaces of a leaf.
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    two_phase_execution: true
+    # Gazebo publishes /clock; without this the manager's 100 Hz loop runs on wall time while the
+    # hardware advances on simulated time, and the two drift apart.
+    use_sim_time: true
+
+tp_leaf:
+  ros__parameters:
+    type: controller_manager/two_phase_example_controller
+    update_rate: 0            # 0 = follow the controller manager
+    publish_cycle_diagnostics: true
+    position_command: true
+    command_interfaces: ["joint2/position"]
+    state_interfaces: ["joint2/position"]
+    # NOTE: no `children:` key here. An EMPTY YAML array cannot be typed by rclcpp, and declaring
+    # the overrides then throws "parameter_value_from failed for parameter 'children': No parameter
+    # value set". A leaf has no children, so the key is simply absent.
+
+tp_mid:
+  ros__parameters:
+    type: controller_manager/two_phase_example_controller
+    update_rate: 0
+    publish_cycle_diagnostics: true
+    children: ["tp_leaf"]
+
+tp_root:
+  ros__parameters:
+    type: controller_manager/two_phase_example_controller
+    update_rate: 0
+    publish_cycle_diagnostics: true
+    children: ["tp_mid"]

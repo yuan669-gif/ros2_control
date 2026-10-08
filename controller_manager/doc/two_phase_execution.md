@@ -130,6 +130,18 @@ anything, which is the cheapest way to check a configuration.
 
 默认实现是空操作，对"没有输入话题的控制器"和"参考由父节点写入的成员"都正确。
 
+## 4d. 在 `on_configure` 里创建发布器/订阅器会静默丢失（chained 成员）
+
+一个容易踩且**很难 debug** 的生命周期事实：当一个 **chained 父节点**被激活时，管理器会把它声称接口的
+**子节点 `deactivate` → 设置 chained 模式 → 再 `activate`**。因此任何"在 `on_configure` 创建、在
+`on_deactivate` 释放"的资源（发布器、订阅器、定时器），都会在那次转换中**被悄悄丢掉**，而且只在
+**chained 成员**上发生——未被声称的链根不受影响，于是问题看起来像"某些控制器没有话题"。
+
+实测：`/tp_leaf/cycle_diagnostics` 在 ROS 图上变成 `Unknown topic`，而 `/tp_root/cycle_diagnostics`
+（未 chained 的根）正常，直到把发布器从 `on_configure` 移到 `on_activate` 才修好。
+
+**规则**：ACTIVE 阶段才存在的资源，就在 `on_activate` 里创建（并做幂等保护），在 `on_deactivate` 里释放。
+
 ## 5. Admission rules
 
 | rejection | meaning |

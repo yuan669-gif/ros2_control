@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<!--
+  Gazebo variant of the two-phase demo: the SAME three-level cascade, but the hardware is real
+  Gazebo physics through `gazebo_ros2_control/GazeboSystem` instead of the in-memory demo system.
+
+  One movable joint is enough: the cascade's leaf drives `joint2`, and the two levels above it only
+  exchange reference interfaces. Everything else is fixed, so the physics cannot contaminate the
+  cycle-level measurement.
+
+  `$CONTROLLERS_YAML` is replaced by the launch file with the absolute path of the controller
+  configuration. `gazebo_ros2_control` loads its own ControllerManager inside `gzserver` and reads
+  this file through its `<parameters>` tag. The path is substituted rather than written as
+  `$(find ...)`, because that macro is expanded by xacro and this file is spawned as plain URDF.
+
+  The launch file also collapses this file to a SINGLE LINE before handing it to the parameter
+  server: `gazebo_ros2_control` re-passes it to its ControllerManager as a command-line parameter override, and
+  rcl's override parser rejects values containing newlines.
+-->
+<robot name="two_phase_gazebo">
+  <link name="world"/>
+
+  <joint name="world_joint" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <mass value="1.0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+    <collision>
+      <geometry>
+        <box size="0.1 0.1 0.1"/>
+      </geometry>
+    </collision>
+    <visual>
+      <geometry>
+        <box size="0.1 0.1 0.1"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="joint2" type="revolute">
+    <parent link="base_link"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.3"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10.0" lower="-3.14" upper="3.14" velocity="2.0"/>
+  </joint>
+
+  <link name="link2">
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.005" ixy="0.0" ixz="0.0" iyy="0.005" iyz="0.0" izz="0.001"/>
+    </inertial>
+    <collision>
+      <geometry>
+        <box size="0.05 0.05 0.3"/>
+      </geometry>
+    </collision>
+    <visual>
+      <geometry>
+        <box size="0.05 0.05 0.3"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <ros2_control name="GazeboTwoPhaseDemo" type="system">
+    <hardware>
+      <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+    </hardware>
+    <joint name="joint2">
+      <!-- POSITION only: this Humble `GazeboSystem` is position-only. Asking for a velocity command
+           interface does not fail cleanly, it ABORTS gzserver with `free(): invalid pointer` during
+           controller loading (reproduced twice). The demo therefore uses a position setpoint and
+           sets `position_command: true` on the cascade controllers, which switches their law from
+           the default error law to a direct setpoint. -->
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+  <gazebo>
+    <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+      <parameters>$CONTROLLERS_YAML</parameters>
+      <robot_param>robot_description</robot_param>
+      <robot_param_node>robot_state_publisher</robot_param_node>
+    </plugin>
+  </gazebo>
+</robot>

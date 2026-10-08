@@ -98,6 +98,14 @@ CallbackReturn TwoPhaseExampleController::on_init()
   read_string_array("command_interfaces", command_interface_names_);
   read_string_array("state_interfaces", state_interface_names_);
   read_string_array("children", children_);
+  if (get_node()->has_parameter("position_command"))
+  {
+    const auto parameter = get_node()->get_parameter("position_command");
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
+    {
+      position_command_ = parameter.as_bool();
+    }
+  }
 
   if (get_node()->has_parameter("publish_cycle_diagnostics"))
   {
@@ -119,17 +127,10 @@ CallbackReturn TwoPhaseExampleController::on_configure(
   reference_interfaces_.assign(k_reference_count, 0.0);
   estimate_ = 0.0;
   command_ = 0.0;
-  if (publish_diagnostics_)
-  {
-    diagnostics_message_.data.resize(3);
-    diagnostics_publisher_ =
-      get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/cycle_diagnostics", 100);
-  }
-  // A chain ROOT is driven from here; a chained node never reads it (its parent writes its target).
-  reference_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64>(
-    "~/reference", 10,
-    [this](const std_msgs::msg::Float64::SharedPtr message)
-    {subscribed_reference_.store(message->data, std::memory_order_relaxed);});
+  RCLCPP_INFO(
+    get_node()->get_logger(), "'%s': CONFIGURE #%d; cycle diagnostics %s; %zu child(ren)",
+    get_node()->get_name(), ++configure_count_, publish_diagnostics_ ? "ON" : "off",
+    children_.size());
   return CallbackReturn::SUCCESS;
 }
 
@@ -144,6 +145,33 @@ CallbackReturn TwoPhaseExampleController::on_activate(
     RCLCPP_ERROR(get_node()->get_logger(), "Can not activate: %s", reason.c_str());
     return CallbackReturn::ERROR;
   }
+
+  // CREATED HERE, NOT IN on_configure, and that is not a stylistic choice: when a CHAINED parent is
+  // activated, the manager puts its child into chained mode by DEACTIVATING and RE-ACTIVATING it. A
+  // publisher created during configure is therefore destroyed by that transition and the chained
+  // member silently loses it -- measured in Gazebo: '/tp_leaf/cycle_diagnostics' was Unknown to the
+  // graph while '/tp_root/cycle_diagnostics' (the unchained root) was fine. Publishers, like every
+  // other ACTIVE-phase resource, belong to the active state.
+  if (publish_diagnostics_ && diagnostics_publisher_ == nullptr)
+  {
+    diagnostics_message_.data.resize(4);
+    diagnostics_publisher_ =
+      get_node()->create_publisher<std_msgs::msg::Float64MultiArray>("~/cycle_diagnostics", 100);
+    RCLCPP_INFO(
+      get_node()->get_logger(), "'%s': diagnostics publisher on '%s'", get_node()->get_name(),
+      diagnostics_publisher_->get_topic_name());
+  }
+  // A chain ROOT is driven from here; a chained node never reads it (its parent writes its target).
+  if (reference_subscription_ == nullptr)
+  {
+    reference_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64>(
+      "~/reference", 10,
+      [this](const std_msgs::msg::Float64::SharedPtr message)
+      {subscribed_reference_.store(message->data, std::memory_order_relaxed);});
+  }
+  RCLCPP_INFO(
+    get_node()->get_logger(), "'%s': ACTIVATED; %zu child(ren), %zu command name(s)",
+    get_node()->get_name(), children_.size(), command_interface_names_.size());
   return CallbackReturn::SUCCESS;
 }
 
@@ -154,6 +182,14 @@ CallbackReturn TwoPhaseExampleController::on_deactivate(
   state_index_.clear();
   child_target_index_.clear();
   child_estimate_index_.clear();
+  // Logged because a reset here silently costs the deployment its diagnostics topic: the publisher
+  // leaves the graph and an external observer sees nothing at all.
+  if (diagnostics_publisher_ != nullptr)
+  {
+    RCLCPP_INFO(
+      get_node()->get_logger(), "'%s': DEACTIVATED; dropping the diagnostics publisher",
+      get_node()->get_name());
+  }
   diagnostics_publisher_.reset();
   reference_subscription_.reset();
   return CallbackReturn::SUCCESS;
@@ -274,6 +310,9 @@ void TwoPhaseExampleController::ingest() noexcept
 void TwoPhaseExampleController::publish_cycle_diagnostics() noexcept
 {
   if (diagnostics_publisher_ == nullptr) {return;}
+  RCLCPP_INFO_ONCE(
+    get_node()->get_logger(), "'%s': publishing cycle diagnostics on '%s'", get_node()->get_name(),
+    diagnostics_publisher_->get_topic_name());
   // No allocation beyond what serialization needs; the buffer is reused. A diagnostic run trades
   // real-time purity for observability on purpose, and the parameter is off by default.
   try
@@ -281,6 +320,7 @@ void TwoPhaseExampleController::publish_cycle_diagnostics() noexcept
     diagnostics_message_.data[0] = static_cast<double>(cycle_);
     diagnostics_message_.data[1] = estimate_;
     diagnostics_message_.data[2] = last_child_estimate_seen_;
+    diagnostics_message_.data[3] = cycle_stamp_seconds_;
     diagnostics_publisher_->publish(diagnostics_message_);
   }
   catch (...)
@@ -293,15 +333,17 @@ void TwoPhaseExampleController::compute_and_write() noexcept
 {
   // In the two-phase path this is `handle_phase`, i.e. the moment the node CONSUMES its reference.
   last_target_seen_ = reference_interfaces_[k_target];
-  command_ = reference_interfaces_[k_target] - estimate_;
+  command_ = position_command_ ? reference_interfaces_[k_target]
+                               : reference_interfaces_[k_target] - estimate_;
   const double written = cycle_stamp_mode_ ? static_cast<double>(cycle_stamp_) : command_;
   for (const auto index : actuator_index_) {command_interfaces_[index].set_value(written);}
   for (const auto index : child_target_index_) {command_interfaces_[index].set_value(written);}
 }
 
 controller_interface::return_type TwoPhaseExampleController::update_phase(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & period) noexcept
+  const rclcpp::Time & time, const rclcpp::Duration & period) noexcept
 {
+  cycle_stamp_seconds_ = static_cast<double>(time.nanoseconds()) * 1e-9;
   ++update_phase_calls_;
   update_phase_entered_.store(true, std::memory_order_release);
   while (hold_update_phase_.load(std::memory_order_acquire))
@@ -328,8 +370,14 @@ controller_interface::return_type TwoPhaseExampleController::handle_phase(
 }
 
 controller_interface::return_type TwoPhaseExampleController::update_and_write_commands(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
+  const rclcpp::Time & time, const rclcpp::Duration & period)
 {
+  // The FUSED path never calls `update_phase`, so the diagnostics stamp has to be taken here as
+  // well. Without this every message from a single-pass run carries stamp 0, and an observer that
+  // aligns the levels BY STAMP (the only way to compare controllers activated at different moments)
+  // computes a lag of zero for everything -- which is exactly how a single-pass run first looked
+  // like it had the two-phase property.
+  cycle_stamp_seconds_ = static_cast<double>(time.nanoseconds()) * 1e-9;
   ++native_update_calls_;
   last_period_ns_ = period.nanoseconds();
   ingest();

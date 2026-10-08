@@ -159,6 +159,41 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 **验证过测试不是空转**：把刷新调用临时改成 `if (false && ...)` 后，单趟测试**通过**、两趟测试**失败**（值 0），
 恢复后两者都通过。
 
+### Gazebo 级验证（`two_phase_demo_gazebo.launch.py`）
+
+**真实 Gazebo 物理 + 真实 DDS** 上的端到端复现，不是 mock 硬件：
+
+```
+ros2 launch controller_manager two_phase_demo_gazebo.launch.py
+python3 <share>/controller_manager/two_phase_demo/record_chain_lag.py true|false
+```
+
+| 项 | 结果 |
+|---|---|
+| 硬件 | `gazebo_ros2_control/GazeboSystem`（真实 Gazebo 物理），控制器由**真实 spawner 经 DDS** 按类型字符串加载 |
+| 启用方式 | **一行 YAML**（`two_phase_execution: true`）；日志确认 "requested by parameter: enabled" |
+| 控制周期（来自消息里的共享时间戳） | **10.00 ms**（100 Hz） |
+| **两趟 ON** | leaf 0.7450 **lag 0** ｜ mid 0.3742 **lag 0** ｜ root 0.1879 **lag 0** |
+| **单趟 OFF** | leaf 0.7427 lag 0 ｜ mid 0.3712 **lag 1** ｜ root 0.1864 **lag 2** |
+
+即：**"滞后 = 距叶子的距离" 与 "两趟全为 0" 这条定律在真实仿真器上成立**，数值正是理想首周期值
+（0.75 → 0.5×0.75 → 0.25×0.75）。
+
+**Gazebo 这一步抓到的两个真问题**（都不是仿真配置问题）：
+
+1. **chained 成员在 `on_configure` 建的发布器会消失**。父节点激活时，管理器把子节点
+   **deactivate → 设 chained 模式 → 再 activate**；于是"建在 configure、销毁在 deactivate"的资源
+   在 chained 成员上**静默丢失**——实测 `/tp_leaf/cycle_diagnostics` 在图上变成 Unknown，而未 chained 的
+   `/tp_root/...` 正常。发布器等 ACTIVE 阶段资源必须建在 `on_activate`。**这是任何
+   `TwoPhaseControllerInterface` 实现都会踩的生命周期陷阱**，已写进用户文档。
+2. **测量本身曾经是错的**：`cycle_stamp_seconds_` 只在 `update_phase` 里设置，而**融合的单趟路径不走
+   `update_phase`**，于是单趟运行的所有消息时间戳都是 0，按时间戳对齐的观测器把**每一级都算成 lag 0**
+   ——单趟看起来"也有两趟的性质"。修好后才有上表的对比。**又一次印证：不经过真实系统验证的结论不算数。**
+
+另外记录一个第三方限制：这个 Humble 的 `GazeboSystem` **只支持 position 命令接口**；声明 velocity 命令
+接口不会干净报错，而是让 gzserver 在加载控制器时 `free(): invalid pointer` 崩溃（复现两次）。
+因此 demo 用 position 设定点（`position_command: true` 让示例控制器输出设定点而不是误差律）。
+
 **由这些证据驱动的两个改动**（都在本分支）：
 1. 成员的活动状态**缓存进执行代**（`TwoPhaseEntry::active`），实时两趟不再调用
    `is_controller_active()`；这是上面"分配更少"的来源（改前是 **26 vs 14**，即两趟**更差**）。

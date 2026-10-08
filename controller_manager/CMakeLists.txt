@@ -248,6 +248,14 @@ if(BUILD_TESTING)
     FILES test/two_phase_demo/two_phase_demo.launch.py
     DESTINATION share/${PROJECT_NAME}/launch
   )
+  install(
+    FILES test/two_phase_demo/two_phase_demo_gazebo.launch.py
+    DESTINATION share/${PROJECT_NAME}/launch
+  )
+  install(
+    FILES test/two_phase_demo/record_chain_lag.py
+    DESTINATION share/${PROJECT_NAME}/two_phase_demo
+  )
 
   ament_add_gmock(test_spawner_unspawner
     test/test_spawner_unspawner.cpp
