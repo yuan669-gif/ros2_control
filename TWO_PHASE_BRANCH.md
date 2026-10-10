@@ -161,6 +161,9 @@ ros2 control list_controllers -v      # 可以看到 is_chained
 
 ### Gazebo 级验证（`two_phase_demo_gazebo.launch.py`）
 
+> **怎么跑：`controller_manager/doc/gazebo_demo.md`** —— 逐步操作、预期输出、以及那个"约三次一遇"的
+> gzserver 崩溃与重试脚本。下面只放结论。
+
 **真实 Gazebo 物理 + 真实 DDS** 上的端到端复现，不是 mock 硬件：
 
 ```
