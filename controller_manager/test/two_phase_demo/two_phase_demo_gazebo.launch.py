@@ -24,8 +24,10 @@ import re
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -57,7 +59,7 @@ def generate_launch_description():
         output="screen",
     )
 
-    # Headless: no GUI, and `-s` loads the ROS init (publishes /clock) and the entity factory.
+    # `-s` loads the ROS init (publishes /clock) and the entity factory.
     gzserver = ExecuteProcess(
         cmd=[
             "gzserver",
@@ -68,6 +70,21 @@ def generate_launch_description():
             "libgazebo_ros_factory.so",
         ],
         output="screen",
+    )
+
+    # VISUALISATION. Default: on when a display exists, off when there is none (CI, containers,
+    # `ssh` without -X), so the same launch works in both places. `gui:=false` is what measurement
+    # runs should use: the GUI competes for the same two cores as the control loop.
+    default_gui = "true" if (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) else "false"
+    gui = DeclareLaunchArgument(
+        "gui",
+        default_value=default_gui,
+        description="Start gzclient, the Gazebo GUI, to watch the arm move.",
+    )
+    gzclient = ExecuteProcess(
+        cmd=["gzclient"],
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("gui")),
     )
 
     spawn_entity = Node(
@@ -106,7 +123,9 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            gui,
             gzserver,
+            gzclient,
             robot_state_publisher,
             spawn_entity,
             RegisterEventHandler(OnProcessExit(target_action=spawn_entity, on_exit=[leaf])),

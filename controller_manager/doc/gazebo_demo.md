@@ -115,6 +115,46 @@ tp_root                      0.1879             0
 
 ---
 
+## 3.3 Watching it: the GUI and something for the arm to do
+
+`gzclient` is started by default **when a display exists**, and skipped when there is none (CI,
+containers, `ssh` without `-X`), so the same launch works everywhere:
+
+```bash
+ros2 launch controller_manager two_phase_demo_gazebo.launch.py            # gui auto: on with DISPLAY
+ros2 launch controller_manager two_phase_demo_gazebo.launch.py gui:=true  # force it on
+ros2 launch controller_manager two_phase_demo_gazebo.launch.py gui:=false # force it off (MEASUREMENTS)
+```
+
+Check the default for your shell with
+`ros2 launch controller_manager two_phase_demo_gazebo.launch.py --show-args`.
+
+The arm will sit still, because nothing is commanding it. To watch the chain actually work, drill the
+root's reference (a second terminal):
+
+```bash
+python3 install/controller_manager/share/controller_manager/two_phase_demo/drill_reference.py --period 6 --amplitude 0.8
+```
+
+The arm then swings back and forth through the whole cascade. Measured on this machine, with the GUI up:
+the leaf's position oscillated between **-1.333 and +1.333 rad** for a +/-0.8 rad reference over a 25 s
+window — visible motion, and the overshoot beyond the reference is the cascade's proportional character,
+not a bug (this demo is not a tuned controller).
+
+**Do not run the drill and `record_chain_lag.py` at the same time**: the recorder measures from a settled
+baseline to a single step, and a reference that keeps moving destroys that.
+
+If the window appears but stays black, force software rendering:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 ros2 launch controller_manager two_phase_demo_gazebo.launch.py gui:=true
+```
+
+`dconf-CRITICAL ... Read-only file system` lines from `gzclient` are harmless here: they come from the
+redirected `HOME` (§0), not from the simulation.
+
+---
+
 ## 4. The comparison run (single pass)
 
 The mode is a parameter, so it is decided before the controller manager starts:
@@ -190,6 +230,9 @@ simulator is gone.
 | symptom | cause | fix |
 |---|---|---|
 | `free(): invalid pointer`, `gzserver` exit −6 | intermittent, this environment | retry (§5) |
+| `Unable to start server[bind: Address already in use]`, `gzserver` exit 255 | a previous `gzserver` still holds port 11345 — restarting quickly is enough to cause this | kill it (`pkill -x gzserver gzclient`), **wait for the port to be free**, or sidestep it entirely with `export GAZEBO_MASTER_URI=http://127.0.0.1:11346` (any free port) |
+| the GUI starts but nothing moves | nothing is publishing on the chain root's reference | run the drill (§3.3) |
+| the GUI window is black | GL stack of the host (this machine renders through Mesa `svga` and prints `context mismatch in svga_surface_destroy`) | `LIBGL_ALWAYS_SOFTWARE=1`, or watch headless and measure instead |
 | recorder: `no diagnostics from tp_leaf` | the simulator died after the launch reported ready, or discovery is slow | check `pgrep -xc gzserver`; the recorder already waits up to 45 s |
 | `ros2 node list` empty but topics exist | stale `ros2` daemon | use `--no-daemon`: `ros2 topic list --no-daemon` |
 | `Couldn't parse parameter override rule` | the plugin re-passes the URDF as a command-line override, and rcl parses it as YAML | the launch file already strips the XML declaration and comments and collapses it to one line; keep the URDF free of `--` inside comments |
