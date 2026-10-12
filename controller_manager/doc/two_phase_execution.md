@@ -111,7 +111,7 @@ The fix is per rule:
 | `unsupported_update_rate` | set the controller's `update_rate` to `0` (follow the manager) or to an exact divisor of the manager's rate |
 | `cross_rate_dependency` | raise `two_phase_max_lag_cycles` to the lag the message reports, or give the two ends the same `update_rate` |
 | `cross_mode_dependency` | the neighbour on that edge must also implement `TwoPhaseControllerInterface`, or the edge must go away |
-| `unschedulable_order` | give the child a command interface (a cascade leaf normally drives hardware, so it has one), or load it after its parent |
+| `cyclic_dependency` | break the cycle: the reference edges admit no single linearisation, so no pair of passes can order them (a cascade is a tree). Note that upstream currently CRASHES while sorting a cyclic list, before any of this runs: `upstream_finding_cyclic_chaining_stack_overflow.md` |
 | `duplicate_instance` | two names refer to one controller object; remove one of them |
 
 `two_phase_rejected_controllers()` answers "what would be refused, and why" **before** you enable
@@ -130,7 +130,17 @@ anything, which is the cheapest way to check a configuration.
 
 默认实现是空操作，对"没有输入话题的控制器"和"参考由父节点写入的成员"都正确。
 
-## 4d. 在 `on_configure` 里创建发布器/订阅器会静默丢失（chained 成员）
+## 4d. 执行顺序是**推导**出来的，不是你那份控制器列表的顺序
+
+两趟遍历走的是**由接口边推导出的拓扑序**（父在子前），不是管理器控制器列表的顺序。所以：
+
+* 上游 `controller_sorting()` 把"没有命令接口的 chainable 控制器"排到它父节点之前这件事，**对本特性
+  不再有影响**——一个纯状态发布者（只向上传、不认领任何命令接口，例如估计器）照常可调度，并且拿到
+  同周期上传；
+* 列表顺序反过来**不再会导致拒绝**（原来的 `unschedulable_order` 已随之删除）；
+* 仍然必须拒绝的是**环**：边本身不存在任何线性化时，两趟无法给两个方向任何确定的年龄（`cyclic_dependency`）。
+
+## 4e. 在 `on_configure` 里创建发布器/订阅器会静默丢失（chained 成员）
 
 一个容易踩且**很难 debug** 的生命周期事实：当一个 **chained 父节点**被激活时，管理器会把它声称接口的
 **子节点 `deactivate` → 设置 chained 模式 → 再 `activate`**。因此任何"在 `on_configure` 创建、在
@@ -149,7 +159,7 @@ anything, which is the cheapest way to check a configuration.
 | `unsupported_update_rate` | the declared `update_rate` is neither "follow the manager" nor an exact divisor of it, so no rate bucket can run it at the rate it asked for |
 | `cross_rate_dependency` | a reference edge whose exact worst-case staleness **exceeds the configured lag budget**; the refusal names the computed lag (see §5.1) |
 | `cross_mode_dependency` | a reference edge between a two-phase member and a controller that does **not** implement the interface; the two ends would be ordered by different schedules |
-| `unschedulable_order` | the manager's controller list puts a parent **after** its child, so both passes would walk that edge in the wrong direction |
+| `cyclic_dependency` | the reference edges contain a cycle, so there is no order in which both directions are bounded |
 | `duplicate_instance` | two names in the controller list refer to one controller object; a pass would advance it twice per cycle |
 
 ### 5.1 Rate buckets and the lag budget

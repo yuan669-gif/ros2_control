@@ -94,9 +94,13 @@ the program.
    edge while every per-cycle call count stays correct (§3). No public analysis of this behaviour was
    found.
 2. **A runtime port of the two-pass discipline** with no new package and no modification to existing
-   controllers — an opt-in interface plus 1280 lines across three files in the manager, off by default,
+   controllers — an opt-in interface plus a derived execution order (below) — off by default,
    enabled by one YAML line — together with **the finite admission-check set** that the port requires,
-   stated as five rejection codes with the user action each one implies (§4, §5). The production change
+   stated as five rejection codes with the user action each one implies (§4, §5). The passes walk a
+   topological order **derived from the reference edges** rather than the controller list, which makes a
+   wrong list order unobservable instead of fatal and lets a controller that claims no command interface
+   — a pure state publisher, which upstream's own ordering heuristic misplaces — be scheduled. The
+   production change
    is deliberately small: 22 files and +5102 lines in total, of which 3822 lines are tests, a runnable
    demo, a Gazebo demo and documentation.
 3. **Exact per-edge bounds for heterogeneous rates**, and the resulting per-edge lag budget (§6). The
@@ -214,10 +218,11 @@ claims no command interface of its own** — a "pure estimator" or a leaf whose 
 declared elsewhere — therefore sorts **before its parent**, i.e. the edge runs backwards. Then both
 directions are stale, and nothing rejects the configuration.
 
-This is reproducible rather than inferential: in the port's test suite,
-`an_order_that_inverts_an_edge_is_refused` first asserts that the manager really produces the inverted
-order `[tp_leaf, tp_root]`, and then that enabling two-pass execution is refused with a message naming
-the edge. It is also the reason the port *verifies* the order it inherits instead of trusting it (§5).
+This is reproducible rather than inferential: a test in the port's suite first asserts that the manager
+really produces the inverted order for such a pair, and then asserts the *consequence* the port draws
+from it. The port does not depend on the list at all — it derives its traversal order from the edges
+(§4.5) — so this configuration is not refused, it simply works: the upstream misordering becomes
+unobservable, and the pure state publisher gets the same-cycle property its consumer needs.
 
 Two further facts about the list that matter for any port:
 
@@ -290,7 +295,17 @@ Installing or widening the execution path requires the control loop to be idle; 
 (`set_two_phase_execution(false)`) is always accepted. This is a deliberate, documented restriction:
 the controller list itself is not part of the generation (§8.2).
 
-### 4.3 Rate buckets
+### 4.3 The execution order is derived, not inherited
+
+The two passes walk a **topological order computed from the reference edges**, published with the member
+set: parents first, so the state pass (backward) reaches children first and the command pass (forward)
+reaches parents first. The controller list plays no part, which matters because that list is produced by
+a configuration-time string heuristic that can put a child ahead of its parent (§3.3). Deriving the order
+instead of verifying it removes a refusal code and makes the case that heuristic gets wrong — a
+controller that claims no command interface — schedulable. What is still refused is a graph with no valid
+order, and that is a property of the edges (§5).
+
+### 4.4 Rate buckets
 
 A member that declares an `update_rate` below the manager's is run once every
 `factor = manager_rate / controller_rate` cycles with a matching period, exactly as the native loop
@@ -298,7 +313,7 @@ rate-gates it. The bucket loop runs in ascending factor order in both passes, so
 factor runs entirely before a bucket with a larger one; within a bucket the traversal direction favours
 the child in the state pass and the parent in the command pass. §6 analyses what this costs.
 
-### 4.4 Adoption
+### 4.5 Adoption
 
 ```yaml
 controller_manager:
@@ -325,8 +340,12 @@ enumerable set of runtime checks. We state them as the rejection codes the manag
 | `unsupported_update_rate` | a declared rate that is neither "follow the manager" nor an exact divisor of the manager's | the rate comes from YAML | round the rate, or follow the manager |
 | `cross_rate_dependency` | a reference edge whose two ends fall in different rate buckets | depends on the deployed rates | co-locate the rates, or raise `two_phase_max_lag_cycles` (§6) |
 | `cross_mode_dependency` | an edge with one end in two-pass execution and the other in the native loop, so the ends would be ordered by different schedules | depends on which controllers implement the interface *and* on the mode | implement the interface on both ends, or leave the mode off |
-| `unschedulable_order` | the inherited controller-list order puts an edge's ends the wrong way round | the order is built by a configuration-time heuristic from string prefixes (§3.3) | give the child a command interface, or configure it before its parent |
+| `cyclic_dependency` | the reference edges contain a cycle, so no linearisation exists and no pair of passes can bound both directions | a property of the claimed interfaces, not of the program | break the cycle (a cascade is a tree); note upstream currently crashes while sorting such a list (§7.4.3) |
 | `duplicate_instance` | two names in the list refer to one controller object, so a pass would advance it twice per cycle | comes from how the deployment loads controllers | give each controller one name |
+
+The order itself is **not** among these checks. The passes walk a topological order computed from the
+same edges the lag report uses, so the controller list cannot put an edge the wrong way round; what
+remains refusable is a graph with no such order at all (`cyclic_dependency`).
 
 Two properties of this set are worth stating.
 
@@ -523,6 +542,22 @@ problem the paper is about — a runtime, string-keyed interface model with a li
 the port made it observable. A test pins the leak through the public API without dereferencing a stale
 pointer, so a future upstream fix is detected rather than silently invalidating the finding.
 
+#### 7.4.3 A cyclic chain overflows the stack while sorting
+
+Configuring two chainable controllers that claim each other's reference interfaces does not produce a
+diagnostic: `controller_sorting()` asks which controllers follow a given one by recursing into each
+following controller **without a visited set**, so a cycle recurses until the stack is exhausted and the
+process segfaults. It is a crash in a function that runs on every configuration operation, and a cyclic
+claim is easy to write by accident — a naming mistake in two `children` lists is enough, and each
+controller's own declaration is valid on its own.
+
+The port has a verdict for exactly this graph (`cyclic_dependency`), and it is defensive: a cycle cannot
+be configured (it crashes) and cannot be activated either, because reference interfaces only become
+*available* when their owner is active, so neither end can claim the other. Upstream therefore has no way
+to present the graph to any later check. Both facts — the crash and the impossibility — are documented,
+and the test covers the verdict through the declaration of configured-but-inactive controllers, which is
+the only form in which the graph exists.
+
 ### 7.5 Verification methodology, and three measurement bugs we made
 
 We list these because each produced a plausible, wrong number, and because the same traps will catch
@@ -643,7 +678,8 @@ python3 <share>/controller_manager/two_phase_demo/record_chain_lag.py true|false
 | claim | test |
 |---|---|
 | single pass ages state by distance from the leaf; two passes 0 | `lag_equals_distance_from_the_leaf_with_one_pass_and_zero_with_two` |
-| the inherited order can invert an edge, and is then refused | `an_order_that_inverts_an_edge_is_refused` |
+| a source-only child is ordered by the edges, not the list, and reads same-cycle | `a_child_with_no_command_interface_is_ordered_by_the_edges_not_the_list` |
+| a cyclic reference graph is refused, naming the cycle | `a_cyclic_reference_graph_is_refused` |
 | a member is never executed by the native loop | `a_two_phase_member_is_never_handed_to_the_native_loop` |
 | a failed state pass skips the whole command pass | `a_failed_state_stage_skips_the_whole_command_stage` |
 | the second traversal adds no allocation | `the_second_traversal_adds_no_allocation` |

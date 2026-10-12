@@ -224,6 +224,11 @@ if(BUILD_TESTING)
     two_phase_example_controller
     ros2_control_test_assets::ros2_control_test_assets
   )
+  # This test replaces the global allocation functions to count allocations, so GCC reports
+  # -Wmismatched-new-delete on the sized delete. It is a false positive (malloc/free are used
+  # consistently), and it has to be silenced here rather than with a pragma in the file: GCC emits the
+  # diagnostic after the pragma's scope has closed.
+  target_compile_options(test_two_phase_evidence PRIVATE -Wno-mismatched-new-delete)
 
   # Runnable demo: an in-memory system so `ros2_control_node` + `spawner` work with no simulator.
   add_library(two_phase_demo_system SHARED

@@ -69,6 +69,7 @@ void operator delete[](void * pointer) noexcept {std::free(pointer);}
 void operator delete(void * pointer, std::size_t) noexcept {std::free(pointer);}
 void operator delete[](void * pointer, std::size_t) noexcept {std::free(pointer);}
 
+
 namespace
 {
 using Controller = two_phase_example_controller::TwoPhaseExampleController;

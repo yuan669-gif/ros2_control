@@ -35,7 +35,7 @@ Two assumptions, both made true by the implementation rather than assumed away:
 
 | assumption | why it holds |
 |---|---|
-| the list is parents-first for the edge in question | the admission refuses `unschedulable_order` |
+| the visited order is parents-first for the edge in question | the passes walk a topological order derived from the edges themselves, not the controller list (`two_phase_plan_of`), so this holds by construction; a graph without such an order is refused as `cyclic_dependency` |
 | a member with factor `f` is due exactly on the multiples of `f` | admission requires `update_rate_ % controller_rate == 0`, so `factor = update_rate_ / controller_rate` **divides** `update_rate_` and the counter's modulo wrap never perturbs the due set |
 
 The second one matters: without it, the wrap in `(update_loop_counter_ + 1) % update_rate_` would make

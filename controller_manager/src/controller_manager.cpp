@@ -18,6 +18,7 @@
 #include <numeric>
 #include <list>
 #include <memory>
+#include <queue>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2325,7 +2326,8 @@ ControllerManager::current_generation() const noexcept
 
 void ControllerManager::publish_generation(
   bool two_phase_enabled, unsigned int max_lag_cycles,
-  std::shared_ptr<const std::vector<TwoPhaseEntry>> entries)
+  std::shared_ptr<const std::vector<TwoPhaseEntry>> entries,
+  std::shared_ptr<const std::vector<std::size_t>> plan)
 {
   // Copy-then-store: the published object is never mutated afterwards, so a cycle that already
   // loaded it keeps a coherent view while a newer generation is built off to the side.
@@ -2334,6 +2336,7 @@ void ControllerManager::publish_generation(
   next->two_phase_enabled = two_phase_enabled;
   next->max_lag_cycles = max_lag_cycles;
   next->two_phase_entries = std::move(entries);
+  next->two_phase_plan = std::move(plan);
   // The bucket list is derived HERE, once, so the control loop only reads it (and never allocates).
   next->two_phase_buckets =
     next->two_phase_entries ? two_phase_buckets_of(*next->two_phase_entries)
@@ -2387,15 +2390,12 @@ std::string ControllerManager::two_phase_admission_reason(
              detail +
              "', whose end would be ordered by a different schedule (the two-phase command pass "
              "runs after the native loop), silently degrading that edge to the previous cycle";
-    case TwoPhaseAdmission::unschedulable_order:
-      return "is ordered AFTER its child '" + detail +
-             "' in the controller manager's controller list, so the two-phase passes would walk that "
-             "reference edge in the wrong direction (the backwards state pass would visit the parent "
-             "first and the forwards command pass the child first), silently using the previous "
-             "cycle's value. Upstream `controller_sorting()` places a chainable controller that "
-             "claims NO command interface BEFORE its parent, which is the usual cause: give that "
-             "controller a command interface (a cascade leaf normally drives hardware, so it has "
-             "one), or load it after its parent";
+    case TwoPhaseAdmission::cyclic_dependency:
+      return "is part of a CYCLE of reference edges (still reachable from '" + detail +
+             "'), so the edges admit no single linearisation: with one pass per direction, at least "
+             "one edge of the cycle must consume a value the other produces later, and no lag budget "
+             "can bound that. Break the cycle (a cascade is a tree) or keep one of these controllers "
+             "in the native path";
     case TwoPhaseAdmission::duplicate_instance:
       return "shares ONE controller object with '" + detail +
              "' (the manager only rejects duplicate names, so the same instance can be added under "
@@ -2482,6 +2482,75 @@ std::vector<char> ControllerManager::controller_active_mask(
     mask[i] = is_controller_active(controllers[i].c) ? 1 : 0;
   }
   return mask;
+}
+
+bool ControllerManager::two_phase_plan_of(
+  const std::vector<ControllerSpec> & controllers, const std::vector<char> & is_member,
+  std::vector<std::size_t> & order, std::string * cycle_member) const
+{
+  order.clear();
+  std::unordered_map<std::string, std::size_t> by_name;
+  by_name.reserve(controllers.size());
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    by_name.emplace(controllers[i].info.name, i);
+  }
+
+  // Edges come from the ONE inference used by the report and the admission, so the plan and the lag
+  // report cannot disagree about what an edge is. Direction: the claimant is the parent (it writes
+  // "<child>/<port>"), the owner is the child. Deduplicated per pair upstream, which is what makes
+  // counting in-degrees here correct.
+  std::vector<std::vector<std::size_t>> children(controllers.size());
+  std::vector<std::size_t> in_degree(controllers.size(), 0);
+  std::size_t member_count = 0;
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    if (is_member[i]) {++member_count;}
+  }
+  for (const auto & lag : two_phase_edge_lags_of(controllers))
+  {
+    const auto parent_it = by_name.find(lag.parent);
+    const auto child_it = by_name.find(lag.child);
+    if (parent_it == by_name.end() || child_it == by_name.end()) {continue;}
+    const std::size_t parent = parent_it->second;
+    const std::size_t child = child_it->second;
+    if (!is_member[parent] || !is_member[child]) {continue;}
+    children[parent].push_back(child);
+    ++in_degree[child];
+  }
+
+  // Smallest controller index first: any topological order is correct, but a deterministic one makes
+  // the plan reproducible and an assertion able to name it.
+  std::priority_queue<std::size_t, std::vector<std::size_t>, std::greater<std::size_t>> ready;
+  for (std::size_t i = 0; i < controllers.size(); ++i)
+  {
+    if (is_member[i] && in_degree[i] == 0) {ready.push(i);}
+  }
+  while (!ready.empty())
+  {
+    const std::size_t node = ready.top();
+    ready.pop();
+    order.push_back(node);
+    for (const std::size_t child : children[node])
+    {
+      if (--in_degree[child] == 0) {ready.push(child);}
+    }
+  }
+
+  if (order.size() == member_count) {return true;}
+  if (cycle_member != nullptr)
+  {
+    // Name a member that never became ready: it is inside (or downstream of) the cycle.
+    for (std::size_t i = 0; i < controllers.size(); ++i)
+    {
+      if (is_member[i] && in_degree[i] != 0)
+      {
+        *cycle_member = controllers[i].info.name;
+        break;
+      }
+    }
+  }
+  return false;
 }
 
 std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_rejections(
@@ -2593,15 +2662,12 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
     }
   }
 
-  // ORDER VALIDATION. The passes do not sort the controllers themselves: they walk the manager's own
-  // controller list, BACKWARD for the state pass and FORWARD for the command pass. That is only
-  // correct if, for every reference edge, the parent (the claimant that writes "<child>/<port>")
-  // appears BEFORE the child in that list -- then the backward walk reaches the child first and the
-  // forward walk reaches the parent first. Upstream `controller_sorting()` normally produces that
-  // order, but it places a chainable controller with NO command interface ahead of one that has
-  // them, so a child that claims nothing lands before its own parent and BOTH passes run that edge
-  // in the wrong direction. The two-phase path has to verify the order it is handed. Only edges
-  // between two members are checked here; cross-mode edges are already rejected above.
+  // ORDER IS DERIVED, NOT TRUSTED, so there is nothing to validate about the controller list here.
+  // The passes walk a topological order computed from these same edges (see two_phase_plan_of), which
+  // is correct whatever order the list happens to be in -- including the case upstream's
+  // `controller_sorting()` gets wrong, a chainable controller that claims NO command interface and
+  // therefore sorts ahead of its own parent. What still has to be refused is a graph with NO valid
+  // order, and that is a property of the edges rather than of the list.
   {
     // Members = implementing controllers that passed the checks above.
     std::unordered_map<std::string, std::size_t> rejected_index;
@@ -2652,17 +2718,23 @@ std::vector<ControllerManager::TwoPhaseRejection> ControllerManager::two_phase_r
         break;
       }
 
-      if (parent < child) {continue;}  // the required order
+    }
 
-      rejections.push_back(
-        TwoPhaseRejection{
-          controllers[parent].info.name,
-          two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, lag.child)});
-      rejections.push_back(
-        TwoPhaseRejection{
-          controllers[child].info.name,
-          two_phase_admission_reason(TwoPhaseAdmission::unschedulable_order, lag.child)});
-      break;
+    // CYCLES. Order is derived, so the controller list cannot be wrong -- but the edges themselves
+    // can fail to admit any order at all. Reported once for the members stuck in the cycle, named
+    // individually so the reader can see which edge to break.
+    std::string cycle_member;
+    std::vector<std::size_t> order;
+    if (!two_phase_plan_of(controllers, is_member, order, &cycle_member))
+    {
+      for (std::size_t i = 0; i < controllers.size(); ++i)
+      {
+        if (!is_member[i]) {continue;}
+        rejections.push_back(
+          TwoPhaseRejection{
+            controllers[i].info.name,
+            two_phase_admission_reason(TwoPhaseAdmission::cyclic_dependency, cycle_member)});
+      }
     }
   }
 
@@ -2757,7 +2829,7 @@ ControllerManager::two_phase_entries() const noexcept
 std::shared_ptr<const std::vector<ControllerManager::TwoPhaseEntry>>
 ControllerManager::build_two_phase_entries(
   const std::vector<ControllerSpec> & controllers, bool admission_enabled,
-  unsigned int max_lag_cycles) const
+  unsigned int max_lag_cycles, std::shared_ptr<const std::vector<std::size_t>> * plan_out) const
 {
   auto entries = std::make_shared<std::vector<TwoPhaseEntry>>();
   if (!admission_enabled) {return entries;}
@@ -2800,6 +2872,52 @@ ControllerManager::build_two_phase_entries(
       return std::less<const controller_interface::ControllerInterfaceBase *>()(a.base, b.base);
     });
 
+  // THE EXECUTION ORDER, derived here from the same edges the admission used, and published with the
+  // member set. `entries` is pointer-sorted for the membership lookup, so the plan holds INDICES into
+  // it: parents first, and any valid topological order among unrelated members.
+  if (plan_out != nullptr)
+  {
+    std::vector<char> is_member(controllers.size(), 0);
+    std::unordered_map<std::string, std::size_t> member_index;
+    member_index.reserve(entries->size());
+    for (std::size_t i = 0; i < controllers.size(); ++i)
+    {
+      auto * instance =
+        dynamic_cast<controller_interface::TwoPhaseControllerInterface *>(controllers[i].c.get());
+      if (instance == nullptr) {continue;}
+      if (rejected_names.find(controllers[i].info.name) != rejected_names.end()) {continue;}
+      is_member[i] = 1;
+      member_index.emplace(controllers[i].info.name, i);
+    }
+    std::vector<std::size_t> order;
+    std::string cycle_member;
+    auto plan = std::make_shared<std::vector<std::size_t>>();
+    if (two_phase_plan_of(controllers, is_member, order, &cycle_member))
+    {
+      plan->reserve(order.size());
+      for (const std::size_t controller_index : order)
+      {
+        const auto entry = two_phase_index(*entries, controllers[controller_index].c.get());
+        if (entry != no_two_phase) {plan->push_back(entry);}
+      }
+    }
+    else
+    {
+      // Unreachable through the public API: the admission refuses a cycle before a set is built, and
+      // this builder is only called after it accepted. Falling back to the list order (what the
+      // passes used before the order was derived) keeps the control loop well-defined rather than
+      // leaving it without an order at all.
+      RCLCPP_ERROR(
+        get_logger(),
+        "Internal inconsistency: the two-phase member set contains a reference cycle through '%s' "
+        "although admission accepted it; falling back to the controller list order.",
+        cycle_member.c_str());
+      plan->reserve(entries->size());
+      for (std::size_t i = 0; i < entries->size(); ++i) {plan->push_back(i);}
+    }
+    *plan_out = std::move(plan);
+  }
+
   // Non-real-time thread only, and only when something was actually excluded. EVERY rejection is
   // logged, not just the first: the caller has to be able to see why the configuration is
   // half-working. `two_phase_rejected_controllers()` exposes the same information programmatically.
@@ -2839,9 +2957,9 @@ void ControllerManager::rebuild_two_phase_entries(
     publish_generation(false, 0u, nullptr);
     return;
   }
-  publish_generation(
-    true, generation->max_lag_cycles,
-    build_two_phase_entries(controllers, true, generation->max_lag_cycles));
+  std::shared_ptr<const std::vector<std::size_t>> plan;
+  auto entries = build_two_phase_entries(controllers, true, generation->max_lag_cycles, &plan);
+  publish_generation(true, generation->max_lag_cycles, std::move(entries), std::move(plan));
 }
 
 std::size_t ControllerManager::two_phase_index(
@@ -2903,8 +3021,10 @@ controller_interface::return_type ControllerManager::set_two_phase_execution(
 
     // Mode, budget and members in ONE store, so no cycle can observe "enabled but no entries", or
     // members admitted under one budget while the mode reports another.
+    std::shared_ptr<const std::vector<std::size_t>> admitted_plan;
+    auto admitted_entries = build_two_phase_entries(controllers, true, max_lag_cycles, &admitted_plan);
     publish_generation(
-      true, max_lag_cycles, build_two_phase_entries(controllers, true, max_lag_cycles));
+      true, max_lag_cycles, std::move(admitted_entries), std::move(admitted_plan));
   }
   const auto entries = two_phase_entries();
   RCLCPP_INFO(
@@ -2956,10 +3076,19 @@ controller_interface::return_type ControllerManager::update(
   //
   // WHY BUCKETS. A traversal cannot rate-gate individual controllers, so a declared period becomes a
   // bucket that runs every `factor` cycles with a `factor`-fold period -- the same rule the native
-  // loop applies per controller. Reference edges are only admitted WITHIN one bucket (see
-  // TwoPhaseAdmission::cross_rate_dependency), so the bucket order inside a cycle is unobservable.
-  const bool run_two_phase =
-    generation->two_phase_enabled && !entries.empty() && !switch_params_.do_switch;
+  // loop applies per controller. A reference edge may span buckets when the configuration declares a
+  // budget for it (`two_phase_max_lag_cycles`), so the ascending bucket order is observable and is
+  // exactly what the lag table in doc/cross_rate_bound.md accounts for.
+  // ONE condition decides which path a member takes. The plan is published with the member set, so
+  // "the mode is on, the members exist and an order for them exists" is a single fact; testing it in
+  // both places is what makes "exactly one path per controller per cycle" structural rather than
+  // argued. `run_two_phase` additionally pauses the passes while a switch is pending -- and then the
+  // members are NOT handed to the native loop either (see the skip below), so no member ever falls
+  // back to the fused semantics mid-switch.
+  const auto plan = generation->two_phase_plan;
+  const bool two_phase_schedulable = generation->two_phase_enabled && !entries.empty() &&
+                                     plan != nullptr && plan->size() == entries.size();
+  const bool run_two_phase = two_phase_schedulable && !switch_params_.do_switch;
   bool two_phase_state_failed = false;
   if (run_two_phase)
   {
@@ -2972,11 +3101,11 @@ controller_interface::return_type ControllerManager::update(
                                    : rclcpp::Duration::from_seconds(
                                        static_cast<double>(factor) /
                                        static_cast<double>(update_rate_));
-      for (std::size_t slot = rt_controller_list.size(); slot-- > 0;)
+      // BACKWARD over the derived plan: children before parents, because the plan is parents-first.
+      for (std::size_t slot = plan->size(); slot-- > 0;)
       {
-        auto & spec = rt_controller_list[slot];
-        const auto index = two_phase_index(entries, spec.c.get());
-        if (index == no_two_phase || entries[index].factor != factor) {continue;}
+        const std::size_t index = (*plan)[slot];
+        if (entries[index].factor != factor) {continue;}
         if (!entries[index].active) {continue;}
         if (
           entries[index].instance->update_phase(time, bucket_period) !=
@@ -2985,7 +3114,7 @@ controller_interface::return_type ControllerManager::update(
           RCLCPP_ERROR(
             get_logger(),
             "Two-phase update stage failed for controller '%s'; this cycle computes no commands.",
-            spec.info.name.c_str());
+            entries[index].base->get_node()->get_name());
           ret = controller_interface::return_type::ERROR;
           // Containment, weakest form that is still honest: a controller that rejected its own state
           // must not then have its command stage run on that state, and the parents downstream of it
@@ -3011,7 +3140,7 @@ controller_interface::return_type ControllerManager::update(
     // State whose label is a std::string, so querying it for a member that is about to be skipped is
     // pure cost. A member's own activity is the cached `entry.active` flag instead.
     if (
-      generation->two_phase_enabled &&
+      two_phase_schedulable &&
       two_phase_index(entries, loaded_controller.c.get()) != no_two_phase)
     {
       continue;
@@ -3071,10 +3200,10 @@ controller_interface::return_type ControllerManager::update(
                                    : rclcpp::Duration::from_seconds(
                                        static_cast<double>(factor) /
                                        static_cast<double>(update_rate_));
-      for (auto & spec : rt_controller_list)
+      // FORWARD over the same plan: parents before children.
+      for (const std::size_t index : *plan)
       {
-        const auto index = two_phase_index(entries, spec.c.get());
-        if (index == no_two_phase || entries[index].factor != factor) {continue;}
+        if (entries[index].factor != factor) {continue;}
         if (!entries[index].active) {continue;}
         // The step upstream performs inside `ChainableControllerInterface::update()` and which the
         // split would otherwise lose: a member whose reference is NOT written by a parent reads it
@@ -3092,7 +3221,7 @@ controller_interface::return_type ControllerManager::update(
               get_logger(),
               "Two-phase reference refresh failed for controller '%s'; the command pass continues "
               "so the remaining members still execute.",
-              spec.info.name.c_str());
+              entries[index].base->get_node()->get_name());
           }
         }
         if (
@@ -3101,7 +3230,7 @@ controller_interface::return_type ControllerManager::update(
         {
           RCLCPP_ERROR(
             get_logger(), "Two-phase handle stage failed for controller '%s'.",
-            spec.info.name.c_str());
+            entries[index].base->get_node()->get_name());
           ret = controller_interface::return_type::ERROR;
         }
       }

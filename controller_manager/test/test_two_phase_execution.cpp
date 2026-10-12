@@ -497,27 +497,74 @@ TEST_F(TestTwoPhaseExecution, a_cross_mode_edge_is_refused)
   EXPECT_TRUE(mentions_crossing);
 }
 
-TEST_F(TestTwoPhaseExecution, an_order_that_inverts_an_edge_is_refused)
+/// A pure state publisher -- an estimator that reads hardware and only publishes upward, claiming NO
+/// command interface -- must work, and must get the same-cycle property.
+///
+/// This is the case upstream's ordering heuristic gets wrong: `controller_sorting()` places a
+/// chainable controller with no command interfaces AHEAD of its parent, which for the state direction
+/// is the wrong way round. The port no longer depends on the list -- the passes walk an order derived
+/// from the edges -- so the inverted list is not merely tolerated, it is invisible.
+TEST_F(TestTwoPhaseExecution, a_child_with_no_command_interface_is_ordered_by_the_edges_not_the_list)
 {
-  // A child that claims NO command interface is sorted AHEAD of its parent by upstream
-  // `controller_sorting()`. The passes do not re-sort, so both would walk the edge the same (wrong)
-  // way and the parent would silently compute from the previous cycle.
-  auto source = MakeNode(kLeaf, {}, {}, {});
+  leaf_ = MakeNode(kLeaf, {}, {"joint2/position"}, {});
   ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
-  root_ = MakeNode(kRoot, {"joint2/velocity"}, {}, {kLeaf});
+  root_ = MakeNode(kRoot, {}, {}, {kLeaf});
   ASSERT_EQ(Return::OK, cm_->configure_controller(kRoot));
 
+  // Guard: if upstream ever stops inverting this shape, the test would pass for the wrong reason.
   ASSERT_EQ(std::vector<std::string>({kLeaf, kRoot}), ControllerOrder())
     << "this test needs the inverted order upstream produces for a source-only child";
 
+  ASSERT_EQ(Return::OK, cm_->set_two_phase_execution(true))
+    << "a source-only child must not need a command interface to be schedulable";
+  ASSERT_TRUE(cm_->two_phase_execution());
+
+  SwitchNow({kLeaf}, {});
+  SwitchNow({kRoot}, {});
+  Cycle(3);
+
+  leaf_->set_hardware_state(1.0);
+  cm_->read(TIME, PERIOD);
+  ASSERT_EQ(Return::OK, cm_->update(TIME, PERIOD));
+  cm_->write(TIME, PERIOD);
+
+  EXPECT_DOUBLE_EQ(1.0, leaf_->estimate());
+  EXPECT_DOUBLE_EQ(0.5, root_->estimate())
+    << "the pure publisher's state must reach its parent in THIS cycle, despite the list order";
+}
+
+/// A cycle of reference edges admits no linearisation at all, and no lag budget can bound it.
+///
+/// Before the order was derived, this configuration was refused by the ORDER check, which reported it
+/// as an inverted edge -- true but not the reason. It is a property of the edges, not of the list.
+TEST_F(TestTwoPhaseExecution, a_cyclic_reference_graph_is_refused)
+{
+  // A cycle is a configuration upstream cannot even present, which is why this verdict is defensive:
+  //   * configuring it makes `controller_sorting()`'s traversal recurse forever and segfault
+  //     (controller_manager/doc/upstream_finding_cyclic_chaining_stack_overflow.md), and
+  //   * activating it is impossible anyway -- reference interfaces only become available when their
+  //     owner is active, so neither end of the cycle can ever claim the other.
+  // The admission still has to have a verdict, and the DECLARATION of a configured-but-inactive
+  // controller is what it judges (see claimed_command_interfaces), so the graph can be presented by
+  // configuring both with no children and introducing the cycle afterwards.
+  leaf_ = MakeNode(kLeaf, {}, {}, {});
+  mid_ = MakeNode(kMid, {}, {}, {});
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kLeaf));
+  ASSERT_EQ(Return::OK, cm_->configure_controller(kMid));
+
+  leaf_->set_children({kMid});
+  mid_->set_children({kLeaf});
+
+  // Both directions now exist: kLeaf -> kMid and kMid -> kLeaf.
   EXPECT_EQ(Return::ERROR, cm_->set_two_phase_execution(true));
   EXPECT_FALSE(cm_->two_phase_execution());
-  bool mentions_order = false;
+
+  bool mentions_cycle = false;
   for (const auto & rejection : cm_->two_phase_rejected_controllers())
   {
-    mentions_order |= rejection.reason.find("ordered AFTER its child") != std::string::npos;
+    mentions_cycle |= rejection.reason.find("CYCLE") != std::string::npos;
   }
-  EXPECT_TRUE(mentions_order);
+  EXPECT_TRUE(mentions_cycle) << "the refusal must name the actual cause";
 }
 
 TEST_F(TestTwoPhaseExecution, one_object_under_two_names_is_refused)

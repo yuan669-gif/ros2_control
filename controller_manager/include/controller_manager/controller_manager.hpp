@@ -662,9 +662,11 @@ private:
     /// Takes part in a reference edge that crosses the two-phase / native boundary, so the two ends
     /// would be ordered by different schedules.
     cross_mode_dependency,
-    /// The controller list puts a reference edge's two ends in the wrong order, so both passes would
-    /// walk that edge in the wrong direction and it would silently use the previous cycle's value.
-    unschedulable_order,
+    /// The reference edges contain a cycle, so no single linearisation exists and no pair of passes
+    /// can give both directions a fixed age. Unlike the controller list's order -- which the passes
+    /// no longer depend on, because they walk an order derived from these same edges -- this is a
+    /// property of the configuration itself.
+    cyclic_dependency,
     /// Two names in the controller list refer to ONE controller object, so a pass would advance that
     /// object once per name in the same cycle.
     duplicate_instance
@@ -706,6 +708,13 @@ private:
     unsigned int max_lag_cycles = 0;
     /// Immutable once published, so a reader in `update()` may dereference it without locking.
     std::shared_ptr<const std::vector<TwoPhaseEntry>> two_phase_entries;
+    /// Indices into `two_phase_entries`, ordered PARENTS BEFORE CHILDREN over the reference edges
+    /// inferred from claimed interfaces. The state pass walks it BACKWARD and the command pass
+    /// FORWARD, so the relative order of an edge is produced here rather than assumed of the
+    /// controller list. That is what lets a controller with no command interfaces -- which upstream
+    /// `controller_sorting()` places ahead of its parent -- be scheduled correctly, and it makes a
+    /// wrong list order unobservable instead of fatal.
+    std::shared_ptr<const std::vector<std::size_t>> two_phase_plan;
     /// Distinct rate buckets of `two_phase_entries`, ascending, precomputed at publication time so
     /// the control loop never has to derive them (and never allocates).
     std::shared_ptr<const std::vector<unsigned int>> two_phase_buckets;
@@ -718,7 +727,8 @@ private:
   /// Publish a complete new generation with ONE atomic store (non-real-time thread only).
   void publish_generation(
     bool two_phase_enabled, unsigned int max_lag_cycles,
-    std::shared_ptr<const std::vector<TwoPhaseEntry>> entries);
+    std::shared_ptr<const std::vector<TwoPhaseEntry>> entries,
+    std::shared_ptr<const std::vector<std::size_t>> plan = nullptr);
   /// The published generation (never null after construction).
   std::shared_ptr<const ExecutionGeneration> current_generation() const noexcept;
   /// The published entry set BY VALUE: the caller must own the snapshot for as long as it uses it.
@@ -726,7 +736,14 @@ private:
   /// Build the two-phase member set for a controller list. Never locks; non-real-time only.
   std::shared_ptr<const std::vector<TwoPhaseEntry>> build_two_phase_entries(
     const std::vector<ControllerSpec> & controllers, bool admission_enabled,
-    unsigned int max_lag_cycles) const;
+    unsigned int max_lag_cycles,
+    std::shared_ptr<const std::vector<std::size_t>> * plan_out = nullptr) const;
+  /// Topological order (parents before children) of the members over the reference edges inferred
+  /// from claimed interfaces, as CONTROLLER indices. `is_member` selects the nodes. Returns false and
+  /// names one member left in a cycle when no such order exists. Non-real-time only.
+  bool two_phase_plan_of(
+    const std::vector<ControllerSpec> & controllers, const std::vector<char> & is_member,
+    std::vector<std::size_t> & order, std::string * cycle_member) const;
   /// Build membership from a controller list the caller already owns, then publish a new generation.
   void rebuild_two_phase_entries(const std::vector<ControllerSpec> & controllers);
   /// Same, but with admission applied regardless of the current mode.
