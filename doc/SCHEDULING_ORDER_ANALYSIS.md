@@ -3,7 +3,15 @@
 日期：2026-10-03　分支：`humble-work`　对象：`feature/two-phase-manager` 的两趟调度
 与 `humble-work` 的 `StagedExecutionGroup`
 
-> **状态（2026-10-03）：§6 的改动决定「暂不做」。** 理由三条：
+> **状态更新（2026-10-03，同日晚）：§6 的改动已实现。** 触发条件之一命中了——用户实际要做一个
+> **纯状态发布者**（只向上传、不认领任何命令接口，典型估计器节点），而这正是上游排序启发式会排错、
+> 当时只能"拒绝"的那一类。改动已落地在 `feature/two-phase-manager`：配置期从边推导拓扑序
+> （`two_phase_plan_of`），两趟遍历这条序；`unschedulable_order` 随之**删除**，新增 `cyclic_dependency`
+> 用于"边本身无线性化"的情形。Gazebo 端到端在改动后**重测通过**（两趟 `0,0,0`、单趟 `0,1,2`）。
+> 下面 §6 的设计描述仍然有效，但"暂不做"的判断已被这次触发取代。实现中还发现一个上游崩溃，
+> 见 `feature/two-phase-manager` 的 `controller_manager/doc/upstream_finding_cyclic_chaining_stack_overflow.md`。
+>
+> **原状态（2026-10-03 早）：§6 的改动决定「暂不做」。** 理由三条：
 > 1. **触发概率低**：反例需要「导出了 reference 接口、但**不认领任何命令接口**的 chainable 控制器」。
 >    真实级联里叶子要驱动硬件 → 本身有命令接口 → 顺序正常（§1）。
 > 2. **失败方向是安全的**：不是静默跑错，而是**拒绝整个模式**（`unschedulable_order`，两端点名）。

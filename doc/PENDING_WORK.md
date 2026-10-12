@@ -259,9 +259,9 @@ controller_interface/include/controller_interface/two_phase_controller_interface
   只是配置期的字符串比较（非实时路径），代价却是"编进二进制 + 注册 + 声明 binding + 调模板"。
   **不做**——编译期能力保留为**校验**（`plan_matches_description` 每次激活生效），不变成新路径。
   理由全文见 `STATIC_ADMISSION_DESIGN_2026-10.md` §8。
-- **把两趟的「顺序来源」从列表换成「从边计算」**（`SCHEDULING_ORDER_ANALYSIS.md` §6）：它能消掉
-  `unschedulable_order` 并补上「纯状态发布者」这一能力缺口，但触发概率低、且当前失败方向是**拒绝**
-  （不是静默），摩擦已由可执行诊断降低。**暂不做**；触发条件与重新考虑入口写在该文档的状态头。
+- ~~把两趟的「顺序来源」从列表换成「从边计算」~~ **已完成 2026-10-03**（触发条件命中：用户要做纯状态
+  发布者）。`unschedulable_order` 已删除，新增 `cyclic_dependency`；Gazebo 重测通过。
+  实现中发现上游环形引用会爆栈崩溃（见 feature 分支的 upstream finding 文档）。
 - **用静态顺序替换 `controller_sorting()`（F6 的替换部分）**：它对**所有**配置生效，
   替换即全局行为变更；而两趟路径**已经校验**顺序并在会把边走反时**拒绝整个模式**
   （`unschedulable_order`，两端都报告），错顺序不会被静默执行。**不做**；改为把拒绝信息变成
